@@ -4,6 +4,7 @@
 #define USE_VGA_TEXT_MODE
 
 #include <stddef.h>
+#include <string.h>
 #include <stdbool.h>
 
 #include <CPU/IO.h>

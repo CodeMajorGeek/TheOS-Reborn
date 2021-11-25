@@ -7,6 +7,7 @@ set(KERNEL_SOURCES
     CPU/IO.c
     CPU/IDT.c
     CPU/ISR.S
+    CPU/ISR.c
 )
 
 set(LIBC_SOURCES

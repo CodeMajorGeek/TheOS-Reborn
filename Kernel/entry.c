@@ -10,4 +10,7 @@ void k_entry(const void* multiboot_info)
 
     TTY_puts(str);
 
+
+    uint64_t* err = 0xFFFFFFFFF;
+    err[0] = 0xDEADBEEF;
 }

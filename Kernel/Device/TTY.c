@@ -21,7 +21,7 @@ void TTY_clear(void)
 {
     TTY_row = 0;
     TTY_col = 0;
-    memsetw(VGA_BUFFER, vga_entry(' ', TTY_color), VGA_WIDTH * VGA_HEIGHT);
+    memsetw(TTY_buffer, vga_entry(' ', TTY_color), VGA_WIDTH * VGA_HEIGHT);
     TTY_update_cursor(TTY_col, TTY_row);
 }
 

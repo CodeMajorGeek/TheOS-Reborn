@@ -1,20 +1,27 @@
 .altmacro
 
-.extern abort
+.extern ISR_exception_handler
 .globl ISR_stub_table
 
 .section .text
 
+isr_common_stub:
+    callq ISR_exception_handler
+    sti
+    iretq
+
 .macro isr_err_stub no
     isr_stub_\no:
-        callq abort
-        iretq
+        pushq $\no
+        jmp isr_common_stub
 .endm
 
 .macro isr_no_err_stub no
     isr_stub_\no:
-        callq abort
-        iretq
+        cli
+        pushq $0
+        pushq $\no
+        jmp isr_common_stub
 .endm
 
 .macro isr_stub no

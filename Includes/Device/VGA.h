@@ -32,7 +32,7 @@ enum vga_color
     VGA_LIGHT_BROWN = 14
 };
 
-static const uint16_t* VGA_BUFFER = (uint16_t*) VGA_ADDRESS;
+static uint16_t* VGA_BUFFER = (uint16_t*) VGA_ADDRESS;
 
 static inline uint8_t vga_entry_color(enum vga_color fg, enum vga_color bg)
 {
