@@ -1,0 +1,29 @@
+#include <CPU/IDT.h>
+
+void IDT_init(void)
+{
+    idtr.base = &IDT[0];
+    idtr.limit = (uint16_t) sizeof(IDT_entry_t) * IDT_MAX_DESCRIPTORS - 1;
+
+    for (uint8_t vector = 0; vector < 32; ++vector)
+    {
+        IDT_set_descriptor(vector, ISR_stub_table[vector], 0x8E);
+        // vectors[vector] = TRUE;
+    }
+
+    __asm__ __volatile__("lidt %0" : : "m"(idtr));  // Load the new IDT.
+    __asm__ __volatile__("sti");                    // Set the interrupt FLAG.
+}
+
+void IDT_set_descriptor(uint8_t vector, void* isr, uint8_t flags)
+{
+    IDT_entry_t* desc = &IDT[vector];
+
+    desc->base_low      = (uint64_t) isr & 0xFFFF;
+    desc->kernel_cs     = KERNEL_CODE_SEGMENT;
+    desc->ist           = 0;
+    desc->attributes    = flags;
+    desc->base_mid      = ((uint64_t) isr >> 16) & 0xFFFF;
+    desc->base_high     = ((uint64_t) isr >> 32) & 0xFFFFFFFF;
+    desc->reserved      = 0;
+}

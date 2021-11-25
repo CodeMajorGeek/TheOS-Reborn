@@ -5,10 +5,13 @@ set(KERNEL_SOURCES
     entry.c
     Device/TTY.c
     CPU/IO.c
+    CPU/IDT.c
+    CPU/ISR.S
 )
 
 set(LIBC_SOURCES
     ../Userland/Libraries/LibC/string.c
+    ../Userland/Libraries/LibC/stdlib.c
 )
 
 set(SOURCES

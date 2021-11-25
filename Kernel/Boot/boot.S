@@ -168,6 +168,7 @@ kernel_stack_bottom:
 kernel_stack_top:
 
 .section .rodata
+
 # We define our GDTs in the rodata section.
 gdt64:
 # Null segment.
