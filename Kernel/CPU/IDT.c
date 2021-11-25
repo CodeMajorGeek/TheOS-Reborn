@@ -2,14 +2,11 @@
 
 void IDT_init(void)
 {
-    idtr.base = &IDT[0];
+    idtr.base = (uint64_t) &IDT[0];
     idtr.limit = (uint16_t) sizeof(IDT_entry_t) * IDT_MAX_DESCRIPTORS - 1;
 
-    for (uint8_t vector = 0; vector < 32; ++vector)
-    {
+    for (uint8_t vector = 0; vector < IDT_MAX_VECTOR; ++vector)
         IDT_set_descriptor(vector, ISR_stub_table[vector], 0x8E);
-        // vectors[vector] = TRUE;
-    }
 
     __asm__ __volatile__("lidt %0" : : "m"(idtr));  // Load the new IDT.
     __asm__ __volatile__("sti");                    // Set the interrupt FLAG.

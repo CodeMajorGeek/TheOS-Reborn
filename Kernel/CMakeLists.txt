@@ -6,8 +6,9 @@ set(KERNEL_SOURCES
     Device/TTY.c
     CPU/IO.c
     CPU/IDT.c
-    CPU/ISR.S
+    CPU/interrupts.S
     CPU/ISR.c
+    CPU/IRQ.c
 )
 
 set(LIBC_SOURCES

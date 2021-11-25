@@ -8,6 +8,8 @@
 
 #define IDT_MAX_DESCRIPTORS 256
 
+#define IDT_MAX_VECTOR      48
+
 typedef struct IDT_entry
 {
     uint16_t    base_low;   // The lower 0 to 15 bits of the ISR's address.
@@ -24,6 +26,14 @@ typedef struct IDTR
     uint16_t    limit;
     uint64_t    base;
 } __attribute__((packed)) IDTR_t;
+
+typedef struct interrupt_frame
+{
+    uint64_t int_no, err_code;
+    uint64_t rip, cs, eflags, userrsp, ss;
+} interrupt_frame_t;
+
+typedef void (*IRQ_t)(interrupt_frame_t*);
 
 extern void* ISR_stub_table[];
 
