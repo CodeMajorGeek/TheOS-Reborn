@@ -3,8 +3,15 @@
 
 #include <stdint.h>
 
+#define UNUSED_ADDRESS  0x80
+
 void IO_outb(uint16_t port, uint8_t value);
 
 uint8_t IO_inb(uint16_t port);
+
+static inline void IO_wait(void)
+{
+    IO_outb(UNUSED_ADDRESS, 0);
+}
 
 #endif

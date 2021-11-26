@@ -2,13 +2,16 @@
 #define _IDT_H
 
 #include <CPU/GDT.h>
+#include <Device/PIC.h>
 
 #include <stdint.h>
 #include <stdbool.h>
 
 #define IDT_MAX_DESCRIPTORS 256
 
-#define IDT_MAX_VECTOR      48
+#define IDT_MAX_VECTORS         48
+
+#define IRQ_BASE                0x20
 
 typedef struct IDT_entry
 {
@@ -32,8 +35,6 @@ typedef struct interrupt_frame
     uint64_t int_no, err_code;
     uint64_t rip, cs, eflags, userrsp, ss;
 } interrupt_frame_t;
-
-typedef void (*IRQ_t)(interrupt_frame_t*);
 
 extern void* ISR_stub_table[];
 

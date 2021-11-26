@@ -9,16 +9,19 @@
 
 irq_common_stub:
     callq IRQ_handler
+    addq $16, %rsp
     sti
     iretq
 
 isr_common_stub:
     callq ISR_exception_handler
+    addq $16, %rsp
     sti
     iretq
 
 .macro isr_err_stub no
     isr_stub_\no:
+        cli
         pushq $\no
         jmp isr_common_stub
 .endm
@@ -79,6 +82,7 @@ isr_no_err_stub 28
 isr_no_err_stub 29
 isr_err_stub    30
 isr_no_err_stub 31
+
 irq_stub 32, 0
 irq_stub 33, 1
 irq_stub 34, 2

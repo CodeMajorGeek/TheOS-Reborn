@@ -5,7 +5,9 @@ void IDT_init(void)
     idtr.base = (uint64_t) &IDT[0];
     idtr.limit = (uint16_t) sizeof(IDT_entry_t) * IDT_MAX_DESCRIPTORS - 1;
 
-    for (uint8_t vector = 0; vector < IDT_MAX_VECTOR; ++vector)
+    PIC_remap(IRQ_BASE, IRQ_BASE + 8);
+
+    for (uint8_t vector = 0; vector < IDT_MAX_VECTORS; ++vector)
         IDT_set_descriptor(vector, ISR_stub_table[vector], 0x8E);
 
     __asm__ __volatile__("lidt %0" : : "m"(idtr));  // Load the new IDT.

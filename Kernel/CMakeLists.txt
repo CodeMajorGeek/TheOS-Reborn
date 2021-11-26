@@ -8,7 +8,8 @@ set(KERNEL_SOURCES
     CPU/IDT.c
     CPU/interrupts.S
     CPU/ISR.c
-    CPU/IRQ.c
+    Device/PIC.c
+    Device/PIT.c
 )
 
 set(LIBC_SOURCES
