@@ -1,7 +1,6 @@
 #ifndef _ISR_H
 #define _ISR_H
 
-#include <Device/TTY.h>
 #include <CPU/IDT.h>
 #include <Device/PIC.h>
 
