@@ -7,16 +7,17 @@
 
 #include <stdio.h>
 #include <Device/APIC.h>
+#include <Debug/logger.h>
 
 void k_entry(const void* multiboot_info)
 {
     TTY_init();
-    COM_init();
+    logger_init();
     IDT_init();
 
     PIT_init();
 
-    puts(APIC_check() ? "TRUE" : "FALSE");
+    kputs(KDEBUG, APIC_check() ? "TRUE" : "FALSE");
 
     puts("Je suis un test !\n");
 

@@ -12,6 +12,7 @@ set(KERNEL_SOURCES
     Device/PIC.c
     Device/PIT.c
     Device/APIC.c
+    Debug/logger.c
 )
 
 set(LIBC_SOURCES
@@ -31,7 +32,6 @@ add_link_options(LINKER:-T ${CMAKE_CURRENT_SOURCE_DIR}/kernel.ld -nostdlib -n)
 
 add_compile_definitions(__THEOS_KERNEL)
 add_compile_definitions(__USE_QEMU)
-add_compile_definitions(__THEOS_PRINTK_DEV=PRINTK_COM)
 
 add_executable(Kernel ${SOURCES})
 set_target_properties(Kernel PROPERTIES LINK_DEPENDS ${CMAKE_CURRENT_SOURCE_DIR}/kernel.ld)
