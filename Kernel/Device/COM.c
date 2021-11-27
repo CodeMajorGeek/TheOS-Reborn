@@ -3,51 +3,54 @@
 
 #include <string.h>
 
-// Code taken from <https://wiki.osdev.org/Serial_Ports#Example_Code>
-
-bool COM_init(void)
+bool COM_init(uint8_t port)
 {
-    IO_outb(COM_PORT + 1, 0x00); // Disable all interrupts
-    IO_outb(COM_PORT + 3, 0x80); // Enable DLAB (set baud rate divisor)
-    IO_outb(COM_PORT + 0, 0x03); // Set divisor to 3 (lo byte) 38400 baud
-    IO_outb(COM_PORT + 1, 0x00); //                  (hi byte)
-    IO_outb(COM_PORT + 3, 0x03); // 8 bits, no parity, one stop bit
-    IO_outb(COM_PORT + 2, 0xC7); // Enable FIFO, clear them, with 14-byte threshold
-    IO_outb(COM_PORT + 4, 0x0B); // IRQs enabled, RTS/DSR set
-    IO_outb(COM_PORT + 4, 0x1E); // Set in loopback mode, test the serial chip
-    IO_outb(COM_PORT + 0, 0xAE); // Test serial chip (send byte 0xAE and check if serial returns same byte)
+    IO_outb(port + COM_INTERRUPT_OFFSET, 0x00);     // Disable all interrupts.
+    IO_outb(port + COM_CONTROL_OFFSET, 0x80);       // Enable DLAB (set baud rate divisor).
+    IO_outb(port + COM_DATA_OFFSET, 0x03);          // Set divisor to 3 (lo byte) 38400 baud.
+    IO_outb(port + COM_INTERRUPT_OFFSET, 0x00);     //                  (hi byte)           .
+    IO_outb(port + COM_CONTROL_OFFSET, 0x03);       // 8 bits, no parity, one stop bit.
+    IO_outb(port + COM_FIFO_OFFSET, 0xC7);          // Enable FIFO, clear them, with 14-byte threshold.
+    IO_outb(port + COM_MODEM_CTRL_OFFSET, 0x0B);    // IRQs enabled, RTS/DSR set.
 
-    // Check if serial is faulty (i.e: not same byte as sent)
-    if (IO_inb(COM_PORT + 0) != 0xAE)
-    {
+    /* Test serial chip (send byte 0xAE and check if serial returns same byte) */
+    IO_outb(port + COM_MODEM_CTRL_OFFSET, 0x1E);    // Set in loopback mode to test the serial chip.
+    COM_putc(port, TEST_LOOPBACK_BYTE);
+    if (COM_read(port) != TEST_LOOPBACK_BYTE)
         return false;
-    }
+
 
     // If serial is not faulty set it in normal operation mode
     // (not-loopback with IRQs enabled and OUT#1 and OUT#2 bits enabled)
-    IO_outb(COM_PORT + 4, 0x0F);
+    IO_outb(port + COM_MODEM_CTRL_OFFSET, 0x0F);
+    
     return true;
 }
 
-bool COM_transmit_empty()
+bool COM_transmit_empty(uint8_t port)
 {
-    return IO_inb(COM_PORT + 5) & 0x20;
+    return IO_inb(port + COM_MODEM_STATUS_OFFSET) & COM_STATUS_EMPTY_BIT; // Check the status of the com port by checking if STATUS_EMPTY_BIT is set.
 }
 
-void COM_putc(char c)
+void COM_putc(uint8_t port, char c)
 {
-    while(!COM_transmit_empty());
+    while(!COM_transmit_empty(port));
 
-    IO_outb(COM_PORT, c);
+    IO_outb(port, c);
 }
 
-void COM_write(const char *str, size_t len)
+void COM_write(uint8_t port, const char* str, size_t len)
 {
     for (size_t i = 0; i < len; ++i)
-        COM_putc(str[i]);
+        COM_putc(port, str[i]);
 }
 
-void COM_puts(const char *str)
+void COM_puts(uint8_t port, const char* str)
 {
-    COM_write(str, strlen(str));
+    COM_write(port, str, strlen(str));
+}
+
+char COM_read(uint8_t port)
+{
+    return IO_inb(port + COM_DATA_OFFSET);
 }
