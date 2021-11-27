@@ -1,16 +1,22 @@
 #ifndef _TTY_H
 #define _TTY_H
 
-#define USE_VGA_TEXT_MODE
-
 #include <stddef.h>
 #include <string.h>
 #include <stdbool.h>
 
 #include <CPU/IO.h>
 
+#define USE_VGA_TEXT_MODE
+#define USE_COM2_OUTPUT
+
 #ifdef USE_VGA_TEXT_MODE
 #include <Device/VGA.h>
+#endif
+
+#ifdef USE_COM2_OUTPUT
+#include <Device/COM.h>
+#define TTY_COM_PORT    COM2
 #endif
 
 void TTY_init(void);

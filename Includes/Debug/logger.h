@@ -10,7 +10,7 @@
 #endif
 
 #ifdef __USE_QEMU
-#define COM_PORT    COM1
+#define LOGGER_COM_PORT COM1
 #endif
 
 #define LEVEL_COUNT 4

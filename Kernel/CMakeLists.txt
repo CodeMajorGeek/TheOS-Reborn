@@ -13,6 +13,8 @@ set(KERNEL_SOURCES
     Device/PIT.c
     Device/APIC.c
     Debug/logger.c
+    CPU/MSR.c
+    CPU/MADT.c
 )
 
 set(LIBC_SOURCES

@@ -3,7 +3,7 @@
 void logger_init(void)
 {
 #ifdef __USE_QEMU
-    if (!COM_init(COM_PORT))
+    if (!COM_init(LOGGER_COM_PORT))
         abort();
 #endif
 }
@@ -11,9 +11,9 @@ void logger_init(void)
 void kputs(int level, const char* str)
 {
 #ifdef __USE_QEMU
-    COM_puts(COM_PORT, level_messages[level]);
-    COM_puts(COM_PORT, str);
-    COM_putc(COM_PORT, '\n');
+    COM_puts(LOGGER_COM_PORT, level_messages[level]);
+    COM_puts(LOGGER_COM_PORT, str);
+    COM_putc(LOGGER_COM_PORT, '\n');
 #else
     TTY_puts(level_messages[level]);
     TTY_puts(str);

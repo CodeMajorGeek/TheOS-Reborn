@@ -1,18 +1,20 @@
 #define ASM_FILE
 #include <Boot/multiboot2.h>
 
-.set HEADER_LEN,    mb2_hdr_end - mb2_hdr
-.set CHECKSUM,      -(MULTIBOOT2_HEADER_MAGIC + MULTIBOOT_ARCHITECTURE_I386 + HEADER_LEN)
+.set HEADER_LEN,        mb2_hdr_end - mb2_hdr
+.set CHECKSUM,          -(MULTIBOOT2_HEADER_MAGIC + MULTIBOOT_ARCHITECTURE_I386 + HEADER_LEN)
 
-.set TYPE,          0
-.set FLAGS,         0
-.set TAG_LEN,       8
+.set TYPE,              0
+.set FLAGS,             0
+.set TAG_LEN,           8
 
-.set ID_FLAG,       1 << 21
-.set LM_BIT,        1 << 29
-.set PAE_FLAG,      1 << 5
-.set EFER_MSR,      1 << 8
-.set PAGING_FLAG,   (1 << 31) | (1 << 0)
+.set ID_FLAG,           1 << 21
+.set LM_BIT,            1 << 29
+.set PAE_FLAG,          1 << 5
+.set EFER_MSR,          1 << 8
+.set PAGING_FLAG,       (1 << 31) | (1 << 0)
+
+.set CPUID_FLAG_MSR,    1 << 5
 
 .section .multiboot
 .align MULTIBOOT_HEADER_ALIGN
@@ -40,7 +42,8 @@ multiboot_entry:
 
     calll check_multiboot           # Check if this code was loaded using a MULTIBOOT2 compliant bootloader ("ERR: 0" show up if not).
     calll check_cpuid               # Check if the CPUID operand is avaliable on this CPU ("ERR: 1" show up if not).
-    calll check_long_mode           # Check if the long mode is supported on this CPU to determine if it's a 64 bits on ("ERR: 2" show up if not).
+    calll check_msr                 # Check if the MSR is avaliable on this CPU ("ERR: 2" show up if not).
+    calll check_long_mode           # Check if the long mode is supported on this CPU to determine if it's a 64 bits on ("ERR: 3" show up if not).
 
     calll setup_page_tables         # It's an x86_64 CPU architecture so let's setup the 4 tables for paging.
     calll enable_paging             # Let's enable the paging on the CPU.
@@ -54,7 +57,7 @@ multiboot_entry:
 check_multiboot:
     cmpl $MULTIBOOT2_BOOTLOADER_MAGIC, %eax # Just have to compare eax with the MULTIBOOT2 bootloader magic number.
     jne check_multiboot.no_multiboot        # If not equal, this code was loaded by a not MULTIBOOT2 compliant bootloader, then print show "ERR: 0".
-    ret
+    retl
 check_multiboot.no_multiboot:
     movb $'0', %al
     jmp error
@@ -83,9 +86,19 @@ check_cpuid:
     # If they are the same, it's mean no changes so CPUID is not avaliable on this CPU, then show "ERR: 1".
     xorl %ecx, %eax
     jz check_cpuid.no_cpuid
-    ret
+    retl
 check_cpuid.no_cpuid:
     movb $'1', %al
+    jmp error
+
+check_msr:
+    movl $1, %eax               # Use the CPUID code 1.
+    cpuid
+    andl $CPUID_FLAG_MSR, %edx  # Check if edx have the MSR FLAG BIT set.
+    jz check_msr.no_msr         # If not, then show up "ERR: 2".
+    retl
+check_msr.no_msr:
+    movb $'2', %al
     jmp error
 
 check_long_mode:
@@ -99,9 +112,9 @@ check_long_mode:
     cpuid
     testl $LM_BIT, %edx             # Check if the LM_BIT is set, if it isn't, then show "ERR: 2".
     jz check_long_mode.no_long_mode
-    ret
+    retl
 check_long_mode.no_long_mode:
-    movb $'2', %al
+    movb $'3', %al
     jmp error
 
 setup_page_tables:
@@ -125,7 +138,7 @@ setup_page_tables.map_pd_table:
     cmpl $512, %ecx                 # Countinue while ecx < 512.
     jne setup_page_tables.map_pd_table
 
-    ret
+    retl
 
 enable_paging:
     movl $pml4, %eax                # Store the pml4 table offset into eax.
@@ -144,7 +157,7 @@ enable_paging:
     orl $PAGING_FLAG, %eax          # Flip the PAGING bit to 1.
     movl %eax, %cr0                 # Push back to cr0.
 
-    ret
+    retl
 
 error:
     # Just print "ERR: [al]" to show up error codes.

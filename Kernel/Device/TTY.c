@@ -38,6 +38,10 @@ void TTY_put_entry_at(char c, uint8_t color, size_t x, size_t y)
 
 void TTY_putc(char c)
 {
+#ifdef USE_COM2_OUTPUT
+    COM_putc(TTY_COM_PORT, c);
+#endif
+
     // TODO: implement a nice TTY scroll mechanism.
     if (TTY_row >= VGA_HEIGHT)
     {
