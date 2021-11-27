@@ -19,5 +19,5 @@ void PIT_phase(uint16_t frequency)
 
 static void PIT_callback(interrupt_frame_t* frame)
 {
-    puts("IRQ0 fired !\n");
+    // puts("IRQ0 fired !\n");
 }

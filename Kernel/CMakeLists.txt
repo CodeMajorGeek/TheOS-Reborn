@@ -11,6 +11,7 @@ set(KERNEL_SOURCES
     CPU/ISR.c
     Device/PIC.c
     Device/PIT.c
+    Device/APIC.c
 )
 
 set(LIBC_SOURCES

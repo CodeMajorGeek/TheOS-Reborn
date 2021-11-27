@@ -6,6 +6,7 @@
 #include <CPU/IO.h>
 
 #include <stdio.h>
+#include <Device/APIC.h>
 
 void k_entry(const void* multiboot_info)
 {
@@ -14,6 +15,8 @@ void k_entry(const void* multiboot_info)
     IDT_init();
 
     PIT_init();
+
+    puts(APIC_check() ? "TRUE" : "FALSE");
 
     puts("Je suis un test !\n");
 
