@@ -1,5 +1,7 @@
 #include <CPU/ISR.h>
 
+#include <stdio.h>
+
 IRQ_t IRQ_handlers[MAX_IRQ_ENTRIES];
 
 void ISR_register_IRQ(int index, IRQ_t irq)
@@ -13,12 +15,12 @@ void ISR_exception_handler(interrupt_frame_t frame)
 {
     if (frame.int_no < MAX_KNOWN_EXCEPTIONS)
     {
-        TTY_puts(exception_messages[frame.int_no]);
-        TTY_puts(" Exception Handled !\n");
+        puts(exception_messages[frame.int_no]);
+        puts(" Exception Handled !\n");
     }
     else
     {
-        TTY_puts("Reserved Exception Handled !\n");
+        puts("Reserved Exception Handled !\n");
     }
 
     abort();

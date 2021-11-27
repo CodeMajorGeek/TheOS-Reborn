@@ -1,7 +1,6 @@
 #ifndef _PIT_H
 #define _PIT_H
 
-#include <Device/TTY.h>
 #include <CPU/ISR.h>
 #include <CPU/IO.h>
 

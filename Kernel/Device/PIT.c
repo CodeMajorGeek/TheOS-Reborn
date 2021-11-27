@@ -1,5 +1,7 @@
 #include <Device/PIT.h>
 
+#include <stdio.h>
+
 void PIT_init(void)
 {
     PIT_phase(1); // Fire the PIT every 1ms.
@@ -17,5 +19,5 @@ void PIT_phase(uint16_t frequency)
 
 static void PIT_callback(interrupt_frame_t* frame)
 {
-    TTY_puts("IRQ0 fired !\n");
+    puts("IRQ0 fired !\n");
 }

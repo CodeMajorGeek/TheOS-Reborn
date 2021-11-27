@@ -5,18 +5,17 @@
 #include <CPU/ISR.h>
 #include <CPU/IO.h>
 
+#include <stdio.h>
+
 void k_entry(const void* multiboot_info)
 {
     TTY_init();
+    COM_init();
     IDT_init();
 
     PIT_init();
 
-    const char* str = "Je suis un test !\n";
-    TTY_puts(str);
-
-    COM_init();
-    COM_puts(str);
+    puts("Je suis un test !\n");
 
     while (TRUE)
         __asm__ __volatile__("hlt");
