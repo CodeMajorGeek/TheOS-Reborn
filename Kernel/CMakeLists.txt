@@ -3,6 +3,7 @@ set(KERNEL_ARCH x86_64)
 set(KERNEL_SOURCES 
     Boot/boot.S
     entry.c
+    Device/COM.c
     Device/TTY.c
     CPU/IO.c
     CPU/IDT.c

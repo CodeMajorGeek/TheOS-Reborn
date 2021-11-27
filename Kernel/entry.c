@@ -1,4 +1,5 @@
 #include <Device/TTY.h>
+#include <Device/COM.h>
 #include <CPU/IDT.h>
 #include <Device/PIT.h>
 #include <CPU/ISR.h>
@@ -13,6 +14,9 @@ void k_entry(const void* multiboot_info)
 
     const char* str = "Je suis un test !\n";
     TTY_puts(str);
+
+    COM_init();
+    COM_puts(str);
 
     while (TRUE)
         __asm__ __volatile__("hlt");
