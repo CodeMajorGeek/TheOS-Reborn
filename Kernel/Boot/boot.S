@@ -1,5 +1,5 @@
 #define ASM_FILE
-#include <Boot/multiboot2.h>
+#include <Multiboot2/multiboot2.h>
 
 .set HEADER_LEN,        mb2_hdr_end - mb2_hdr
 .set CHECKSUM,          -(MULTIBOOT2_HEADER_MAGIC + MULTIBOOT_ARCHITECTURE_I386 + HEADER_LEN)
@@ -39,6 +39,8 @@ mb2_hdr_end:
 multiboot_entry:   
     movl $kernel_stack_top, %esp    # Let's define our stack pointer where the kernel stack will be.
     movl $0, %ebp
+
+    movl %ebx, %edi                 # Keep the Multiboot2 info ptr for the k_entry function.
 
     calll check_multiboot           # Check if this code was loaded using a MULTIBOOT2 compliant bootloader ("ERR: 0" show up if not).
     calll check_cpuid               # Check if the CPUID operand is avaliable on this CPU ("ERR: 1" show up if not).
@@ -222,7 +224,7 @@ long_mode_entry:    # Finally, we can do some stuff into long mode !
     movw %ax, %fs
     movw %ax, %gs
 
-    pushq %rbx      # Let's push the MULTIBOOT2 multiboot_info offset onto the stack to parse it in the C as argument.
+    pushq %rdi      # Let's push the MULTIBOOT2 multiboot_info offset onto the stack to parse it in the C as argument.
     callq k_entry   # Now we can call our k_entry C function.
     
 end:                # This part should be never be reached !

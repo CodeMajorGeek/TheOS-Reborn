@@ -2,6 +2,7 @@
 #define _MADT_H
 
 #include <stdint.h>
+#include <string.h>
 
 #define MADT_LAPIC_MAX_ENTRIES  256
 

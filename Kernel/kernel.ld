@@ -4,15 +4,15 @@ OUTPUT_FORMAT(elf64-x86-64)
 SECTIONS {
     . = 1M;
 
-    .rodata : ALIGN(4K)
-    {
-        *(.multiboot)
-        *(.rodata)
-    }
-
     .text : ALIGN(4K)
     {
+        KEEP(*(.multiboot))
         *(.text)
+    }
+
+    .rodata : ALIGN(4K)
+    {
+        *(.rodata)
     }
     
     .data : ALIGN(4K)
