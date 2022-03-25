@@ -1,0 +1,6 @@
+#ifndef _USERMODE_H
+#define _USERMODE_H
+
+extern void switch_to_user_mode(void);
+
+#endif

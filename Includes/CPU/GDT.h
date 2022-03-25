@@ -1,7 +1,16 @@
 #ifndef _GDT_H
 #define _GDT_H
 
+#define NULL_SEGMENT        0
 #define KERNEL_CODE_SEGMENT 0x08
 #define KERNEL_DATA_SEGMENT 0x10
+#define USER_CODE_SEGMENT   0x18
+#define USER_DATA_SEGMENT   0x20
+
+#define NULL_SEGMENT_SELECTOR           0
+#define KERNEL_CODE_SEGMENT_SELECTOR    1
+#define KERNEL_DATA_SEGMENT_SELECTOR    2
+#define USER_CODE_SEGMENT_SELECTOR      3 | 0b11
+#define USER_DATA_SEGMENT_SELECTOR      4 | 0b11
 
 #endif

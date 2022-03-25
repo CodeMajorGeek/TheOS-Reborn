@@ -16,6 +16,20 @@
 
 .set CPUID_FLAG_MSR,    1 << 5
 
+# Access bits.
+.set PRESENT,           1 << 7
+.set NOT_SYS,           1 << 4
+.set EXEC,              1 << 3
+.set DC,                1 << 2
+.set RW,                1 << 1
+.set ACCESSED,          1 << 0
+.set RING_USER,         1 << 5
+ 
+# Flags bits.
+.set GRAN_4K,           1 << 7
+.set SZ_32,             1 << 6
+.set LONG_MODE,         1 << 5
+
 .section .multiboot
 .align MULTIBOOT_HEADER_ALIGN
 
@@ -171,6 +185,11 @@ error:
 
 .section .bss
 .align 4096
+
+.globl pml4
+.globl pdp
+.globl pd
+
 # We store our pages into the bss section (3 page of 4KiB with an 4KiB alignement).
 pml4:
     .zero 4096
@@ -183,6 +202,7 @@ kernel_stack_bottom:
 kernel_stack_top:
 
 .section .rodata
+.align 8
 
 # We define our GDTs in the rodata section.
 gdt64:
@@ -190,22 +210,37 @@ gdt64:
     .quad 0
 
 # Kernel code segment.
-.equ gdt64.kernel_code, . - gdt64 # 0x08
-    .word 0             # limit 0 to 15 bits.
-    .word 0             # base first 0 to 15 bits.
-    .byte 0             # base 16 to 23 bits.
-    .byte 0b10011010    # access byte.
-    .byte 0b10100000    # high 4 bits for flags and lower 4 bits for limit.
-    .byte 0             # base last 24 to 31 bits.
+.equ gdt64.kernel_code, . - gdt64           # 0x08
+    .long 0xFFFF                            # limit & base 0 to 15 bits.
+    .byte 0                                 # base 16 to 23 bits.
+    .byte PRESENT | NOT_SYS | EXEC | RW     # access byte.
+    .byte GRAN_4K | LONG_MODE | 0xF         # high 4 bits for flags and lower 4 bits for limit.
+    .byte 0                                 # base last 24 to 31 bits.
 
 # Kernel data segment.
-.equ gdt64.kernel_data, . - gdt64 # 0x10
-    .word 0
-    .word 0
+.equ gdt64.kernel_data, . - gdt64           # 0x10
+    .long 0xFFFF
     .byte 0
-    .byte 0b10011010
-    .byte 0b10000000
+    .byte PRESENT | NOT_SYS | RW
+    .byte GRAN_4K | SZ_32 | 0xF
     .byte 0
+
+# User code segment.
+.equ gdt64.user_code, . - gdt64             #0x18
+    .long 0xFFFF
+    .byte 0
+    .byte PRESENT | NOT_SYS | EXEC | RING_USER
+    .byte LONG_MODE
+    .byte 0
+
+# User code segment.
+.equ gdt64.user_data, . - gdt64             #0x20
+    .long 0xFFFF
+    .byte 0
+    .byte PRESENT | NOT_SYS | RW | RING_USER
+    .byte LONG_MODE
+    .byte 0
+
 gdt64.pointer:
     .word . - gdt64 - 1
     .quad gdt64

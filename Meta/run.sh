@@ -10,6 +10,6 @@ qemu-system-x86_64 -chardev stdio,id=char0,mux=on,logfile=serial.log,signal=off 
 	-smp 2 \
 	-device VGA,vgamem_mb=64 \
 	-cdrom TheOS.iso \
-	-s
+	-s -S
 
 exit 0

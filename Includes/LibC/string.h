@@ -6,6 +6,7 @@
 
 void* memset(void* ptr, int value, size_t count);
 void* memsetw(void* ptr, int value, size_t count);
+void* memsetq(void* ptr, int value, size_t count);
 
 size_t strlen(const char* str);
 

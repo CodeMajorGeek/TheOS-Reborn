@@ -15,8 +15,9 @@ set(KERNEL_SOURCES
     Debug/logger.c
     CPU/MSR.c
     CPU/MADT.c
-    Multiboot2/multiboot2_info.c
     CPU/ACPI.c
+    Memory/Memory.c
+    CPU/user_mode.S
 )
 
 set(LIBC_SOURCES

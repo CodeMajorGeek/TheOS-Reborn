@@ -18,6 +18,15 @@ void* memsetw(void* ptr, int value, size_t count)
     return ptr;
 }
 
+void* memsetq(void* ptr, int value, size_t count)
+{
+    uint64_t* buf = (uint64_t*) ptr;
+    for (size_t i = 0; i < count; ++i)
+        buf[i] = (uint64_t) value;
+
+    return ptr;
+}
+
 size_t strlen(const char* str)
 {
     size_t len = 0;
