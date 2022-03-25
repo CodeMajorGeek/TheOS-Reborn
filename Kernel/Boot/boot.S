@@ -190,6 +190,13 @@ error:
 .globl pdp
 .globl pd
 
+.globl kernel_heap_bottom
+.globl kernel_heap_top
+
+kernel_heap_top:
+    .space 4096 * 8 # 32KiB of kernel heap.
+kernel_heap_bottom:
+
 # We store our pages into the bss section (3 page of 4KiB with an 4KiB alignement).
 pml4:
     .zero 4096
@@ -198,7 +205,7 @@ pdp:
 pd:
     .zero 4096
 kernel_stack_bottom:
-    .space 4096 * 16 # 64Kb of kernel stack.
+    .space 4096 * 16 # 64KiB of kernel stack.
 kernel_stack_top:
 
 .section .rodata

@@ -17,7 +17,10 @@ typedef struct malloc_header
     struct malloc_header_t* prev_malloc_header;        // The previous malloc header.
 } malloc_header_t;
 
-void kmem_init(uint32_t, uint32_t);
+extern void* kernel_heap_bottom;
+extern void* kernel_heap_top;
+
+void kmem_init(void);
 
 void* kmalloc(uint32_t);
 void kfree(void*);

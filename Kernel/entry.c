@@ -29,26 +29,26 @@ __attribute__((__noreturn__)) void k_entry(const void* mbt2_info)
     IDT_init();
     PIT_init();
 
-    kmem_init(mem_lower, mem_upper);
+    kmem_init();
 
-    /*
+    
     void* ptr1 = kmalloc(128);
-    printf("Addresse ptr1: %H\n\n", ptr1);
+    printf("Addresse ptr1: 0x%H\n\n", ptr1);
 
     void* ptr2 = kmalloc(3);
-    printf("Addresse ptr2: %H\n\n", ptr2);
+    printf("Addresse ptr2: 0x%H\n\n", ptr2);
 
     kfree(ptr1);
 
-    void* ptr3 = kmalloc(6);
-    printf("Addresse ptr3: %H\n", ptr3);
-    */
+    void* ptr3 = kmalloc(90);
+    printf("Addresse ptr3: 0x%H\n", ptr3);
+    
 
     kputs(KDEBUG, APIC_check() ? "TRUE" : "FALSE");
 
     puts("Je suis un test !\n");
 
-    switch_to_user_mode();
+    // switch_to_user_mode();
 
     while (TRUE)
         __asm__ __volatile__("hlt");

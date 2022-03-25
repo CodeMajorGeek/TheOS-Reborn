@@ -1,22 +1,16 @@
 #include <Memory/Memory.h>
 
-static uint32_t mem_upper_size;
-
-static uint64_t* mem_upper_offset;
-static uint64_t* mem_upper_end;
+static uint32_t heap_size; // In bytes.
 
 static uint64_t* mem_last_addr; 
 
-void kmem_init(uint32_t mem_lower, uint32_t mem_upper)
+void kmem_init(void)
 {
-    mem_upper_offset = mem_lower * 1024;    // The end of the lower memory address where upper memory start.
-    mem_upper_size = mem_upper * 1024;      // Total upper memory size in bytes.
+    heap_size = kernel_heap_bottom - kernel_heap_top;
 
-    mem_upper_end = mem_upper_offset + mem_upper_size;
-
-    malloc_header_t* first_malloc_header = (malloc_header_t*) mem_upper_offset;
+    malloc_header_t* first_malloc_header = (malloc_header_t*) kernel_heap_top;
     first_malloc_header->state = MEM_STATE_AVALIABLE;
-    first_malloc_header->size = mem_upper_size - sizeof (malloc_header_t);
+    first_malloc_header->size = heap_size - sizeof (malloc_header_t);
     first_malloc_header->prev_malloc_header = 0;
 
     mem_last_addr = first_malloc_header + sizeof (malloc_header_t);
@@ -27,12 +21,9 @@ void* kmalloc(uint32_t size)
     if (size <= 0)
         return -1;
 
-    malloc_header_t* malloc_header = (malloc_header_t*) mem_upper_offset;
-    while (malloc_header < mem_upper_end - sizeof (malloc_header_t))
+    malloc_header_t* malloc_header = (malloc_header_t*) kernel_heap_top;
+    while (malloc_header < kernel_heap_bottom - sizeof (malloc_header_t))
     {
-        printf("Malloc ptr: %H\n", malloc_header);
-        printf("Malloc size: %d\n", malloc_header->size);
-        printf("Malloc state: %d\n", malloc_header->state);
         if (malloc_header->state == MEM_STATE_AVALIABLE)
         {
             if (malloc_header->size == size)
@@ -43,16 +34,14 @@ void* kmalloc(uint32_t size)
             }
             else if (malloc_header->size > size + (sizeof (malloc_header_t) + 1))
             {
-                malloc_header_t* new_bottom_malloc = (malloc_header_t*) 0xA0500;
+                malloc_header_t* new_bottom_malloc = (malloc_header_t*) malloc_header + size + sizeof (malloc_header_t);
                 new_bottom_malloc->state = MEM_STATE_AVALIABLE;
                 new_bottom_malloc->size = malloc_header->size - (size + sizeof (malloc_header_t));
                 new_bottom_malloc->prev_malloc_header = malloc_header;
-                printf("New btm malloc ptr: %H\n", new_bottom_malloc);
-                printf("New btm malloc size: %d\n", (size + sizeof (malloc_header_t)));
 
                 malloc_header->state = MEM_STATE_USED;
                 malloc_header->size = size;
-
+                
                 return malloc_header + sizeof (malloc_header_t);
             }
         }
@@ -65,7 +54,7 @@ void* kmalloc(uint32_t size)
 
 void kfree(void* ptr)
 {
-    malloc_header_t* malloc_header = (malloc_header_t*) (ptr - sizeof (malloc_header_t));
+    malloc_header_t* malloc_header = (malloc_header_t*) ptr - sizeof (malloc_header_t);
     
     if (malloc_header->state == MEM_STATE_AVALIABLE)
         return;
