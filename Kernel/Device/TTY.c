@@ -42,11 +42,10 @@ void TTY_putc(char c)
     COM_putc(TTY_COM_PORT, c);
 #endif
 
-    // TODO: implement a nice TTY scroll mechanism.
-    if (TTY_row >= VGA_HEIGHT)
+    if (TTY_row >= VGA_HEIGHT - 1)
     {
-        TTY_clear();
-        TTY_row = 0;
+        memcpyw(TTY_buffer, TTY_buffer + VGA_WIDTH, VGA_WIDTH * (VGA_HEIGHT - 2) * sizeof (uint16_t));
+        --TTY_row;
     }
 
     switch (c)
@@ -70,13 +69,14 @@ void TTY_putc(char c)
         if (TTY_row >= VGA_HEIGHT)
             TTY_row = 0;
     }
+
+    TTY_update_cursor(TTY_col, TTY_row);
 }
 
 void TTY_write(const char* str, size_t len)
 {
     for (size_t i = 0; i < len; ++i)
         TTY_putc(str[i]);
-    TTY_update_cursor(TTY_col, TTY_row);
 }
 
 void TTY_puts(const char* str)

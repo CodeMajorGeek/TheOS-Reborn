@@ -2,6 +2,7 @@
 #define _MEMORY_H
 
 #include <stdint.h>
+#include <stddef.h>
 #include <string.h>
 
 #define MEM_STATE_USED      1
@@ -19,7 +20,7 @@ extern void* kernel_heap_top;
 
 void kmem_init(void);
 
-void* kmalloc(uint32_t);
+void* kmalloc(size_t);
 void kfree(void*);
 
 

@@ -2,7 +2,7 @@
 
 /* We are building stdio as kernel (not for long, we will use syscall later on). */
 
-int putchar(int c)
+int putc(int c)
 {
     TTY_putc(c);
     return (char) c;
@@ -162,16 +162,20 @@ int __printf(char* buff, size_t buff_len, const char* __restrict format, va_list
 
 int printf(const char* __restrict format, ...)
 {
-    /* TODO: find an algorithm to determine the ideal buffer length. */
     int result = EOF;
-    char buff[255];
+    /* TODO: find an algorithm to determine the ideal buffer length. */
     size_t len = 255;
+
+    char buf[len];
+    memset(buf, '\0', len);
 
     va_list parameters;
     va_start(parameters, format);
 
-    result = __printf(buff, len, format, parameters);
-    puts(buff);
+    result = __printf(buf, len, format, parameters);
+    
+    for (int i = 0; i < strlen(buf); i++)
+        putc(buf[i]);
 
     va_end(parameters);
 

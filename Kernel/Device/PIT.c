@@ -1,5 +1,9 @@
 #include <Device/PIT.h>
 
+#include <stdio.h>
+
+static uint32_t ticks = 0;
+
 void PIT_init(void)
 {
     PIT_phase(1); // Fire the PIT every 1ms.
@@ -15,7 +19,17 @@ void PIT_phase(uint16_t frequency)
     IO_outb(PIT_CHANNEL0_DATA, divisor >> 8);
 }
 
+void PIT_sleep_ms(uint32_t ms)
+{
+    ticks = 0;
+
+    printf(""); // TEMP: needed to work (tempo).
+
+    while (ticks <= ms)
+        __asm__ ("nop");
+}
+
 static void PIT_callback(interrupt_frame_t* frame)
 {
-    // puts("IRQ0 fired !\n");
+    ++ticks;
 }

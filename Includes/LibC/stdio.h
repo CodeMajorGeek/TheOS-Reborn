@@ -13,7 +13,7 @@
 #define DECIMAL     10
 #define HEXADECIMAL 16
 
-int putchar(int c);
+int putc(int c);
 int puts(const char* s);
 
 int __printf(char*, size_t, const char* __restrict, va_list);

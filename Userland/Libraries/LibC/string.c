@@ -27,6 +27,36 @@ void* memsetq(void* ptr, int value, size_t count)
     return ptr;
 }
 
+void* memcpy(void* dest, void* src, size_t count)
+{
+    uint8_t* d = dest;
+    const uint8_t* s = src;
+    while (count--)
+        *d++ = *s++;
+
+    return dest;
+}
+
+void* memcpyw(void* dest, void* src, size_t count)
+{
+    uint16_t* d = dest;
+    const uint16_t* s = src;
+    while (count--)
+        *d++ = *s++;
+
+    return dest;
+}
+
+void* memcpyq(void* dest, void* src, size_t count)
+{
+    uint64_t* d = dest;
+    const uint64_t* s = src;
+    while (count--)
+        *d++ = *s++;
+
+    return dest;
+}
+
 size_t strlen(const char* str)
 {
     size_t len = 0;
@@ -34,6 +64,11 @@ size_t strlen(const char* str)
         len++;
 
     return len;
+}
+
+char* strcpy(char* __restrict dest, const char * __restrict src)
+{
+    return memcpy(dest, src, strlen(src));
 }
 
 int memcmp(const void* aptr, const void* bptr, size_t size)

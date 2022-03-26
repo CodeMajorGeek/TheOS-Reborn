@@ -35,10 +35,10 @@ __attribute__((__noreturn__)) void k_entry(const void* mbt2_info)
     kmem_init();
     
     void* ptr1 = kmalloc(128);
-    printf("Addresse ptr1: 0x%H\n\n", ptr1);
+    printf("Addresse ptr1: 0x%H\n", ptr1);
 
     void* ptr2 = kmalloc(3);
-    printf("Addresse ptr2: 0x%H\n\n", ptr2);
+    printf("Addresse ptr2: 0x%H\n", ptr2);
 
     kfree(ptr1);
 
@@ -47,7 +47,13 @@ __attribute__((__noreturn__)) void k_entry(const void* mbt2_info)
     
     kprintf(KDEBUG, "APIC disponible : %B\n", APIC_check());
 
-    puts("Je suis un test !\n");
+    int i = 0;
+    while (TRUE)
+    {
+        printf("Je suis un test n-%d !\n", i++);
+
+        PIT_sleep_ms(50);
+    }
 
     // switch_to_user_mode();
 
