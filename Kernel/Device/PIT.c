@@ -1,7 +1,5 @@
 #include <Device/PIT.h>
 
-#include <stdio.h>
-
 void PIT_init(void)
 {
     PIT_phase(1); // Fire the PIT every 1ms.

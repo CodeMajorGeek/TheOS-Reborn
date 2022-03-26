@@ -2,7 +2,7 @@
 
 static uint32_t heap_size; // In bytes.
 
-static uint64_t* mem_last_addr; 
+static void* mem_last_addr; 
 
 void kmem_init(void)
 {
@@ -19,10 +19,10 @@ void kmem_init(void)
 void* kmalloc(uint32_t size)
 {
     if (size <= 0)
-        return -1;
+        return (void*) NULL;
 
     malloc_header_t* malloc_header = (malloc_header_t*) kernel_heap_top;
-    while (malloc_header < kernel_heap_bottom - sizeof (malloc_header_t))
+    while (malloc_header < (malloc_header_t*) (kernel_heap_bottom - sizeof (malloc_header_t)))
     {
         if (malloc_header->state == MEM_STATE_AVALIABLE)
         {
@@ -37,7 +37,7 @@ void* kmalloc(uint32_t size)
                 malloc_header_t* new_bottom_malloc = (malloc_header_t*) malloc_header + size + sizeof (malloc_header_t);
                 new_bottom_malloc->state = MEM_STATE_AVALIABLE;
                 new_bottom_malloc->size = malloc_header->size - (size + sizeof (malloc_header_t));
-                new_bottom_malloc->prev_malloc_header = malloc_header;
+                new_bottom_malloc->prev_malloc_header = (struct malloc_header*) &malloc_header;
 
                 malloc_header->state = MEM_STATE_USED;
                 malloc_header->size = size;
@@ -49,7 +49,7 @@ void* kmalloc(uint32_t size)
         malloc_header += malloc_header->size + sizeof(malloc_header_t);
     }
 
-    return -1;
+    return (void*) NULL;
 }
 
 void kfree(void* ptr)
@@ -59,13 +59,13 @@ void kfree(void* ptr)
     if (malloc_header->state == MEM_STATE_AVALIABLE)
         return;
 
-    malloc_header_t* prev_malloc_header = malloc_header->prev_malloc_header;
+    malloc_header_t* prev_malloc_header = ((malloc_header_t*) &malloc_header->prev_malloc_header);
     malloc_header_t* next_malloc_header = malloc_header + malloc_header->size + sizeof (malloc_header_t);
 
     if (next_malloc_header->state == MEM_STATE_AVALIABLE)
         malloc_header->size += next_malloc_header->size + sizeof (malloc_header_t);
 
-    if (prev_malloc_header != -1 && prev_malloc_header->state == MEM_STATE_AVALIABLE)
+    if (prev_malloc_header != (malloc_header_t*) NULL && prev_malloc_header->state == MEM_STATE_AVALIABLE)
     {
         prev_malloc_header->size += malloc_header->size + sizeof (malloc_header_t);
         malloc_header = prev_malloc_header;

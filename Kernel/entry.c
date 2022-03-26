@@ -11,6 +11,7 @@
 #include <CPU/ACPI.h>
 #include <Memory/Memory.h>
 #include <CPU/UserMode.h>
+#include <Device/Keyboard.h>
 
 #include <stdio.h>
 
@@ -29,8 +30,9 @@ __attribute__((__noreturn__)) void k_entry(const void* mbt2_info)
     IDT_init();
     PIT_init();
 
-    kmem_init();
+    keyboard_init();
 
+    kmem_init();
     
     void* ptr1 = kmalloc(128);
     printf("Addresse ptr1: 0x%H\n\n", ptr1);

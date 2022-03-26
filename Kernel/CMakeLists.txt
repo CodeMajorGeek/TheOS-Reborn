@@ -18,6 +18,7 @@ set(KERNEL_SOURCES
     CPU/ACPI.c
     Memory/Memory.c
     CPU/user_mode.S
+    Device/Keyboard.c
 )
 
 set(LIBC_SOURCES
