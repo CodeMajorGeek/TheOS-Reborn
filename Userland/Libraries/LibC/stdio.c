@@ -162,8 +162,9 @@ int __printf(char* buff, size_t buff_len, const char* __restrict format, va_list
 
 int printf(const char* __restrict format, ...)
 {
+    /* TODO: find an algorithm to determine the ideal buffer length. */
     int result = EOF;
-    char buff[255]; // TODO: find an algorithm to determine the ideal buff length.
+    char buff[255];
     size_t len = 255;
 
     va_list parameters;
@@ -177,7 +178,7 @@ int printf(const char* __restrict format, ...)
     return result;
 }
 
-int sprintf(char* str, const char* format, ...)
+int sprintf(char* str, const char* __restrict format, ...)
 {
     int result = EOF;
 
@@ -185,6 +186,20 @@ int sprintf(char* str, const char* format, ...)
     va_start(parameters, format);
 
     result = __printf(str, NULL, format, parameters);
+
+    va_end(parameters);
+
+    return result;
+}
+
+int snprintf(char* str, size_t size, const char* __restrict format, ...)
+{
+    int result = EOF;
+
+    va_list parameters;
+    va_start(parameters, format);
+
+    result = __printf(str, size, format, parameters);
 
     va_end(parameters);
 

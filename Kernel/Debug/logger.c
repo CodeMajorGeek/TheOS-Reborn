@@ -36,7 +36,7 @@ void kputs(int level, const char* str)
 
 void kprintf(int level, const char* restrict format, ...)
 {
-    /* TODO: find an algorithm to determine the ideal buff length. */
+    /* TODO: find an algorithm to determine the ideal buffer length. */
     char buff[255];
     size_t len = 255;
 

@@ -18,7 +18,8 @@ int puts(const char* s);
 
 int __printf(char*, size_t, const char* __restrict, va_list);
 int printf(const char* __restrict, ...);
-int sprintf(char*, const char*, ...);
+int sprintf(char*, const char* __restrict, ...);
+int snprintf(char*, size_t, const char* __restrict, ...);
 
 char* itoa(int, char*, size_t, unsigned int);
 
