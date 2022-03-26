@@ -10,7 +10,7 @@ static bool TTY_cursor_enabled;
 
 void TTY_init(void)
 {
-    TTY_color = vga_entry_color(VGA_LIGHT_GREEN, VGA_BLACK);
+    TTY_set_color(vga_entry_color(VGA_LIGHT_GREEN, VGA_BLACK));
     TTY_buffer = VGA_BUFFER;
     TTY_cursor_enabled = FALSE;
     TTY_clear();

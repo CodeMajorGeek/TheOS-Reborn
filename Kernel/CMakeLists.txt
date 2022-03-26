@@ -19,6 +19,7 @@ set(KERNEL_SOURCES
     Memory/Memory.c
     CPU/user_mode.S
     Device/Keyboard.c
+    Device/ATA.c
 )
 
 set(LIBC_SOURCES

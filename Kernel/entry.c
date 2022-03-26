@@ -12,6 +12,7 @@
 #include <Memory/Memory.h>
 #include <CPU/UserMode.h>
 #include <Device/Keyboard.h>
+#include <Device/ATA.h>
 
 #include <stdio.h>
 
@@ -30,31 +31,11 @@ __attribute__((__noreturn__)) void k_entry(const void* mbt2_info)
     IDT_init();
     PIT_init();
 
-    keyboard_init();
-
     kmem_init();
+
+    keyboard_init();
+    ATA_init();
     
-    void* ptr1 = kmalloc(128);
-    printf("Addresse ptr1: 0x%H\n", ptr1);
-
-    void* ptr2 = kmalloc(3);
-    printf("Addresse ptr2: 0x%H\n", ptr2);
-
-    kfree(ptr1);
-
-    void* ptr3 = kmalloc(90);
-    printf("Addresse ptr3: 0x%H\n", ptr3);
-    
-    kprintf(KDEBUG, "APIC disponible : %B\n", APIC_check());
-
-    int i = 0;
-    while (TRUE)
-    {
-        printf("Je suis un test n-%d !\n", i++);
-
-        PIT_sleep_ms(50);
-    }
-
     // switch_to_user_mode();
 
     while (TRUE)

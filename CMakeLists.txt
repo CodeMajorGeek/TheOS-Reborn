@@ -50,6 +50,12 @@ add_custom_target(install-run
 	USES_TERMINAL
 )
 
+add_custom_target(create-disk
+	COMMAND chmod +x ${CMAKE_SOURCE_DIR}/Meta/disk.sh
+	COMMAND ${CMAKE_SOURCE_DIR}/Meta/disk.sh
+	USES_TERMINAL
+)
+
 include_directories(.)
 include_directories(${CMAKE_BINARY_DIR})
 
