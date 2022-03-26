@@ -45,8 +45,7 @@ __attribute__((__noreturn__)) void k_entry(const void* mbt2_info)
     void* ptr3 = kmalloc(90);
     printf("Addresse ptr3: 0x%H\n", ptr3);
     
-
-    kputs(KDEBUG, APIC_check() ? "TRUE" : "FALSE");
+    kprintf(KDEBUG, "APIC disponible : %B\n", APIC_check());
 
     puts("Je suis un test !\n");
 

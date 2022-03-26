@@ -16,8 +16,9 @@
 int putchar(int c);
 int puts(const char* s);
 
-int __printf(bool (*dest)(const char* data, size_t length, bool uppercase), const char* __restrict, va_list);
+int __printf(char*, size_t, const char* __restrict, va_list);
 int printf(const char* __restrict, ...);
+int sprintf(char*, const char*, ...);
 
 char* itoa(int, char*, size_t, unsigned int);
 

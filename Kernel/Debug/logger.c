@@ -36,5 +36,22 @@ void kputs(int level, const char* str)
 
 void kprintf(int level, const char* restrict format, ...)
 {
+    /* TODO: find an algorithm to determine the ideal buff length. */
+    char buff[255];
+    size_t len = 255;
 
+    va_list parameters;
+    va_start(parameters, format);
+
+    __printf(buff, len, format, parameters);
+
+    va_end(parameters);
+
+#ifdef __USE_QEMU
+    COM_puts(LOGGER_COM_PORT, level_messages[level]);
+    COM_puts(LOGGER_COM_PORT, buff);
+#else
+    TTY_puts(level_messages[level]);
+    TTY_puts(buff);
+#endif
 }

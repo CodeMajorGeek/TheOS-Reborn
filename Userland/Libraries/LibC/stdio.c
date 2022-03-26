@@ -2,19 +2,6 @@
 
 /* We are building stdio as kernel (not for long, we will use syscall later on). */
 
-static bool print(const char* data, size_t length, bool uppercase)
-{
-    unsigned char* bytes = (unsigned char*) data;
-    for (size_t i = 0; i < length; i++)
-    {
-        if (uppercase && bytes[i] >= 'a' && bytes[i] <= 'z')
-            bytes[i] -= 32; // lower case -> upper case.
-        if (putchar(bytes[i]) == EOF)
-            return false;
-    }
-    return true;
-}
-
 int putchar(int c)
 {
     TTY_putc(c);
@@ -27,13 +14,16 @@ int puts(const char *s)
     return 1;
 }
 
-int __printf(bool (*dest)(const char* data, size_t length, bool uppercase), const char* __restrict format, va_list parameters)
+int __printf(char* buff, size_t buff_len, const char* __restrict format, va_list parameters)
 {
     int written = 0;
 
+    if (!buff_len)
+        buff_len = INT_MAX;
+
     while (*format != '\0')
     {
-        size_t maxrem = INT_MAX - written;
+        size_t maxrem = buff_len - written;
         if (format[0] != '%' || format[1] == '%')
         {
             if (format[0] == '%')
@@ -46,8 +36,10 @@ int __printf(bool (*dest)(const char* data, size_t length, bool uppercase), cons
                 // TODO: Implement OVERFLOW.
                 return EOF;
             }
-            if (!dest(format, amount, false))
-                return EOF;
+            
+            for (size_t i = 0; i < amount; i++)
+                buff[written + i] = format[i];
+            
             format += amount;
             written += amount;
             continue;
@@ -64,8 +56,8 @@ int __printf(bool (*dest)(const char* data, size_t length, bool uppercase), cons
                 // TODO: Implement OVERFLOW.
                 return EOF;
             }
-            if (!dest(&c, sizeof(c), uppercase))
-                return EOF;
+
+            buff[written] = uppercase && c >= 'a' && c <= 'z' ? c - 32 : c;
             written++;
         }
         else if (*format == 's' || *format == 'S')
@@ -79,8 +71,10 @@ int __printf(bool (*dest)(const char* data, size_t length, bool uppercase), cons
                 // TODO: Implement OVERFLOW.
                 return EOF;
             }
-            if (!dest(str, len, uppercase))
-                return EOF;
+
+            for (size_t i = 0; i < len; i++)
+                buff[written + i] = uppercase && str[i] >= 'a' && str[i] <= 'z' ? str[i] - 32 : str[i];
+               
             written += len;
         }
         else if (*format == 'd')
@@ -97,8 +91,10 @@ int __printf(bool (*dest)(const char* data, size_t length, bool uppercase), cons
                 // TODO: Implement OVERFLOW.
                 return EOF;
             }
-            if (!dest(digits, len, false))
-                return EOF;
+
+            for (size_t i = 0; i < len; i++)
+                 buff[written + i] = digits[i];
+
             written += len;
         }
         else if (*format == 'b' || *format == 'B')
@@ -115,8 +111,11 @@ int __printf(bool (*dest)(const char* data, size_t length, bool uppercase), cons
                 // TODO: Implement OVERFLOW.
                 return EOF;
             }
-            if (!dest(str, len, uppercase))
-                return EOF;
+            
+            for (size_t i = 0; i < len; i++)
+                buff[written + i] = 
+                    uppercase ? str[i] - 32 : format[i];
+
             written += len;
         }
         else if (*format == 'h' || *format == 'H')
@@ -134,8 +133,10 @@ int __printf(bool (*dest)(const char* data, size_t length, bool uppercase), cons
                 // TODO: Implement OVERFLOW.
                 return EOF;
             }
-            if (!dest(digits, len, uppercase))
-                return EOF;
+
+            for (size_t i = 0; i < len; i++)
+                buff[written + i] = uppercase && digits[i] >= 'a' && digits[i] <= 'z' ? digits[i] - 32 : digits[i];
+
             written += len;
         }
         else
@@ -147,23 +148,43 @@ int __printf(bool (*dest)(const char* data, size_t length, bool uppercase), cons
                 // TODO: Implement OVERFLOW.
                 return EOF;
             }
-            if (!dest(format, len, false))
-                return EOF;
+            
+            for (size_t i = 0; i < len; i++)
+                buff[written + i] = format[i];
+
             written += len;
             format += len;
         }
     }
+
     return written;
 }
 
 int printf(const char* __restrict format, ...)
 {
-    int result;
+    int result = EOF;
+    char buff[255]; // TODO: find an algorithm to determine the ideal buff length.
+    size_t len = 255;
 
     va_list parameters;
     va_start(parameters, format);
 
-    result = __printf(print, format, parameters);
+    result = __printf(buff, len, format, parameters);
+    puts(buff);
+
+    va_end(parameters);
+
+    return result;
+}
+
+int sprintf(char* str, const char* format, ...)
+{
+    int result = EOF;
+
+    va_list parameters;
+    va_start(parameters, format);
+
+    result = __printf(str, NULL, format, parameters);
 
     va_end(parameters);
 

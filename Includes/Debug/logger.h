@@ -2,6 +2,7 @@
 #define _LOGGER_H
 
 #include <stdlib.h>
+#include <stdio.h>
 
 #ifdef __USE_QEMU
 #include <Device/COM.h>
