@@ -33,3 +33,8 @@ void kputs(int level, const char* str)
     TTY_putc('\n');
 #endif
 }
+
+void kprintf(int level, const char* restrict format, ...)
+{
+
+}

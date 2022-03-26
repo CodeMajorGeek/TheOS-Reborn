@@ -27,11 +27,8 @@ int puts(const char *s)
     return 1;
 }
 
-int printf(const char* restrict format, ...)
+int __printf(bool (*dest)(const char* data, size_t length, bool uppercase), const char* __restrict format, va_list parameters)
 {
-    va_list parameters;
-    va_start(parameters, format);
-
     int written = 0;
 
     while (*format != '\0')
@@ -49,7 +46,7 @@ int printf(const char* restrict format, ...)
                 // TODO: Implement OVERFLOW.
                 return EOF;
             }
-            if (!print(format, amount, false))
+            if (!dest(format, amount, false))
                 return EOF;
             format += amount;
             written += amount;
@@ -67,7 +64,7 @@ int printf(const char* restrict format, ...)
                 // TODO: Implement OVERFLOW.
                 return EOF;
             }
-            if (!print(&c, sizeof(c), uppercase))
+            if (!dest(&c, sizeof(c), uppercase))
                 return EOF;
             written++;
         }
@@ -82,7 +79,7 @@ int printf(const char* restrict format, ...)
                 // TODO: Implement OVERFLOW.
                 return EOF;
             }
-            if (!print(str, len, uppercase))
+            if (!dest(str, len, uppercase))
                 return EOF;
             written += len;
         }
@@ -100,7 +97,7 @@ int printf(const char* restrict format, ...)
                 // TODO: Implement OVERFLOW.
                 return EOF;
             }
-            if (!print(digits, len, false))
+            if (!dest(digits, len, false))
                 return EOF;
             written += len;
         }
@@ -118,7 +115,7 @@ int printf(const char* restrict format, ...)
                 // TODO: Implement OVERFLOW.
                 return EOF;
             }
-            if (!print(str, len, uppercase))
+            if (!dest(str, len, uppercase))
                 return EOF;
             written += len;
         }
@@ -126,7 +123,7 @@ int printf(const char* restrict format, ...)
         {
             bool uppercase = *format == 'H';
             format++;
-            int v = va_arg(parameters, bool);
+            int v = va_arg(parameters, int);
             
             char digits[7]; // max digits size in int hexadecimal.
             itoa(v, digits, sizeof(digits), HEXADECIMAL);
@@ -137,7 +134,7 @@ int printf(const char* restrict format, ...)
                 // TODO: Implement OVERFLOW.
                 return EOF;
             }
-            if (!print(digits, len, uppercase))
+            if (!dest(digits, len, uppercase))
                 return EOF;
             written += len;
         }
@@ -150,14 +147,27 @@ int printf(const char* restrict format, ...)
                 // TODO: Implement OVERFLOW.
                 return EOF;
             }
-            if (!print(format, len, false))
+            if (!dest(format, len, false))
                 return EOF;
             written += len;
             format += len;
         }
     }
-    va_end(parameters);
     return written;
+}
+
+int printf(const char* __restrict format, ...)
+{
+    int result;
+
+    va_list parameters;
+    va_start(parameters, format);
+
+    result = __printf(print, format, parameters);
+
+    va_end(parameters);
+
+    return result;
 }
 
 char* itoa(int value, char* buf, size_t length, unsigned int base)

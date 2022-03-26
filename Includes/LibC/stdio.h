@@ -14,10 +14,11 @@
 #define HEXADECIMAL 16
 
 int putchar(int c);
-
 int puts(const char* s);
 
+int __printf(bool (*dest)(const char* data, size_t length, bool uppercase), const char* __restrict, va_list);
 int printf(const char* __restrict, ...);
+
 char* itoa(int, char*, size_t, unsigned int);
 
 #endif

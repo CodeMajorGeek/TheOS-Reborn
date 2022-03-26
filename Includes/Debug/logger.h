@@ -35,4 +35,6 @@ void logger_init(void);
 void kputc(int level, char c);
 void kputs(int level, const char* str);
 
+void kprintf(int level, const char* restrict format, ...);
+
 #endif
