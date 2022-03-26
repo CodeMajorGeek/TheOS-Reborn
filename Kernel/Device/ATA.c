@@ -8,7 +8,7 @@ void ATA_init(void)
     IO_outb(ATA_SECONDARY_CTRL_BUS, 0);
 
     ATA_Device_t dev = { ATA_PRIMARY_IO_BUS, ATA_PRIMARY_CTRL_BUS };
-    int devtype = ATA_detect_devtype(0, &dev);
+    int devtype = ATA_detect_devtype(128, &dev);
 
     printf("The ATA device type is: %d\n", devtype);
 }

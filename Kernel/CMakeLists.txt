@@ -20,6 +20,7 @@ set(KERNEL_SOURCES
     CPU/user_mode.S
     Device/Keyboard.c
     Device/ATA.c
+    Device/AHCI.c
 )
 
 set(LIBC_SOURCES
