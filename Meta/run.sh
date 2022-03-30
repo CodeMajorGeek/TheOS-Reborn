@@ -7,6 +7,7 @@
 [ -z "$THEOS_DISK_NAME" ] && THEOS_DISK_NAME="disk.img"
 
 qemu-system-x86_64 -chardev stdio,id=char0,mux=on,logfile=serial.log,signal=off -serial chardev:char0 -mon chardev=char0 \
+	-enable-kvm \
 	-m $THEOS_RAM_SIZE \
 	-cpu $THEOS_QEMU_CPU \
 	-smp 2 \

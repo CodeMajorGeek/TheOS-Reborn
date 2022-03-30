@@ -2,12 +2,17 @@
 
 static HBA_MEM_t* abar;
 
+void AHCI_init(void)
+{
+    ISR_register_IRQ(IRQ10, AHCI_callback);
+}
+
 void AHCI_probe_port(HBA_MEM_t* abar_temp)
 {
 	// Search disk in implemented ports
 	uint32_t pi = abar_temp->pi;
 	int i = 0;
-	while (i<32)
+	while (i < 32)
 	{
 		if (pi & 1)
 		{
@@ -70,7 +75,7 @@ void AHCI_port_rebase(HBA_PORT_t* port, int portno)
 	// Command list maxim size = 32*32 = 1K per port
 	port->clb = AHCI_BASE + (portno<<10);
 	port->clbu = 0;
-	memset((void*)(port->clb), 0, 1024);
+	memset((void*) (port->clb), 0, 1024);
  
 	// FIS offset: 32K+256*portno
 	// FIS entry size = 256 bytes per port
@@ -191,7 +196,7 @@ bool AHCI_read(HBA_PORT_t* port, uint32_t startl, uint32_t starth, uint32_t coun
 	port->ci = 1<<slot;	// Issue command
  
 	// Wait for completion
-	while (1)
+	while (TRUE)
 	{
 		// In some longer duration reads, it may be helpful to spin on the DPS bit 
 		// in the PxIS port field as well (1 << 5)
@@ -229,4 +234,22 @@ int AHCI_find_cmdslot(HBA_PORT_t* port)
 	}
 	trace_ahci("Cannot find free command list entry\n");
 	return -1;
+}
+
+static void AHCI_callback(interrupt_frame_t* frame)
+{
+    trace_ahci("AHCI INTERRUPT TRIGGERED !\n");
+
+    if (abar->ports[0].is & HBA_PxIS_TFES)
+        trace_ahci("Read disk error !\n");
+
+    trace_ahci("\tTFD=[%d],\n", ((HBA_PORT_t*) &abar->ports[0])->tfd);
+    trace_ahci("\tSSTS=[%d],\n", ((HBA_PORT_t*) &abar->ports[0])->ssts);
+    trace_ahci("\tIE=[%d],\n", ((HBA_PORT_t*) &abar->ports[0])->ie);
+    trace_ahci("\tSERR=[%d],\n", ((HBA_PORT_t*) &abar->ports[0])->serr);
+    trace_ahci("\tIS=[%d]\n", ((HBA_PORT_t*) &abar->ports[0])->is);
+
+    abar->ports[0].is = 0xFFFF;
+
+    while (TRUE);
 }

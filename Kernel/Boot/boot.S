@@ -66,7 +66,7 @@ multiboot_entry:
 
     lgdtl (gdt64.pointer)           # Now setup the GDTs to load our different segment of memory.
 
-    jmpl $gdt64.kernel_code,$long_mode_entry    # Let's do a far jump to long mode (64 bits) at the kernel code segment.
+    jmpl $gdt64.kernel_code, $long_mode_entry   # Let's do a far jump to long mode (64 bits) at the kernel code segment.
 
     jmp end                                     # Should not be reached !
 
@@ -186,16 +186,8 @@ error:
 .section .bss
 .align 4096
 
-.globl pml4
-.globl pdp
-.globl pd
-
 .globl kernel_heap_bottom
 .globl kernel_heap_top
-
-kernel_heap_top:
-    .space 4096 * 8 # 32KiB of kernel heap.
-kernel_heap_bottom:
 
 # We store our pages into the bss section (3 page of 4KiB with an 4KiB alignement).
 pml4:
@@ -204,8 +196,9 @@ pdp:
     .zero 4096
 pd:
     .zero 4096
+
 kernel_stack_bottom:
-    .space 4096 * 16 # 64KiB of kernel stack.
+    .space 4096 * 16    # 64KiB of kernel stack.
 kernel_stack_top:
 
 .section .rodata
@@ -237,7 +230,7 @@ gdt64:
     .long 0xFFFF
     .byte 0
     .byte PRESENT | NOT_SYS | EXEC | RING_USER
-    .byte LONG_MODE
+    .byte LONG_MODE | 0xF
     .byte 0
 
 # User code segment.
@@ -245,7 +238,7 @@ gdt64:
     .long 0xFFFF
     .byte 0
     .byte PRESENT | NOT_SYS | RW | RING_USER
-    .byte LONG_MODE
+    .byte LONG_MODE | 0xF
     .byte 0
 
 gdt64.pointer:
@@ -258,8 +251,10 @@ gdt64.pointer:
 .extern k_entry
 
 long_mode_entry:    # Finally, we can do some stuff into long mode !
-    # Let's zeroing all the segment registers (ax, ss, ds, es, fs and gs).
-    movw $0, %ax
+    cli
+
+    # Let's set all the segments registers (ax, ss, ds, es, fs and gs) to the data descritor.
+    movw $gdt64.kernel_data, %ax 
     movw %ax, %ss
     movw %ax, %ds
     movw %ax, %es

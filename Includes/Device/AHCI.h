@@ -1,6 +1,8 @@
 #ifndef _AHCI_H
 #define _AHCI_H
 
+#include <CPU/ISR.h>
+
 #include <stdint.h>
 #include <stdbool.h>
 #include <string.h>
@@ -346,5 +348,7 @@ void AHCI_stop_cmd(HBA_PORT_t* port);
 
 bool AHCI_read(HBA_PORT_t* port, uint32_t startl, uint32_t starth, uint32_t count, uint16_t* buf);
 int AHCI_find_cmdslot(HBA_PORT_t* port);
+
+static void AHCI_callback(interrupt_frame_t* frame);
 
 #endif

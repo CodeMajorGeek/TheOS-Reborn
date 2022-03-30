@@ -9,29 +9,36 @@
 #include <Device/APIC.h>
 #include <Debug/logger.h>
 #include <CPU/ACPI.h>
-#include <Memory/Memory.h>
+#include <Memory/PMM.h>
 #include <CPU/UserMode.h>
 #include <Device/Keyboard.h>
 #include <Device/ATA.h>
+#include <Device/AHCI.h>
+#include <CPU/PCI.h>
 
 #include <stdio.h>
 
 void read_multiboot2_info(const void*);
 
-static uint32_t mem_lower;
-static uint32_t mem_upper;
+extern void* kernel_start;
+extern void* kernel_end;
 
 __attribute__((__noreturn__)) void k_entry(const void* mbt2_info)
 {
     TTY_init();
     logger_init();
 
-    read_multiboot2_info(mbt2_info);
+    printf("Kernel start at 0x%H and end at 0x%H\n", kernel_start, kernel_end);
 
     IDT_init();
     PIT_init();
 
-    kmem_init();
+    PMM_init((uint64_t) kernel_start, (uint64_t) kernel_end);
+    read_multiboot2_info(mbt2_info);
+
+    printf("Je suis un petit test ! :)\n");
+
+    PCI_init();
 
     keyboard_init();
     ATA_init();
@@ -57,10 +64,22 @@ void read_multiboot2_info(const void* mbt2_info)
     {
         switch (tag->type)
         {
-            case MULTIBOOT_TAG_TYPE_BASIC_MEMINFO:
-                struct multiboot_tag_basic_meminfo* meminfo = (struct multiboot_tag_basic_meminfo*) tag;
-                mem_lower = meminfo->mem_lower;
-                mem_upper = meminfo->mem_upper;
+            case MULTIBOOT_TAG_TYPE_MMAP:
+                multiboot_memory_map_t *mmap;
+      
+                for (mmap = ((struct multiboot_tag_mmap *) tag)->entries; (multiboot_uint8_t *) mmap < (multiboot_uint8_t *) tag + tag->size;
+                    mmap = (multiboot_memory_map_t *) ((unsigned long) mmap + ((struct multiboot_tag_mmap *) tag)->entry_size))
+                {
+                    if (mmap->type == MULTIBOOT_MEMORY_AVAILABLE)
+                    {
+                        printf("MMAP avaliable found at addr 0x%H%H with size of 0x%H%H !\n",
+                            (unsigned) (mmap->addr >> 32),
+                            (unsigned) (mmap->addr & 0xffffffff),
+                            (unsigned) (mmap->len >> 32),
+                            (unsigned) (mmap->len & 0xffffffff));
+                        PMM_init_region(mmap->addr, mmap->len);
+                    }   
+                }
                 break;
         }
     }

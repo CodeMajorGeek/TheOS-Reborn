@@ -2,22 +2,20 @@ ENTRY(multiboot_entry)
 OUTPUT_FORMAT(elf64-x86-64)
 
 SECTIONS {
-    . = 1M;
+    kernel_start = .;
+    kernel_mem = 1M + kernel_start;
 
-    .text : ALIGN(4K)
+    . = kernel_mem + SIZEOF_HEADERS;
+
+    .text :
     {
         KEEP(*(.multiboot))
         *(.text)
     }
 
-    .rodata : ALIGN(4K)
+    .rodata :
     {
         *(.rodata)
-    }
-    
-    .data : ALIGN(4K)
-    {
-        *(.data)
     }
 
     .bss : ALIGN(4K)
@@ -25,7 +23,13 @@ SECTIONS {
         *(.bss)
     }
 
+    .data :
+    {
+        *(.data)
+    }
+
     _end = .;
+    kernel_end = _end;
 
     /DISCARD/ :
     {

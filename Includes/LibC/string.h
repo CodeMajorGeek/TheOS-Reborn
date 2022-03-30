@@ -6,7 +6,7 @@
 
 void* memset(void* ptr, int value, size_t count);
 void* memsetw(void* ptr, int value, size_t count);
-void* memsetq(void* ptr, int value, size_t count);
+void* memsetq(void* ptr, uint64_t value, size_t count);
 
 void* memcpy(void* dest, void* src, size_t count);
 void* memcpyw(void* dest, void* src, size_t count);

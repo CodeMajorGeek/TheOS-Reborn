@@ -16,11 +16,13 @@ set(KERNEL_SOURCES
     CPU/MSR.c
     CPU/MADT.c
     CPU/ACPI.c
-    Memory/Memory.c
+    Memory/PMM.c
+    Memory/VMM.c
     CPU/user_mode.S
     Device/Keyboard.c
     Device/ATA.c
     Device/AHCI.c
+    CPU/PCI.c
 )
 
 set(LIBC_SOURCES
