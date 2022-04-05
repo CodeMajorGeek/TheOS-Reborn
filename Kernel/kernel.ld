@@ -1,35 +1,52 @@
 ENTRY(multiboot_entry)
-OUTPUT_FORMAT(elf64-x86-64)
 
-SECTIONS {
-    kernel_start = .;
-    kernel_mem = 1M + kernel_start;
+PHDRS
+{
+    boot PT_LOAD;
+    text PT_LOAD;
+    data PT_LOAD;
+    got PT_LOAD;
+    bss PT_LOAD;
+}
 
-    . = kernel_mem + SIZEOF_HEADERS;
+SECTIONS
+{
+    PROVIDE(kernel_start = 1M);
 
-    .text :
+    . = kernel_start + SIZEOF_HEADERS;
+
+    .boot ALIGN(4K) : AT (ADDR(.boot))
     {
         KEEP(*(.multiboot))
+    } :boot
+
+    .text ALIGN(4K) : AT (ADDR(.text))
+    {
         *(.text)
-    }
+    } :text
 
-    .rodata :
+    .rodata ALIGN(4K) : AT(ADDR(.rodata))
     {
-        *(.rodata)
-    }
+        *(.rodata*)
+    } :data
 
-    .bss : ALIGN(4K)
+    .data ALIGN(4K) : AT(ADDR(.data))
     {
+        *(.data*)
+    } :data
+
+    .got ALIGN(4K) : AT(ADDR(.got))
+    {
+        *(.got*)
+    } :got
+
+    .bss ALIGN(4K) (NOLOAD) : AT(ADDR(.bss))
+    {
+        *(COMMON)
         *(.bss)
-    }
-
-    .data :
-    {
-        *(.data)
-    }
-
-    _end = .;
-    kernel_end = _end;
+    } :bss
+    
+    PROVIDE(kernel_end = .);
 
     /DISCARD/ :
     {

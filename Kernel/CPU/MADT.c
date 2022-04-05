@@ -1,5 +1,7 @@
 #include <CPU/MADT.h>
 
+#include <string.h>
+
 void MADT_detect_cores(uint8_t* rsdt)
 {
     uint8_t* ptr = rsdt + 36; 

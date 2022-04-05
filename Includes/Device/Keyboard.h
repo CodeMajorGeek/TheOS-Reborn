@@ -2,7 +2,6 @@
 #define _KEYBOARD_H
 
 #include <CPU/ISR.h>
-#include <CPU/IO.h>
 
 #include <stdbool.h>
 #include <stdint.h>

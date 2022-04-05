@@ -1,5 +1,9 @@
 #include <Device/APIC.h>
 
+#include <CPU/MSR.h>
+
+#include <cpuid.h>
+
 bool APIC_check(void)
 {
     uint32_t unused, edx;

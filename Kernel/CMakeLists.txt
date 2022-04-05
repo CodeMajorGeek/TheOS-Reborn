@@ -1,28 +1,49 @@
 set(KERNEL_ARCH x86_64)
 
-set(KERNEL_SOURCES 
-    Boot/boot.S
-    entry.c
-    Device/COM.c
-    Device/TTY.c
+set(KERNEL_BOOT_SOURCES
+    Boot/Bootloader.S
+)
+
+set(KERNEL_CPU_SOURCES
     CPU/IO.c
     CPU/IDT.c
-    CPU/interrupts.S
+    CPU/Interrupts.S
     CPU/ISR.c
-    Device/PIC.c
-    Device/PIT.c
-    Device/APIC.c
-    Debug/logger.c
     CPU/MSR.c
     CPU/MADT.c
     CPU/ACPI.c
-    Memory/PMM.c
-    Memory/VMM.c
-    CPU/user_mode.S
+    CPU/UserMode.S
+    CPU/PCI.c
+)
+
+set(KERNEL_DEBUG_SOURCES
+    Debug/Logger.c
+)
+
+set(KERNEL_DEVICES_SOURCES
+    Device/COM.c
+    Device/TTY.c
+    Device/PIC.c
+    Device/PIT.c
+    Device/APIC.c
     Device/Keyboard.c
     Device/ATA.c
     Device/AHCI.c
-    CPU/PCI.c
+)
+
+set(KERNEL_MEMORY_SOURCES
+    Memory/PMM.c
+    Memory/KMem.c
+    Memory/VMM.c
+)
+
+set(KERNEL_SOURCES
+    Entry.c
+    ${KERNEL_BOOT_SOURCES}
+    ${KERNEL_CPU_SOURCES}
+    ${KERNEL_DEBUG_SOURCES}
+    ${KERNEL_DEVICES_SOURCES}
+    ${KERNEL_MEMORY_SOURCES}
 )
 
 set(LIBC_SOURCES

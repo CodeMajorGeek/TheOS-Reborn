@@ -1,5 +1,8 @@
 #include <CPU/PCI.h>
 
+#include <CPU/IO.h>
+#include <Device/AHCI.h>
+
 static PCI_func_t PCI_AHCI;
 
 static void* PCI_pages_for_ahci_start;

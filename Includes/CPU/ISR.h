@@ -2,10 +2,6 @@
 #define _ISR_H
 
 #include <CPU/IDT.h>
-#include <Device/PIC.h>
-
-#include <stdint.h>
-#include <stdlib.h>
 
 #define MAX_KNOWN_EXCEPTIONS    19
 

@@ -1,8 +1,6 @@
 #ifndef _ATA_H
 #define _ATA_H
 
-#include <CPU/IO.h>
-
 #include <stdint.h>
 
 typedef struct ATA_Device

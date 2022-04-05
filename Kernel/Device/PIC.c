@@ -1,5 +1,8 @@
 #include <Device/PIC.h>
 
+#include <CPU/IO.h>
+#include <Device/TTY.h>
+
 void PIC_remap(int offset1, int offset2)
 {
     IO_outb(PIC1_COMMAND, ICW1_INIT | ICW1_ICW4);   // Starts the initialization sequence (in cascade mode).

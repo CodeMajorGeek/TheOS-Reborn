@@ -1,5 +1,9 @@
 #include <Device/COM.h>
 
+#include <CPU/IO.h>
+
+#include <string.h>
+
 bool COM_init(uint16_t port)
 {
     IO_outb(port + COM_INTERRUPT_OFFSET, 0x00);     // Disable all interrupts.

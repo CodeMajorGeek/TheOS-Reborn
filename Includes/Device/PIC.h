@@ -1,9 +1,6 @@
 #ifndef _PIC_H
 #define _PIC_H
 
-#include <CPU/IO.h>
-#include <Device/TTY.h>
-
 #include <stdint.h>
 
 #define PIC1_ADDRESS    0x20        // IO base address for master PIC.

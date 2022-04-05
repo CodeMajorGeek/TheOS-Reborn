@@ -1,5 +1,7 @@
 #include <Device/ATA.h>
 
+#include <CPU/IO.h>
+
 #include <stdio.h>
 
 void ATA_init(void)

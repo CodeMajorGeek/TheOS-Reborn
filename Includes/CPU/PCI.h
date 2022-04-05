@@ -1,9 +1,6 @@
 #ifndef _PCI_H
 #define _PCI_H
 
-#include <CPU/IO.h>
-#include <Device/AHCI.h>
-
 #include <stdint.h>
 #include <stdbool.h>
 

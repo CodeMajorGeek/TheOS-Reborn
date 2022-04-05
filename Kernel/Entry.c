@@ -7,9 +7,10 @@
 #include <CPU/ISR.h>
 #include <CPU/IO.h>
 #include <Device/APIC.h>
-#include <Debug/logger.h>
+#include <Debug/Logger.h>
 #include <CPU/ACPI.h>
 #include <Memory/PMM.h>
+#include <Memory/VMM.h>
 #include <CPU/UserMode.h>
 #include <Device/Keyboard.h>
 #include <Device/ATA.h>
@@ -28,20 +29,26 @@ __attribute__((__noreturn__)) void k_entry(const void* mbt2_info)
     TTY_init();
     logger_init();
 
-    printf("Kernel start at 0x%H and end at 0x%H\n", kernel_start, kernel_end);
+    PMM_init((uint64_t) &kernel_start, (uint64_t) &kernel_end);
+    printf("Kernel start at 0x%H%H and end at 0x%H%H\n",
+        (unsigned) ((uint64_t) &kernel_start >> 32), (unsigned) ((uint64_t) &kernel_start & 0xffffffff),
+        (unsigned) ((uint64_t) &kernel_end >> 32), (unsigned) ((uint64_t) &kernel_end & 0xffffffff));
+
+    read_multiboot2_info(mbt2_info);
 
     IDT_init();
     PIT_init();
 
-    PMM_init((uint64_t) kernel_start, (uint64_t) kernel_end);
-    read_multiboot2_info(mbt2_info);
+    VMM_map_kernel();
+    VMM_identity_mapping();
+    VMM_load_cr3();
 
     printf("Je suis un petit test ! :)\n");
 
-    PCI_init();
+    // PCI_init();
 
-    keyboard_init();
-    ATA_init();
+    // keyboard_init();
+    // ATA_init();
     
     // switch_to_user_mode();
 
@@ -65,10 +72,10 @@ void read_multiboot2_info(const void* mbt2_info)
         switch (tag->type)
         {
             case MULTIBOOT_TAG_TYPE_MMAP:
-                multiboot_memory_map_t *mmap;
+                multiboot_memory_map_t* mmap;
       
-                for (mmap = ((struct multiboot_tag_mmap *) tag)->entries; (multiboot_uint8_t *) mmap < (multiboot_uint8_t *) tag + tag->size;
-                    mmap = (multiboot_memory_map_t *) ((unsigned long) mmap + ((struct multiboot_tag_mmap *) tag)->entry_size))
+                for (mmap = ((struct multiboot_tag_mmap*) tag)->entries; (multiboot_uint8_t*) mmap < (multiboot_uint8_t*) tag + tag->size;
+                    mmap = (multiboot_memory_map_t*) ((unsigned long) mmap + ((struct multiboot_tag_mmap*) tag)->entry_size))
                 {
                     if (mmap->type == MULTIBOOT_MEMORY_AVAILABLE)
                     {

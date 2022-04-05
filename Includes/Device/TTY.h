@@ -19,7 +19,10 @@
 #define TTY_COM_PORT    COM2
 #endif
 
+void TTY_set_buffer(uint16_t* buffer);
+
 void TTY_init(void);
+void TTY_init_framebuffer(uint32_t width, uint32_t height, uint64_t addr);
 
 void TTY_clear(void);
 void TTY_set_color(uint8_t color);

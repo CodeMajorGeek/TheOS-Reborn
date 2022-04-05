@@ -1,5 +1,10 @@
 #include <stdio.h>
 
+#include <Device/TTY.h>
+
+#include <stdint.h>
+#include <limits.h>
+
 /* We are building stdio as kernel (not for long, we will use syscall later on). */
 
 int putc(int c)

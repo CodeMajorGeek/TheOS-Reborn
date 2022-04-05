@@ -1,12 +1,23 @@
 #define ASM_FILE
 #include <Multiboot2/multiboot2.h>
 
+#ifdef HAVE_ASM_USCORE
+# define EXT_C(sym) _ ## sym
+#else
+# define EXT_C(sym) sym
+#endif
+
+#ifdef __ELF__
+# define AOUT_KLUDGE 0
+#else
+# define AOUT_KLUDGE MULTIBOOT_AOUT_KLUDGE
+#endif
+
+/* The size of our stack (16KiB). */
+#define STACK_SIZE  0x4000
+
 .set HEADER_LEN,        mb2_hdr_end - mb2_hdr
 .set CHECKSUM,          -(MULTIBOOT2_HEADER_MAGIC + MULTIBOOT_ARCHITECTURE_I386 + HEADER_LEN)
-
-.set TYPE,              0
-.set FLAGS,             0
-.set TAG_LEN,           8
 
 .set ID_FLAG,           1 << 21
 .set LM_BIT,            1 << 29
@@ -31,18 +42,44 @@
 .set LONG_MODE,         1 << 5
 
 .section .multiboot
-.align MULTIBOOT_HEADER_ALIGN
 
 # Start our kernel with the MULTIBOOT2 header.
 mb2_hdr:
+    .align MULTIBOOT_HEADER_ALIGN
     .long MULTIBOOT2_HEADER_MAGIC
     .long MULTIBOOT_ARCHITECTURE_I386
     .long HEADER_LEN
     .long CHECKSUM
-
-    .short TYPE
-    .short FLAGS
-    .long MULTIBOOT_TAG_ALIGN
+#ifndef __ELF__
+address_tag_start:
+    .short MULTIBOOT_HEADER_TAG_ADDRESS
+    .short MULTIBOOT_HEADER_TAG_OPTIONAL
+    .long address_tag_end - address_tag_start
+    .long mb2_hdr
+    .long _start
+    .long _edata
+    .long _end
+address_tag_end:
+entry_address_tag_start:
+    .short MULTIBOOT_HEADER_TAG_ENTRY_ADDRESS
+    .short MULTIBOOT_HEADER_TAG_OPTIONAL
+    .long entry_address_tag_end - entry_address_tag_start
+    .long multiboot_entry
+entry_address_tag_end:
+#endif /*  __ELF__ */
+# framebuffer_tag_start:
+#     .align MULTIBOOT_HEADER_ALIGN
+#     .short MULTIBOOT_HEADER_TAG_FRAMEBUFFER
+#     .short MULTIBOOT_HEADER_TAG_OPTIONAL
+#     .long framebuffer_tag_end - framebuffer_tag_start
+#     .long 1024
+#     .long 768
+#     .long 32
+# framebuffer_tag_end:
+    .align MULTIBOOT_HEADER_ALIGN
+    .short MULTIBOOT_HEADER_TAG_END
+    .short 0
+    .long 8
 mb2_hdr_end:
 
 .code32
@@ -51,7 +88,7 @@ mb2_hdr_end:
 
 # Execute our first loader code segment starting at multiboot_entry.
 multiboot_entry:   
-    movl $kernel_stack_top, %esp    # Let's define our stack pointer where the kernel stack will be.
+    movl $(stack + STACK_SIZE), %esp    # Let's define our stack pointer where the kernel stack will be.
     movl $0, %ebp
 
     movl %ebx, %edi                 # Keep the Multiboot2 info ptr for the k_entry function.
@@ -135,11 +172,11 @@ check_long_mode.no_long_mode:
 
 setup_page_tables:
     movl $pdp, %eax                 # Let's store the pdp table offset into eax.
-    orl $0b11, %eax                 # Make this entry present and writable.
+    orl $0b111, %eax                # Make this entry present, user and writable.
     movl %eax, (pml4)               # Now move the pdp offset into the first pml4 table entry.
 
     movl $pd, %eax                  # Let's store the pd table offset into eax.
-    orl $0b11, %eax                 # Make this entry present and writable.
+    orl $0b111, %eax                # Make this entry present, user and writable.
     movl %eax, (pdp)                # Now move the pd offset into the first pdp table entry.
 
     movl $0, %ecx                   # Let's define a counter start at 0 to loop 512 times.
@@ -147,7 +184,7 @@ setup_page_tables.map_pd_table:
     # Let's map pd entry to a huge page that starts at address 2MiB * ecx (counter).
     movl $0x200000, %eax            # 2 MiB page.
     mull %ecx                       # The start address of the ecx-th page.  
-    orl $0b10000011, %eax           # Make it present, writable and huge.
+    orl $0b10000111, %eax           # Make it present, writable, user and huge.
     movl %eax, pd(,%ecx,8)          # Map this entry.
 
     incl %ecx                       # Increment the counter
@@ -183,11 +220,32 @@ error:
     movb %al, 0xb800a
     jmp end
 
+.section .text
+.code64
+
+.extern k_entry
+
+long_mode_entry:    # Finally, we can do some stuff into long mode !
+    cli
+
+    # Let's set all the segments registers (ax, ss, ds, es, fs and gs) to the data descritor.
+    movw $gdt64.kernel_data, %ax 
+    movw %ax, %ss
+    movw %ax, %ds
+    movw %ax, %es
+    movw %ax, %fs
+    movw %ax, %gs
+
+    pushq %rdi              # Let's push the MULTIBOOT2 multiboot_info offset onto the stack to parse it in the C as argument.
+    callq EXT_C(k_entry)    # Now we can call our k_entry C function.
+    
+end:                # This part should be never be reached !
+    cli
+    hlt
+    jmp end
+
 .section .bss
 .align 4096
-
-.globl kernel_heap_bottom
-.globl kernel_heap_top
 
 # We store our pages into the bss section (3 page of 4KiB with an 4KiB alignement).
 pml4:
@@ -197,9 +255,7 @@ pdp:
 pd:
     .zero 4096
 
-kernel_stack_bottom:
-    .space 4096 * 16    # 64KiB of kernel stack.
-kernel_stack_top:
+.comm stack, STACK_SIZE # Our stack area.
 
 .section .rodata
 .align 8
@@ -244,27 +300,3 @@ gdt64:
 gdt64.pointer:
     .word . - gdt64 - 1
     .quad gdt64
-
-.section .text
-.code64
-
-.extern k_entry
-
-long_mode_entry:    # Finally, we can do some stuff into long mode !
-    cli
-
-    # Let's set all the segments registers (ax, ss, ds, es, fs and gs) to the data descritor.
-    movw $gdt64.kernel_data, %ax 
-    movw %ax, %ss
-    movw %ax, %ds
-    movw %ax, %es
-    movw %ax, %fs
-    movw %ax, %gs
-
-    pushq %rdi      # Let's push the MULTIBOOT2 multiboot_info offset onto the stack to parse it in the C as argument.
-    callq k_entry   # Now we can call our k_entry C function.
-    
-end:                # This part should be never be reached !
-    cli
-    hlt
-    jmp end

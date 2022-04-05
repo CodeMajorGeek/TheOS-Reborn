@@ -1,11 +1,7 @@
 #ifndef _IDT_H
 #define _IDT_H
 
-#include <CPU/GDT.h>
-#include <Device/PIC.h>
-
 #include <stdint.h>
-#include <stdbool.h>
 
 #define IDT_MAX_DESCRIPTORS 256
 

@@ -3,10 +3,8 @@
 
 #include <CPU/ISR.h>
 
-#include <stdint.h>
 #include <stdbool.h>
-#include <string.h>
-#include <stdio.h>
+#include <stdint.h>
 
 #define	SATA_SIG_ATA	0x00000101	// SATA drive
 #define	SATA_SIG_ATAPI	0xEB140101	// SATAPI drive

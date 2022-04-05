@@ -1,5 +1,7 @@
 #include <Device/Keyboard.h>
 
+#include <CPU/IO.h>
+
 #include <stdio.h>
 
 static uint8_t scancode_buffer[SCANCODE_BUFFER_SIZE];

@@ -1,5 +1,10 @@
 #include <CPU/IDT.h>
 
+#include <Device/PIC.h>
+#include <CPU/GDT.h>
+
+#include <stdbool.h>
+
 void IDT_init(void)
 {
     idtr.base = (uint64_t) &IDT[0];

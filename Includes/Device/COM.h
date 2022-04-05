@@ -2,11 +2,8 @@
 #define _COM_H
 
 #include <stddef.h>
-#include <string.h>
 #include <stdint.h>
 #include <stdbool.h>
-
-#include <CPU/IO.h>
 
 #define COM1                    0x3F8
 #define COM2                    0x2F8

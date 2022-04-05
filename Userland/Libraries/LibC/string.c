@@ -1,6 +1,6 @@
 #include <string.h>
 
-void* memset(void* ptr, int value, size_t count)
+void* memset(void* ptr, uint8_t value, size_t count)
 {
     uint8_t* buf = (uint8_t*) ptr;
     for (size_t i = 0; i < count; ++i)
@@ -9,7 +9,7 @@ void* memset(void* ptr, int value, size_t count)
     return ptr;
 }
 
-void* memsetw(void* ptr, int value, size_t count)
+void* memsetw(void* ptr, uint16_t value, size_t count)
 {
     uint16_t* buf = (uint16_t*) ptr;
     for (size_t i = 0; i < count; ++i)

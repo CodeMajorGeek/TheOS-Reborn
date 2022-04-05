@@ -1,5 +1,7 @@
 #include <Device/PIT.h>
 
+#include <CPU/IO.h>
+
 #include <stdio.h>
 
 static uint32_t ticks = 0;

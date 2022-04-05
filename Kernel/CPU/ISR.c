@@ -1,5 +1,9 @@
 #include <CPU/ISR.h>
 
+#include <Device/PIC.h>
+
+#include <stdint.h>
+#include <stdlib.h>
 #include <stdio.h>
 
 IRQ_t IRQ_handlers[MAX_IRQ_ENTRIES];

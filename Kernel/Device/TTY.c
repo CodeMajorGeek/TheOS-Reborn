@@ -8,6 +8,11 @@ static uint16_t* TTY_buffer;
 
 static bool TTY_cursor_enabled;
 
+void TTY_set_buffer(uint16_t* buffer)
+{
+    TTY_buffer = buffer;
+}
+
 void TTY_init(void)
 {
     TTY_set_color(vga_entry_color(VGA_LIGHT_GREEN, VGA_BLACK));
@@ -15,6 +20,11 @@ void TTY_init(void)
     TTY_cursor_enabled = FALSE;
     TTY_clear();
     TTY_enable_cursor(TRUE);
+}
+
+void TTY_init_framebuffer(uint32_t width, uint32_t height, uint64_t addr)
+{
+    // TODO: Have to use my own font for this...
 }
 
 void TTY_clear(void)

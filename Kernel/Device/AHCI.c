@@ -1,5 +1,8 @@
 #include <Device/AHCI.h>
 
+#include <string.h>
+#include <stdio.h>
+
 static HBA_MEM_t* abar;
 
 void AHCI_init(void)
@@ -75,7 +78,7 @@ void AHCI_port_rebase(HBA_PORT_t* port, int portno)
 	// Command list maxim size = 32*32 = 1K per port
 	port->clb = AHCI_BASE + (portno<<10);
 	port->clbu = 0;
-	memset((void*) (port->clb), 0, 1024);
+	memset((void*) (uint64_t) (port->clb), 0, 1024);
  
 	// FIS offset: 32K+256*portno
 	// FIS entry size = 256 bytes per port
@@ -85,7 +88,7 @@ void AHCI_port_rebase(HBA_PORT_t* port, int portno)
  
 	// Command table offset: 40K + 8K*portno
 	// Command table size = 256*32 = 8K per port
-	HBA_CMD_HEADER_t* cmdheader = (HBA_CMD_HEADER_t*)(port->clb);
+	HBA_CMD_HEADER_t* cmdheader = (HBA_CMD_HEADER_t*) (uint64_t) (port->clb);
 	for (int i=0; i<32; i++)
 	{
 		cmdheader[i].prdtl = 8;	// 8 prdt entries per command table
@@ -93,7 +96,7 @@ void AHCI_port_rebase(HBA_PORT_t* port, int portno)
 		// Command table offset: 40K + 8K*portno + cmdheader_index*256
 		cmdheader[i].ctba = AHCI_BASE + (40<<10) + (portno<<13) + (i<<8);
 		cmdheader[i].ctbau = 0;
-		memset((void*)cmdheader[i].ctba, 0, 256);
+		memset((void*) (uint64_t) cmdheader[i].ctba, 0, 256);
 	}
  
 	AHCI_start_cmd(port);	// Start command engine
@@ -139,13 +142,13 @@ bool AHCI_read(HBA_PORT_t* port, uint32_t startl, uint32_t starth, uint32_t coun
 	if (slot == -1)
 		return false;
  
-	HBA_CMD_HEADER_t* cmdheader = (HBA_CMD_HEADER_t*) port->clb;
+	HBA_CMD_HEADER_t* cmdheader = (HBA_CMD_HEADER_t*) (uint64_t) port->clb;
 	cmdheader += slot;
 	cmdheader->cfl = sizeof(FIS_REG_H2D_t)/sizeof(uint32_t);	// Command FIS size
 	cmdheader->w = 0;		// Read from device
 	cmdheader->prdtl = (uint16_t)((count-1)>>4) + 1;	// PRDT entries count
  
-	HBA_CMD_TBL_t* cmdtbl = (HBA_CMD_TBL_t*) (cmdheader->ctba);
+	HBA_CMD_TBL_t* cmdtbl = (HBA_CMD_TBL_t*) (uint64_t) (cmdheader->ctba);
 	memset(cmdtbl, 0, sizeof (HBA_CMD_TBL_t) + (cmdheader->prdtl - 1) * sizeof (HBA_PRDT_ENTRY_t));
  
 	// 8K bytes (16 sectors) per PRDT

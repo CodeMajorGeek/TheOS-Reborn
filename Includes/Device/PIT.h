@@ -2,7 +2,6 @@
 #define _PIT_H
 
 #include <CPU/ISR.h>
-#include <CPU/IO.h>
 
 #include <stdint.h>
 

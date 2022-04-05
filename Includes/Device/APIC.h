@@ -1,11 +1,8 @@
 #ifndef _APIC_H
 #define _APIC_H
 
-#include <cpuid.h>
 #include <stdint.h>
 #include <stdbool.h>
-
-#include <CPU/MSR.h>
 
 #define IA32_APIC_BASE_MSR          0x1B
 #define IA32_APIC_BASE_MSR_BSP      0x100 // Processor is a BSP.

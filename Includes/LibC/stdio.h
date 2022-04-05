@@ -1,11 +1,8 @@
 #ifndef _STDIO_H
 #define _STDIO_H
 
-#include <Device/TTY.h>
-
-#include <stdint.h>
+#include <stddef.h>
 #include <stdarg.h>
-#include <limits.h>
 
 #define EOF         (-1)
 
