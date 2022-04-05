@@ -15,14 +15,14 @@
 
 #define SCANCODE_BUFFER_SIZE    8
 
-void keyboard_init(void);
+void Keyboard_init(void);
 
-void keyboard_wait_ack(void);
-void keyboard_update_leds(uint8_t);
+void Keyboard_wait_ack(void);
+void Keyboard_update_leds(uint8_t);
 
-uint8_t keyboard_get_scancode(void);
-bool keyboard_is_uppercase(void);
+uint8_t Keyboard_get_scancode(void);
+bool Keyboard_is_uppercase(void);
 
-static void keyboard_callback(interrupt_frame_t*);
+static void Keyboard_callback(interrupt_frame_t*);
 
 #endif

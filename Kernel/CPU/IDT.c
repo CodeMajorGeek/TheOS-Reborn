@@ -12,7 +12,7 @@ void IDT_init(void)
 
     PIC_remap(IRQ_BASE, IRQ_BASE + 8);
 
-    for (uint8_t vector = 0; vector < IDT_MAX_VECTORS; ++vector)
+    for (int vector = 0; vector < IDT_MAX_VECTORS; ++vector)
         IDT_set_descriptor(vector, ISR_stub_table[vector], 0x8E);
 
     __asm__ __volatile__("lidt %0" : : "m"(idtr));  // Load the new IDT.

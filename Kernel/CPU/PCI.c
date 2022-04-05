@@ -2,6 +2,11 @@
 
 #include <CPU/IO.h>
 #include <Device/AHCI.h>
+#include <Memory/VMM.h>
+#include <Memory/PMM.h>
+#include <Storage/SATA.h>
+
+#include <stdio.h>
 
 static PCI_func_t PCI_AHCI;
 
@@ -18,11 +23,13 @@ void PCI_init(void)
 
     PCI_scan_bus(&PCI_AHCI);
     PCI_get_MMIO_space_size(&PCI_AHCI);
-    // PCI_AHCI.start_virtual_address = (uint64_t) VMM_get_AHCI_MMIO_virt();
-    
-    // PCI_pages_for_ahci_start = (void*) VMM_get_AHCI_phys();
+
+    PCI_AHCI.start_virtual_address = VMM_get_AHCI_MMIO_virt();
+    PCI_pages_for_ahci_start = (void*) PMM_get_AHCI_phys();
 
     AHCI_probe_port((HBA_MEM_t*) PCI_AHCI.start_virtual_address);
+
+    SATA_init_table();
 }
 
 uint16_t PCI_config_read_word(uint8_t bus, uint8_t slot, uint8_t func, uint8_t offset)

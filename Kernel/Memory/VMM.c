@@ -1,14 +1,17 @@
 #include <Memory/VMM.h>
 
+#include <Device/AHCI.h>
 #include <Memory/PMM.h>
 #include <Device/VGA.h>
+#include <Device/TTY.h>
 
 static PML4_t* VMM_PML4;
 
 static uint64_t VMM_virt_kernel_mem;
 static uint64_t VMM_virt_kernel;
 
-static uint64_t VMM_VGA_virt_addr;
+static uint64_t VMM_VGA_virt;
+static uint64_t VMM_AHCI_MMIO_virt;
 
 static void add_attribute(uint64_t* entry, uint64_t attribute)
 {
@@ -25,9 +28,9 @@ static uint64_t get_address(uint64_t* entry)
     return (*entry & FRAME);
 }
 
-uint64_t VMM_get_VGA_virt_addr(void)
+uint64_t VMM_get_AHCI_MMIO_virt(void)
 {
-    return VMM_VGA_virt_addr;
+    return VMM_AHCI_MMIO_virt;
 }
 
 void VMM_map_kernel(void)
@@ -40,16 +43,19 @@ void VMM_map_kernel(void)
     uint64_t virt_addr = phys_base;
     VMM_virt_kernel_mem = virt_addr;
 
-    // phys_end += VMM_ADDITIONAL;
     while (phys_base < phys_end)
     {
         VMM_map_page(virt_addr, phys_base);
 
         phys_base += PHYS_PAGE_SIZE;
         virt_addr += PHYS_PAGE_SIZE;
-
-        printf("Kernel page 0x%H mapped to 0x%H !\n", phys_base, virt_addr);
     }
+
+    VMM_VGA_virt = virt_addr;
+    virt_addr += 0x5000;
+
+    VMM_AHCI_MMIO_virt = virt_addr;
+    virt_addr += 0x1000;
 
     VMM_virt_kernel = virt_addr;
 }
@@ -117,7 +123,10 @@ void VMM_map_page(uint64_t virt, uint64_t phys)
 
 void VMM_identity_mapping(void)
 {
-    VMM_map_page(VGA_ADDRESS, VGA_ADDRESS);
+    VMM_map_page(VMM_VGA_virt, VGA_BUFFER_ADDRESS); // Map the VGA textmode buffer to another location.
+    TTY_set_buffer((uint16_t*) VMM_VGA_virt);       // Set the TTY buffer to the new virtual address.
+
+    VMM_map_page(VMM_AHCI_MMIO_virt, AHCI_MMIO_BUFFER_ADDRESS);
 }
 
 void VMM_load_cr3(void)

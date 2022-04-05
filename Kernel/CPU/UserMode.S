@@ -2,17 +2,11 @@
 
 .section .text
 
-.globl switch_to_user_mode
-
-switch_to_user_mode:
-    callq enable_sys_call_ext
-    
-    movq $in_user_mode, %rcx    # To be loaded into RIP.
-    movq $0x202, %r11           # To be loaded into EFLAGS.
-    sysretq
+.globl switch_to_usermode
+.globl enable_syscall_ext
 
 # Enable the system call ext (sysret & syscall):
-enable_sys_call_ext:
+enable_syscall_ext:
     movq $0xC0000082, %rcx
     wrmsr
     movq $0xC0000080, %rcx
@@ -25,9 +19,13 @@ enable_sys_call_ext:
     wrmsr
     retq
 
+switch_to_usermode:
+    movq $in_user_mode, %rcx    # To be loaded into RIP.
+    pushfq
+    popq %r11
+    orq $0x200, %r11            # To be loaded into EFLAGS.        
+    sysretq
+
 in_user_mode:
-    nop
-    nop
-    nop
-    nop
-    nop
+    syscall
+    retq

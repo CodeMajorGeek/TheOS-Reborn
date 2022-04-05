@@ -1,6 +1,7 @@
 #include <CPU/ISR.h>
 
 #include <Device/PIC.h>
+#include <CPU/Syscall.h>
 
 #include <stdint.h>
 #include <stdlib.h>
@@ -15,12 +16,17 @@ void ISR_register_IRQ(int index, IRQ_t irq)
         IRQ_handlers[irq_index] = irq;
 }
 
-void ISR_exception_handler(interrupt_frame_t frame)
+void ISR_handler(interrupt_frame_t frame)
 {
     if (frame.int_no < MAX_KNOWN_EXCEPTIONS)
     {
         puts(exception_messages[frame.int_no]);
         puts(" Exception Handled !\n");
+    }
+    else if (frame.int_no == SYSCALL_INT)
+    {
+        Syscall_interupt_handler(&frame);
+        return;
     }
     else
     {
@@ -33,7 +39,7 @@ void ISR_exception_handler(interrupt_frame_t frame)
 void IRQ_handler(interrupt_frame_t frame)
 {
     /* Must send EOI to the PIC. */
-    PIC_send_EOI(frame.err_code); // err_code store the irqindex here.   
+    PIC_send_EOI(frame.err_code); // err_code store the irq index here.   
 
     IRQ_t handler = IRQ_handlers[frame.err_code];
     if (handler != 0)

@@ -1,6 +1,7 @@
 #include <Memory/PMM.h>
 
 #include <Memory/KMem.h>
+#include <Memory/VMM.h>
 
 #include <stdbool.h>
 #include <limits.h>
@@ -17,6 +18,8 @@ static uint64_t PMM_kernel_end;
 static uint64_t PMM_max_phys = NULL;
 
 static bool is_kmem_initialized = FALSE;
+
+static uint64_t PMM_AHCI_phys;
 
 void PMM_init(uint64_t kernel_start, uint64_t kernel_end)
 {
@@ -37,6 +40,11 @@ uint64_t PMM_get_kernel_end(void)
 uint64_t PMM_get_max_phys(void)
 {
     return PMM_max_phys;
+}
+
+uint64_t PMM_get_AHCI_phys(void)
+{
+    PMM_AHCI_phys;
 }
 
 void PMM_init_region(uint64_t addr, uint64_t len)
@@ -123,4 +131,17 @@ void* PMM_alloc_page(void)
 
     PMM_mmap_unset(&region, index);
     return (void*) (region.addr_start + (index * PHYS_PAGE_SIZE));
+}
+
+void PMM_dealloc_page(void* ptr)
+{
+    uint64_t addr = (uint64_t) ptr;
+    // TODO: method to get the region of a page.
+    
+}
+
+void PMM_init_AHCI(void)
+{
+    PMM_AHCI_phys = PMM_kernel_end;
+    PMM_kernel_end += AHCI_SIZE;
 }

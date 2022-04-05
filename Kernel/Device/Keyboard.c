@@ -13,25 +13,25 @@ static bool is_shifting = FALSE;
 static bool is_caplocked = FALSE;
 static bool is_vernum = FALSE;
 
-void keyboard_init(void)
+void Keyboard_init(void)
 {
-    ISR_register_IRQ(IRQ1, keyboard_callback);
+    ISR_register_IRQ(IRQ1, Keyboard_callback);
 }
 
-void keyboard_wait_ack(void)
+void Keyboard_wait_ack(void)
 {
     while (!(IO_inb(PORT_DATA) == PS2_ACK))
         __asm__("nop");
 }
 
-void keyboard_update_leds(uint8_t status)
+void Keyboard_update_leds(uint8_t status)
 {
     IO_outb(PORT_DATA, KEYBOARD_LEDS);
-    keyboard_wait_ack();
+    Keyboard_wait_ack();
     IO_outb(PORT_DATA, status);
 }
 
-uint8_t keyboard_get_scancode(void)
+uint8_t Keyboard_get_scancode(void)
 {
     if (scancode_buffer_length == 0)
         return NULL;
@@ -45,12 +45,12 @@ uint8_t keyboard_get_scancode(void)
     return sc;
 }
 
-bool keyboard_is_uppercase(void)
+bool Keyboard_is_uppercase(void)
 {
     return is_shifting || is_caplocked;
 }
 
-static void keyboard_callback(interrupt_frame_t* frame)
+static void Keyboard_callback(interrupt_frame_t* frame)
 {
     uint8_t status = IO_inb(PORT_STATUS);
     if (status & 0x01)
@@ -75,7 +75,7 @@ static void keyboard_callback(interrupt_frame_t* frame)
             default:
                 goto no_changing_state; // Ugly but avoid updating LEDs when not needed...
         }
-        keyboard_update_leds((is_vernum << 1) | (is_caplocked << 2));
+        Keyboard_update_leds((is_vernum << 1) | (is_caplocked << 2));
         return;
 no_changing_state:
         if (scancode_buffer_length == SCANCODE_BUFFER_SIZE) // The scancode buffer is full.

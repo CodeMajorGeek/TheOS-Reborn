@@ -22,6 +22,7 @@ void PMM_init(uint64_t kernel_start, uint64_t kernel_end);
 uint64_t PMM_get_kernel_start(void);
 uint64_t PMM_get_kernel_end(void);
 uint64_t PMM_get_max_phys(void);
+uint64_t PMM_get_AHCI_phys(void);
 
 void PMM_init_region(uint64_t addr, uint64_t len);
 
@@ -30,5 +31,8 @@ void PMM_mmap_set(PMM_region_t* region, int bit);
 
 uint32_t PMM_get_index_of_free_page(PMM_region_t region);
 void* PMM_alloc_page(void);
+void PMM_dealloc_page(void* ptr);
+
+void PMM_init_AHCI(void);
 
 #endif

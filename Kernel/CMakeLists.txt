@@ -14,6 +14,7 @@ set(KERNEL_CPU_SOURCES
     CPU/ACPI.c
     CPU/UserMode.S
     CPU/PCI.c
+    CPU/Syscall.c
 )
 
 set(KERNEL_DEBUG_SOURCES
@@ -27,7 +28,6 @@ set(KERNEL_DEVICES_SOURCES
     Device/PIT.c
     Device/APIC.c
     Device/Keyboard.c
-    Device/ATA.c
     Device/AHCI.c
 )
 
@@ -37,6 +37,11 @@ set(KERNEL_MEMORY_SOURCES
     Memory/VMM.c
 )
 
+set(KERNEL_STORAGE_SOURCES
+    Storage/ATA.c
+    Storage/SATA.c
+)
+
 set(KERNEL_SOURCES
     Entry.c
     ${KERNEL_BOOT_SOURCES}
@@ -44,6 +49,7 @@ set(KERNEL_SOURCES
     ${KERNEL_DEBUG_SOURCES}
     ${KERNEL_DEVICES_SOURCES}
     ${KERNEL_MEMORY_SOURCES}
+    ${KERNEL_STORAGE_SOURCES}
 )
 
 set(LIBC_SOURCES

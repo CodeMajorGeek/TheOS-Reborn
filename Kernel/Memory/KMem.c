@@ -12,8 +12,6 @@ void kmem_init(uint64_t heap_start)
     first_malloc_header->state = MEM_STATE_AVALIABLE;
     first_malloc_header->size = KMEM_HEAP_SIZE - sizeof (malloc_header_t);
     first_malloc_header->prev_malloc_header = 0;
-
-    printf("Kmem heap start at = 0x%H\n", first_malloc_header);
 }
 
 void* kmalloc(size_t size)

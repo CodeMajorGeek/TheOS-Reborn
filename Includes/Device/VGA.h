@@ -1,7 +1,7 @@
 #ifndef _VGA_H
 #define _VGA_H
 
-#define VGA_ADDRESS 0xB8000
+#define VGA_BUFFER_ADDRESS  0xB8000
 
 #define VGA_WIDTH   80
 #define VGA_HEIGHT  25
@@ -32,7 +32,7 @@ enum vga_color
     VGA_LIGHT_BROWN = 14
 };
 
-static uint16_t* VGA_BUFFER = (uint16_t*) VGA_ADDRESS;
+static uint16_t* VGA_BUFFER = (uint16_t*) VGA_BUFFER_ADDRESS;
 
 static inline uint8_t vga_entry_color(enum vga_color fg, enum vga_color bg)
 {

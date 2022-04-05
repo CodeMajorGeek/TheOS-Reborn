@@ -12,7 +12,6 @@
 #define PDT_INDEX(x)    (((x) >> 21) & 0x1FF)
 #define PT_INDEX(x)     (((x) >> 12) & 0x1FF)
 
-#define VMM_ADDITIONAL  0x4800
 #define FRAME           0xFFFFFFFFFFFFF000
 
 #define IDENTITY_MAP_VIRTUAL_START  0xFFFFFFFFF0000000UL
@@ -38,7 +37,7 @@ typedef struct PT
     uint64_t entries[512];
 } PT_t;
 
-uint64_t VMM_get_VGA_virt_addr(void);
+uint64_t VMM_get_AHCI_MMIO_virt(void);
 
 void VMM_map_kernel(void);
 

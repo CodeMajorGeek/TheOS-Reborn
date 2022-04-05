@@ -31,7 +31,9 @@
 #define ATA_DEV_DRQ     0x08
  
 #define ATA_CMD_READ_DMA_EX     0x25
-#define HBA_PxIS_TFES (1 << 30) // TFES - Task File Error Status.
+#define HBA_PxIS_TFES 			(1 << 30) // TFES - Task File Error Status.
+
+#define AHCI_MMIO_BUFFER_ADDRESS	0xFEBF0000
 
 #define trace_ahci(...) printf(__VA_ARGS__)
 

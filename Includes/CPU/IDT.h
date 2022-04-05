@@ -5,9 +5,9 @@
 
 #define IDT_MAX_DESCRIPTORS 256
 
-#define IDT_MAX_VECTORS         48
+#define IDT_MAX_VECTORS     IDT_MAX_DESCRIPTORS
 
-#define IRQ_BASE                0x20
+#define IRQ_BASE            0x20
 
 typedef struct IDT_entry
 {
