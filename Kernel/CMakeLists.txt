@@ -15,6 +15,7 @@ set(KERNEL_CPU_SOURCES
     CPU/UserMode.S
     CPU/PCI.c
     CPU/Syscall.c
+    CPU/Syscall.S
 )
 
 set(KERNEL_DEBUG_SOURCES

@@ -56,6 +56,8 @@ __attribute__((__noreturn__)) void k_entry(const void* mbt2_info)
     Syscall_init();
     // switch_to_usermode();
 
+    while (1);
+
     while (TRUE)
         __asm__ __volatile__("hlt");
 
