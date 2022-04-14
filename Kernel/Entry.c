@@ -42,6 +42,9 @@ __attribute__((__noreturn__)) void k_entry(const void* mbt2_info)
     IDT_init();
     PIT_init();
 
+    if (APIC_check())
+        APIC_init();
+
     VMM_map_kernel();
     VMM_identity_mapping();
     VMM_load_cr3();
@@ -97,18 +100,12 @@ void read_multiboot2_info(const void* mbt2_info)
             case MULTIBOOT_TAG_TYPE_ACPI_OLD:
                 struct multiboot_tag_old_acpi* old_acpi = (struct multiboot_tag_old_acpi*) tag;
                 if (ACPI_RSDP_old_check(old_acpi->rsdp))
-                {
-                    printf("Finded ACPI old !\n");
                     ACPI_init_RSDT(old_acpi->rsdp);
-                }
                 break;
             case MULTIBOOT_TAG_TYPE_ACPI_NEW:
                 struct multiboot_tag_new_acpi* new_acpi = (struct multiboot_tag_new_acpi*) tag;
                 if (ACPI_RSDP_new_check(new_acpi->rsdp))
-                {
-                    printf("Finded ACPI new !\n");
                     ACPI_init_XSDT(new_acpi->rsdp);
-                }
                 break;
         }
     }

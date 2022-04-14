@@ -4,7 +4,7 @@
 #include <string.h>
 
 static ACPI_RSDT_t* ACPI_RSDT = (ACPI_RSDT_t*) NULL;
-static ACPI_XSDT_t* ACPI_XSDT = (ACPI_RSDT_t*) NULL;
+static ACPI_XSDT_t* ACPI_XSDT = (ACPI_XSDT_t*) NULL;
 
 bool ACPI_RSDP_old_check(multiboot_uint8_t* rsdp)
 {
@@ -46,22 +46,24 @@ bool ACPI_SDT_check(ACPI_SDT_header_t* sdt_header_ptr)
     return sum == 0;
 }
 
-void ACPI_init_RSDT(uint32_t rsdt_ptr)
+void ACPI_init_RSDT(ACPI_RSDP_descriptor10_t* desc)
 {
-    ACPI_RSDT = (ACPI_RSDT_t*) (void*) rsdt_ptr;
+    ACPI_RSDT = (ACPI_RSDT_t*) desc->RSDT_ptr;
 }
 
-void ACPI_init_XSDT(uint64_t xsdt_ptr)
+void ACPI_init_XSDT(ACPI_RSDP_descriptor20_t* desc)
 {
-    ACPI_XSDT = (ACPI_XSDT_t*) xsdt_ptr;
+    ACPI_XSDT = (ACPI_XSDT_t*) desc->XSDT_ptr;
+    ACPI_RSDT = (ACPI_RSDT_t*) desc->first_part.RSDT_ptr;
 }
 
 void* ACPI_get_table_old(ACPI_RSDT_t* rsdt, char signature[4])
 {
     size_t entries = (rsdt->header.length - sizeof(rsdt->header)) / 4;
+
     for (int i = 0; i < entries; i++)
     {
-        ACPI_SDT_header_t* SDT_header = (ACPI_SDT_header_t*) (void*) rsdt->ptr_next_SDT[i];
+        ACPI_SDT_header_t* SDT_header = (ACPI_SDT_header_t*) rsdt->ptr_next_SDT[i];
         if (!ACPI_SDT_check(SDT_header))
             continue;
 
