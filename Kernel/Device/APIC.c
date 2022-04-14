@@ -1,6 +1,7 @@
 #include <Device/APIC.h>
 
 #include <CPU/MSR.h>
+#include <CPU/IO.h>
 
 #include <cpuid.h>
 

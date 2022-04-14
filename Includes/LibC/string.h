@@ -16,6 +16,9 @@ size_t strlen(const char* str);
 
 char* strcpy(char* __restrict, const char* __restrict);
 
+int strncmp(const char* first, const char* second, size_t length);
+int strcmp(const char* first, const char* second);
+
 int memcmp(const void* aptr, const void* bptr, size_t size);
 
 #endif

@@ -37,7 +37,25 @@ typedef struct ACPI_SDT_header
     uint32_t creator_revision;
 } ACPI_SDT_header_t;
 
-bool ACPI_RSDP_check(struct multiboot_tag_new_acpi* rsdt_desc_ptr);
-bool ACPI_SDT_check(ACPI_SDT_header_t* sdt_header_ptr);
+typedef struct ACPI_RSDT {
+  ACPI_SDT_header_t header;
+  uint32_t* ptr_next_SDT;
+} ACPI_RSDT_t;
+
+typedef struct ACPI_XSDT {
+  ACPI_SDT_header_t header;
+  uint64_t* ptr_next_SDT;
+} ACPI_XSDT_t;
+
+bool ACPI_RSDP_old_check(multiboot_uint8_t* rsdt);
+bool ACPI_RSDP_new_check(multiboot_uint8_t* rsdt);
+bool ACPI_SDT_check(ACPI_SDT_header_t* sdt_header);
+
+void ACPI_init_RSDT(uint32_t rsdt_ptr);
+void ACPI_init_XSDT(uint64_t xsdt_ptr);
+
+void* ACPI_get_table_old(ACPI_RSDT_t* rsdt, char signature[4]);
+void* ACPI_get_table_new(ACPI_XSDT_t* xsdt, char signature[4]);
+void* ACPI_get_table(char signature[4]);
 
 #endif

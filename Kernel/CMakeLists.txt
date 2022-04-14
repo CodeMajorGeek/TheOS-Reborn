@@ -10,7 +10,6 @@ set(KERNEL_CPU_SOURCES
     CPU/Interrupts.S
     CPU/ISR.c
     CPU/MSR.c
-    CPU/MADT.c
     CPU/ACPI.c
     CPU/UserMode.S
     CPU/PCI.c

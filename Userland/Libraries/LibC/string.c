@@ -71,6 +71,16 @@ char* strcpy(char* __restrict dest, const char * __restrict src)
     return memcpy(dest, src, strlen(src));
 }
 
+int strncmp(const char* first, const char* second, size_t length)
+{
+    return memcmp(first, second, length);
+}
+
+int strcmp(const char* first, const char* second)
+{
+    return memcmp(first, second, strlen(first));
+}
+
 int memcmp(const void* aptr, const void* bptr, size_t size)
 {
     const unsigned char* a = (const unsigned char*) aptr;
