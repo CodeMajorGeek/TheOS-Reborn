@@ -59,7 +59,7 @@ void ACPI_init_XSDT(ACPI_RSDP_descriptor20_t* desc)
 
 void* ACPI_get_table_old(ACPI_RSDT_t* rsdt, char signature[4])
 {
-    size_t entries = (rsdt->header.length - sizeof(rsdt->header)) / 4;
+    size_t entries = (rsdt->header.length - sizeof (rsdt->header)) / 4;
 
     for (int i = 0; i < entries; i++)
     {
@@ -76,7 +76,7 @@ void* ACPI_get_table_old(ACPI_RSDT_t* rsdt, char signature[4])
 
 void* ACPI_get_table_new(ACPI_XSDT_t* xsdt, char signature[4])
 {
-    size_t entries = (xsdt->header.length - sizeof(xsdt->header)) / 8;
+    size_t entries = (xsdt->header.length - sizeof (xsdt->header)) / 8;
     for (int i = 0; i < entries; i++)
     {
         ACPI_SDT_header_t* SDT_header = (ACPI_SDT_header_t*) xsdt->ptr_next_SDT[i];

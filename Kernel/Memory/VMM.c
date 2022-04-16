@@ -4,6 +4,7 @@
 #include <Memory/PMM.h>
 #include <Device/VGA.h>
 #include <Device/TTY.h>
+#include <CPU/APIC.h>
 
 static PML4_t* VMM_PML4;
 
@@ -127,6 +128,9 @@ void VMM_identity_mapping(void)
     TTY_set_buffer((uint16_t*) VMM_VGA_virt);       // Set the TTY buffer to the new virtual address.
 
     VMM_map_page(VMM_AHCI_MMIO_virt, AHCI_MMIO_BUFFER_ADDRESS);
+
+    if (APIC_check())
+        VMM_map_page(APIC_get_local_register(), APIC_get_local_register());
 }
 
 void VMM_load_cr3(void)

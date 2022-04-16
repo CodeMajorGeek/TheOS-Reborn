@@ -38,5 +38,6 @@ void PIC_send_EOI(uint8_t irq)
 void PIC_disable(void)
 {
     IO_outb(PIC2_DATA, 0xFF);
+    IO_wait();
     IO_outb(PIC1_DATA, 0xFF);
 }

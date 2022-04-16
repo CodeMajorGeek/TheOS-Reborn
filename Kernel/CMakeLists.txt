@@ -15,6 +15,7 @@ set(KERNEL_CPU_SOURCES
     CPU/PCI.c
     CPU/Syscall.c
     CPU/Syscall.S
+    CPU/APIC.c
 )
 
 set(KERNEL_DEBUG_SOURCES
@@ -26,7 +27,6 @@ set(KERNEL_DEVICES_SOURCES
     Device/TTY.c
     Device/PIC.c
     Device/PIT.c
-    Device/APIC.c
     Device/Keyboard.c
     Device/AHCI.c
 )

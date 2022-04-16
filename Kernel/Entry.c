@@ -6,7 +6,7 @@
 #include <Device/PIT.h>
 #include <CPU/ISR.h>
 #include <CPU/IO.h>
-#include <Device/APIC.h>
+#include <CPU/APIC.h>
 #include <Debug/Logger.h>
 #include <CPU/ACPI.h>
 #include <Memory/PMM.h>
@@ -17,6 +17,7 @@
 #include <Device/AHCI.h>
 #include <CPU/PCI.h>
 #include <CPU/Syscall.h>
+#include <Device/PIC.h>
 
 #include <stdio.h>
 
@@ -43,13 +44,16 @@ __attribute__((__noreturn__)) void k_entry(const void* mbt2_info)
     PIT_init();
 
     if (APIC_check())
+    {
+        PIC_disable();
         APIC_init();
+    }
 
     VMM_map_kernel();
     VMM_identity_mapping();
     VMM_load_cr3();
 
-    printf("Je suis un petit test ! :)\n");
+    APIC_enable();
 
     ATA_init();
     PCI_init();
@@ -57,9 +61,10 @@ __attribute__((__noreturn__)) void k_entry(const void* mbt2_info)
     Keyboard_init();
 
     Syscall_init();
-    // switch_to_usermode();
 
-    while (1);
+    printf("Je suis un petit test ! :)\n");
+
+    // switch_to_usermode();
 
     while (TRUE)
         __asm__ __volatile__("hlt");

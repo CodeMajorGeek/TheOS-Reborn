@@ -2,6 +2,7 @@
 #define _APIC_H
 
 #include <CPU/ACPI.h>
+#include <CPU/MSR.h>
 
 #include <stdint.h>
 #include <stdbool.h>
@@ -14,6 +15,19 @@
 #define APIC_LOCAL_ADDR_OVERRIDE_TYPE       5
 #define APIC_PROCESSOR_LOCAL2_TYPE          9
 
+#define APIC_PROCESSOR_ENABLED              1
+#define APIC_ONLINE_CAPABLE                 (1 << 1)
+
+#define APIC_LOCAL_ID_REG                   0x20
+#define APIC_SPURIOUS_VEC_REG               0xF0
+#define APIC_INT_CMD_REG_LO                 0x300
+#define APIC_INT_CMD_REG_HI                 0x310
+
+#define APIC_IMCR_CTRL_REG                  0x22
+#define APIC_IMCR_DATA_REG                  0x23
+
+#define APIC_IMCR_ACCESS                    0x70
+#define APIC_FORCE_NMI_INTR_SIG             0x01
 
 typedef struct APIC_MADT_record
 {
@@ -87,10 +101,17 @@ bool APIC_check(void);
 void APIC_set_base(uintptr_t apic);
 uintptr_t APIC_get_base(void);
 
+uint64_t APIC_local_read(uint64_t offset);
+void APIC_local_write(uint64_t offset, uint64_t value);
+
 void APIC_enable(void);
-
 void APIC_detect_cores(APIC_MADT_t* madt);
-
+void APIC_disable_PIC_mode(void);
 void APIC_init(void);
+
+uint64_t APIC_get_local_register(void);
+
+uint32_t APIC_read_IO(void* ioapicaddr, uint32_t reg);
+void APIC_write_IO(void* ioapicaddr, uint32_t reg, uint32_t value);
 
 #endif
