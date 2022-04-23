@@ -11,20 +11,22 @@
 
 typedef struct PMM_region
 {
-    uint64_t addr_start;
-    uint64_t addr_end;
-    uint64_t addr_mmap_start;
+    uintptr_t addr_start;
+    uintptr_t addr_end;
+    uintptr_t addr_mmap_start;
     uint64_t len;
 } PMM_region_t;
 
-void PMM_init(uint64_t kernel_start, uint64_t kernel_end);
+void PMM_init(uintptr_t kernel_start, uintptr_t kernel_end);
 
-uint64_t PMM_get_kernel_start(void);
-uint64_t PMM_get_kernel_end(void);
-uint64_t PMM_get_max_phys(void);
-uint64_t PMM_get_AHCI_phys(void);
+uintptr_t PMM_get_kernel_start(void);
+uintptr_t PMM_get_kernel_end(void);
+uintptr_t PMM_get_AHCI_phys(void);
 
-void PMM_init_region(uint64_t addr, uint64_t len);
+PMM_region_t* PMM_get_regions(void);
+int PMM_get_num_regions(void);
+
+void PMM_init_region(uintptr_t addr, uintptr_t len);
 
 void PMM_mmap_unset(PMM_region_t* region, int bit);
 void PMM_mmap_set(PMM_region_t* region, int bit);

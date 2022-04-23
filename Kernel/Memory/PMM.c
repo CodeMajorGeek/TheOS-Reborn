@@ -12,42 +12,45 @@ static PMM_region_t* PMM_regions = (PMM_region_t*) -1;
 
 static int PMM_num_regions = 0;
 
-static uint64_t PMM_kernel_start;
-static uint64_t PMM_kernel_end;
-
-static uint64_t PMM_max_phys = NULL;
+static uintptr_t PMM_kernel_start;
+static uintptr_t PMM_kernel_end;
 
 static bool is_kmem_initialized = FALSE;
 
-static uint64_t PMM_AHCI_phys;
+static uintptr_t PMM_AHCI_phys;
 
-void PMM_init(uint64_t kernel_start, uint64_t kernel_end)
+void PMM_init(uintptr_t kernel_start, uintptr_t kernel_end)
 {
     PMM_kernel_start = kernel_start;
     PMM_kernel_end = kernel_end;
 }
 
-uint64_t PMM_get_kernel_start(void)
+uintptr_t PMM_get_kernel_start(void)
 {
     return PMM_kernel_start;
 }
 
-uint64_t PMM_get_kernel_end(void)
+uintptr_t PMM_get_kernel_end(void)
 {
     return PMM_kernel_end;
 }
 
-uint64_t PMM_get_max_phys(void)
-{
-    return PMM_max_phys;
-}
-
-uint64_t PMM_get_AHCI_phys(void)
+uintptr_t PMM_get_AHCI_phys(void)
 {
     PMM_AHCI_phys;
 }
 
-void PMM_init_region(uint64_t addr, uint64_t len)
+PMM_region_t* PMM_get_regions(void)
+{
+    return PMM_regions;
+}
+
+int PMM_get_num_regions(void)
+{
+    return PMM_num_regions;
+}
+
+void PMM_init_region(uintptr_t addr, uintptr_t len)
 {
     PMM_region_t region;
     region.addr_start = addr;
@@ -78,9 +81,6 @@ void PMM_init_region(uint64_t addr, uint64_t len)
         else
             PMM_mmap_set(&region, i / PHYS_PAGE_SIZE);
     }
-
-    if (PMM_max_phys < region.addr_end) // If the end address is the greater registered, let's define it as the max physical address.
-        PMM_max_phys = region.addr_end;
 
     if (PMM_regions == (PMM_region_t*) -1)
         PMM_regions = kmalloc(sizeof (PMM_region_t));

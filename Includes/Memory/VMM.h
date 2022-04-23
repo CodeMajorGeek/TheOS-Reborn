@@ -2,6 +2,7 @@
 #define _VMM_H
 
 #include <stdint.h>
+#include <stddef.h>
 
 #define PRESENT     1 << 0   
 #define WRITABLE    1 << 1       
@@ -13,9 +14,6 @@
 #define PT_INDEX(x)     (((x) >> 12) & 0x1FF)
 
 #define FRAME           0xFFFFFFFFFFFFF000
-
-#define IDENTITY_MAP_VIRTUAL_START  0xFFFFFFFFF0000000UL
-#define IDENTITY_MAP_PHYSICAL_START 0x0UL
 
 typedef struct PML4
 {
@@ -39,12 +37,13 @@ typedef struct PT
 
 uint64_t VMM_get_AHCI_MMIO_virt(void);
 
+void VMM_init(void);
+
 void VMM_map_kernel(void);
-
-void VMM_get_address();
-void VMM_map_page(uint64_t virt, uint64_t phys);
-
 void VMM_identity_mapping(void);
+
+void VMM_map_page(uint64_t virt, uint64_t phys);
+void VMM_map_pages(uintptr_t virt, uintptr_t phys, size_t len);
 
 void VMM_load_cr3(void);
 

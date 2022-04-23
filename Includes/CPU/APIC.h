@@ -29,89 +29,36 @@
 #define APIC_IMCR_ACCESS                    0x70
 #define APIC_FORCE_NMI_INTR_SIG             0x01
 
-typedef struct APIC_MADT_record
-{
-    uint8_t type;
-    uint8_t length;
-} APIC_MADT_record_t;
-
-typedef struct APIC_proc_local1
-{
-    uint8_t ACPI_proc_ID;
-    uint8_t APIC_ID;
-    uint32_t flags;
-} APIC_proc_local1_t;
-
-typedef struct APIC_IO
-{
-    uint8_t IO_APIC_ID;
-    uint8_t reserved;
-    uint32_t IO_APIC_address;
-    uint32_t GSI_base;
-} APIC_IO_t;
-
-typedef struct APIC_IO_int_source_override
-{
-    uint8_t bus_source;
-    uint8_t irq_source;
-    uint32_t GSI;
-    uint16_t flags;
-} APIC_IO_int_source_override_t;
-
-typedef struct APIC_IO_nmask_int_source
-{
-    uint8_t NMI_source;
-    uint8_t reserved;
-    uint16_t flags;
-    uint32_t GSI;
-} APIC_IO_nmask_int_source_t;
-
-typedef struct APIC_local_nmask_int
-{
-    uint8_t ACPI_proc_ID;
-    uint16_t flags;
-    uint8_t LINT;
-} APIC_local_nmask_int_t;
-
-typedef struct APIC_local_addr_override
-{
-    uint16_t reserved;
-    uint64_t phys_addr;
-} APIC_local_addr_override_t;
-
-typedef struct APIC_proc_local2
-{
-    uint16_t reserved;
-    uint32_t APIC_proc_local_ID;
-    uint32_t flags;
-    uint32_t ACPI_ID;
-
-} APIC_proc_local2_t;
-
 typedef struct APIC_MADT
 {
     ACPI_SDT_header_t SDT_header;
     uint32_t lapic_ptr;
     uint32_t flags;
-    APIC_MADT_record_t records[];
+    uint8_t records[];
 } APIC_MADT_t;
 
+typedef struct APIC_IO
+{
+    uint8_t id;
+    uint32_t ptr;
+    uint32_t irq_base;
+    uint32_t irq_end;
+} APIC_IO_t;
+
 bool APIC_check(void);
-
-void APIC_set_base(uintptr_t apic);
-uintptr_t APIC_get_base(void);
-
-uint64_t APIC_local_read(uint64_t offset);
-void APIC_local_write(uint64_t offset, uint64_t value);
 
 void APIC_enable(void);
 void APIC_detect_cores(APIC_MADT_t* madt);
 void APIC_disable_PIC_mode(void);
-void APIC_init(void);
+void APIC_init(APIC_MADT_t* madt);
 
-uint64_t APIC_get_local_register(void);
+uintptr_t APIC_get_base(void);
+void APIC_set_base(uintptr_t apic);
 
-uint32_t APIC_read_IO(void* ioapicaddr, uint32_t reg);
-void APIC_write_IO(void* ioapicaddr, uint32_t reg, uint32_t value);
+uint64_t APIC_local_read(uint64_t offset);
+void APIC_local_write(uint64_t offset, uint64_t value);
+
+uint32_t APIC_IO_read(uint8_t index, uint32_t reg);
+void APIC_IO_write(uint8_t index, uint32_t reg, uint32_t value);
 
 #endif

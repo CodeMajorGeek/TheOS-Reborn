@@ -26,6 +26,8 @@ void read_multiboot2_info(const void*);
 extern void* kernel_start;
 extern void* kernel_end;
 
+static APIC_MADT_t* MADT = NULL;
+
 __attribute__((__noreturn__)) void k_entry(const void* mbt2_info)
 {
     TTY_init();
@@ -40,26 +42,17 @@ __attribute__((__noreturn__)) void k_entry(const void* mbt2_info)
 
     read_multiboot2_info(mbt2_info);
 
+    VMM_init();
+
+    MADT = (APIC_MADT_t*) ACPI_get_table(ACPI_APIC_SIGNATURE);
+
     IDT_init();
+    APIC_init(MADT);
+
     PIT_init();
-
-    if (APIC_check())
-    {
-        PIC_disable();
-        APIC_init();
-    }
-
-    VMM_map_kernel();
-    VMM_identity_mapping();
-    VMM_load_cr3();
-
-    APIC_enable();
-
     ATA_init();
     PCI_init();
-
     Keyboard_init();
-
     Syscall_init();
 
     printf("Je suis un petit test ! :)\n");

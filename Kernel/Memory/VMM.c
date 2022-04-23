@@ -4,12 +4,9 @@
 #include <Memory/PMM.h>
 #include <Device/VGA.h>
 #include <Device/TTY.h>
-#include <CPU/APIC.h>
+#include <CPU/ACPI.h>
 
 static PML4_t* VMM_PML4;
-
-static uint64_t VMM_virt_kernel_mem;
-static uint64_t VMM_virt_kernel;
 
 static uint64_t VMM_VGA_virt;
 static uint64_t VMM_AHCI_MMIO_virt;
@@ -34,6 +31,16 @@ uint64_t VMM_get_AHCI_MMIO_virt(void)
     return VMM_AHCI_MMIO_virt;
 }
 
+int debug = 0;
+void VMM_init(void)
+{
+    VMM_map_kernel();
+    VMM_identity_mapping();
+    VMM_load_cr3();
+
+    debug = 1;
+}
+
 void VMM_map_kernel(void)
 {
     uint64_t phys_base = PMM_get_kernel_start();
@@ -42,7 +49,6 @@ void VMM_map_kernel(void)
     VMM_PML4 = (PML4_t*) PMM_alloc_page();
 
     uint64_t virt_addr = phys_base;
-    VMM_virt_kernel_mem = virt_addr;
 
     while (phys_base < phys_end)
     {
@@ -57,8 +63,38 @@ void VMM_map_kernel(void)
 
     VMM_AHCI_MMIO_virt = virt_addr;
     virt_addr += 0x1000;
+}
 
-    VMM_virt_kernel = virt_addr;
+void VMM_identity_mapping(void)
+{
+    uintptr_t kernel_start = PMM_get_kernel_start();
+    uintptr_t kernel_end = PMM_get_kernel_end();
+
+    PMM_region_t* regions = PMM_get_regions();
+    for (int i = 0; i < PMM_get_num_regions(); i++)
+    {
+        PMM_region_t region = regions[i];
+
+        uintptr_t phys = region.addr_start;
+        for (uintptr_t phys = region.addr_start; phys < region.addr_end; phys += PHYS_PAGE_SIZE)
+        {
+            if (phys >= kernel_start && phys <= kernel_end) // Check if it's the kernel area.
+                continue;
+
+            VMM_map_page(phys, phys);
+
+            phys += PHYS_PAGE_SIZE;
+        }
+
+        printf("The region %d is now identity mapped !\n", i);
+    }
+
+    ACPI_memory_map();
+
+    VMM_map_page(VMM_VGA_virt, VGA_BUFFER_ADDRESS); // Map the VGA textmode buffer to another location.
+    TTY_set_buffer((uint16_t*) VMM_VGA_virt);       // Set the TTY buffer to the new virtual address.
+
+    VMM_map_page(VMM_AHCI_MMIO_virt, AHCI_MMIO_BUFFER_ADDRESS);
 }
 
 void VMM_map_page(uint64_t virt, uint64_t phys)
@@ -79,7 +115,6 @@ void VMM_map_page(uint64_t virt, uint64_t phys)
         
         add_attribute(&PDPT_entry, PRESENT);
         add_attribute(&PDPT_entry, WRITABLE);
-        add_attribute(&PDPT_entry, USER_MODE);
         VMM_PML4->entries[PML4_INDEX((uint64_t) virt)] = PDPT_entry;
     }
     
@@ -95,7 +130,6 @@ void VMM_map_page(uint64_t virt, uint64_t phys)
 
         add_attribute(&PDT_entry, PRESENT);
         add_attribute(&PDT_entry, WRITABLE);
-        add_attribute(&PDT_entry, USER_MODE);
         PDPT->entries[PDPT_INDEX((uint64_t) virt)] = PDT_entry;
     }
 
@@ -111,26 +145,28 @@ void VMM_map_page(uint64_t virt, uint64_t phys)
 
         add_attribute(&PT_entry, PRESENT);
         add_attribute(&PT_entry, WRITABLE);
-        add_attribute(&PT_entry, USER_MODE);
         PDT->entries[PDT_INDEX(virt)] = PT_entry;
     }
 
     uint64_t entry = phys;
     add_attribute(&entry, PRESENT);
     add_attribute(&entry, WRITABLE);
-    add_attribute(&entry, USER_MODE);
     PT->entries[PT_INDEX(virt)] = entry;
 }
 
-void VMM_identity_mapping(void)
+void VMM_map_pages(uintptr_t virt, uintptr_t phys, size_t len)
 {
-    VMM_map_page(VMM_VGA_virt, VGA_BUFFER_ADDRESS); // Map the VGA textmode buffer to another location.
-    TTY_set_buffer((uint16_t*) VMM_VGA_virt);       // Set the TTY buffer to the new virtual address.
+    uintptr_t virtual_address = virt;
+    uintptr_t physical_address = phys;
 
-    VMM_map_page(VMM_AHCI_MMIO_virt, AHCI_MMIO_BUFFER_ADDRESS);
-
-    if (APIC_check())
-        VMM_map_page(APIC_get_local_register(), APIC_get_local_register());
+    while (physical_address < phys + len)
+    {
+        printf("Page 0x%H is now identity mapped !\n", physical_address);
+        VMM_map_page(virtual_address, physical_address);
+        
+        physical_address += PHYS_PAGE_SIZE;
+        virtual_address += PHYS_PAGE_SIZE;
+    }
 }
 
 void VMM_load_cr3(void)
