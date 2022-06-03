@@ -2,7 +2,9 @@
 
 #include <Device/PIC.h>
 #include <CPU/Syscall.h>
+#include <CPU/APIC.h>
 
+#include <stdbool.h>
 #include <stdint.h>
 #include <stdlib.h>
 #include <stdio.h>
@@ -13,7 +15,15 @@ void ISR_register_IRQ(int index, IRQ_t irq)
 {
     int irq_index = index - ISR_COUNT_BEFORE_IRQ;
     if (irq_index < MAX_IRQ_ENTRIES)
+    {
+        if (APIC_is_enabled())
+        {
+            APIC_register_IRQ_vector(index, irq_index, FALSE);
+            APIC_send_EOI();
+        }
+
         IRQ_handlers[irq_index] = irq;
+    }
 }
 
 void ISR_handler(interrupt_frame_t frame)
@@ -38,8 +48,11 @@ void ISR_handler(interrupt_frame_t frame)
 
 void IRQ_handler(interrupt_frame_t frame)
 {
-    /* Must send EOI to the PIC. */
-    PIC_send_EOI(frame.err_code); // err_code store the irq index here.   
+    /* Must send EOI. */
+    if (APIC_is_enabled())
+        APIC_send_EOI();
+    else 
+        PIC_send_EOI(frame.err_code); // err_code store the irq index here.  
 
     IRQ_t handler = IRQ_handlers[frame.err_code];
     if (handler != 0)

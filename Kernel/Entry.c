@@ -52,7 +52,11 @@ __attribute__((__noreturn__)) void k_entry(const void* mbt2_info)
     IDT_init();
 
     if (APIC_check())
+    {
+        PIC_disable();
         APIC_init(MADT);
+        APIC_enable();
+    }
 
     PIT_init();
     ATA_init();

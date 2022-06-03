@@ -79,11 +79,8 @@ void VMM_identity_mapping(void)
     VMM_map_page(VMM_AHCI_MMIO_virt, AHCI_MMIO_BUFFER_ADDRESS);
 }
 
-bool debug;
 void VMM_map_page(uint64_t virt, uint64_t phys)
 {
-    printf("Mapping 0x%H to 0x%H !\n", virt, phys);
-
     PDPT_t* PDPT;
     PDT_t* PDT;
     PT_t* PT;
@@ -158,6 +155,4 @@ void VMM_load_cr3(void)
 {
     uint64_t pml4_addr = (uint64_t) VMM_PML4;
     __asm__ __volatile__("mov %0, %%cr3":: "b"(pml4_addr));
-
-    debug = true;
 }

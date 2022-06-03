@@ -18,16 +18,38 @@
 #define APIC_PROCESSOR_ENABLED              1
 #define APIC_ONLINE_CAPABLE                 (1 << 1)
 
-#define APIC_LOCAL_ID_REG                   0x20
-#define APIC_SPURIOUS_VEC_REG               0xF0
-#define APIC_INT_CMD_REG_LO                 0x300
-#define APIC_INT_CMD_REG_HI                 0x310
-
 #define APIC_IMCR_CTRL_REG                  0x22
 #define APIC_IMCR_DATA_REG                  0x23
 
 #define APIC_IMCR_ACCESS                    0x70
 #define APIC_FORCE_NMI_INTR_SIG             0x01
+
+#define APIC_APICID                         0x20
+#define APIC_APICVER	                    0x30
+#define APIC_TASKPRIOR	                    0x80
+#define APIC_EOI	                        0x0B0
+#define APIC_LDR	                        0x0D0
+#define APIC_DFR	                        0x0E0
+#define APIC_SPURIOUS	                    0x0F0
+#define APIC_ESR	                        0x280
+#define APIC_ICRL	                        0x300
+#define APIC_ICRH	                        0x310
+#define APIC_LVT_TMR	                    0x320
+#define APIC_LVT_PERF	                    0x340
+#define APIC_LVT_LINT0                  	0x350
+#define APIC_LVT_LINT1	                    0x360
+#define APIC_LVT_ERR	                    0x370
+#define APIC_TMRINITCNT	                    0x380
+#define APIC_TMRCURRCNT	                    0x390
+#define APIC_TMRDIV	                        0x3E0
+#define APIC_LAST	                        0x38F
+#define APIC_DISABLE	                    0x10000
+#define APIC_SW_ENABLE	                    0x100
+#define APIC_CPUFOCUS	                    0x200
+#define APIC_NMI	                        (4 << 8)
+#define TMR_PERIODIC	                    0x20000
+#define TMR_BASEDIV	                        (1 << 20)
+
 
 typedef struct APIC_MADT
 {
@@ -60,5 +82,9 @@ void APIC_local_write(uint64_t offset, uint64_t value);
 
 uint32_t APIC_IO_read(uint8_t index, uint32_t reg);
 void APIC_IO_write(uint8_t index, uint32_t reg, uint32_t value);
+
+bool APIC_is_enabled(void);
+void APIC_register_IRQ_vector(int vec, int irq, bool disable);
+void APIC_send_EOI(void);
 
 #endif
