@@ -71,7 +71,7 @@ void* ACPI_get_table_old(ACPI_RSDT_t* rsdt, char signature[4])
 
         if (!strncmp(SDT_header->signature, signature, 4))
         {
-            // VMM_map_pages((uintptr_t) SDT_header, (uintptr_t) SDT_header, SDT_header->length);
+            VMM_map_pages((uintptr_t) SDT_header, (uintptr_t) SDT_header, SDT_header->length);
             return (void*) SDT_header;
         }
     }
@@ -90,7 +90,7 @@ void* ACPI_get_table_new(ACPI_XSDT_t* xsdt, char signature[4])
 
         if (!strncmp(SDT_header->signature, signature, 4))
         {
-            // VMM_map_pages((uintptr_t) SDT_header, (uintptr_t) SDT_header, SDT_header->length);
+            VMM_map_pages((uintptr_t) SDT_header, (uintptr_t) SDT_header, SDT_header->length);
             return (void*) SDT_header;
         }    
     }
@@ -107,13 +107,4 @@ void* ACPI_get_table(char signature[4])
         return ACPI_get_table_old(ACPI_RSDT, signature);
 
     return (void*) NULL;
-}
-
-void ACPI_memory_map(void)
-{
-    if (ACPI_XSDT != NULL)
-        VMM_map_pages((uintptr_t) ACPI_XSDT, (uintptr_t) ACPI_XSDT, sizeof (ACPI_XSDT_t));
-
-    if (ACPI_RSDT != NULL)
-        VMM_map_pages((uintptr_t) ACPI_RSDT, (uintptr_t) ACPI_RSDT, sizeof (ACPI_RSDT_t));
 }

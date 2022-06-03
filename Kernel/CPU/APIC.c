@@ -36,6 +36,8 @@ void APIC_detect_cores(APIC_MADT_t* madt)
     APIC_local_ptr = madt->lapic_ptr;
     VMM_map_page((uintptr_t) APIC_local_ptr, (uintptr_t) APIC_local_ptr);
 
+    APIC_enable();
+
     size_t madt_size = madt->SDT_header.length;
     uintptr_t madt_end = (uintptr_t) madt + madt_size;
     
@@ -56,6 +58,7 @@ void APIC_detect_cores(APIC_MADT_t* madt)
 
                 io->id = *((uint8_t*) (current_ptr + 2));
                 io->ptr = *((uint32_t*) (current_ptr + 4));
+
                 VMM_map_page((uintptr_t) io->ptr, (uintptr_t) io->ptr);
                 io->irq_base = *((uint32_t*) (current_ptr + 8));
                 io->irq_end =  io->irq_base + ((APIC_IO_read(APIC_IO_num, 0x1) >> 16) & 0xFF);
@@ -114,7 +117,8 @@ void APIC_local_write(uint64_t offset, uint64_t value)
 
 uint32_t APIC_IO_read(uint8_t index, uint32_t reg)
 {
-   uint32_t volatile* ioapic = (uint32_t volatile*) APIC_IOs[index].ptr;
+   uint32_t volatile* ioapic = (uint32_t volatile*) 0xC00000;
+   printf("Read IO address 0x%H, reg 0x%H !\n", APIC_IOs[index].ptr, reg);
    ioapic[0] = (reg & 0xff);
    return ioapic[4];
 }

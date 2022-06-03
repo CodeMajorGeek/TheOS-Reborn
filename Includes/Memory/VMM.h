@@ -37,9 +37,8 @@ typedef struct PT
 
 uint64_t VMM_get_AHCI_MMIO_virt(void);
 
-void VMM_init(void);
-
 void VMM_map_kernel(void);
+void VMM_identity_map_all(void);
 void VMM_identity_mapping(void);
 
 void VMM_map_page(uint64_t virt, uint64_t phys);

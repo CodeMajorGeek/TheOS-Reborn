@@ -6,6 +6,8 @@
 #include <Device/TTY.h>
 #include <CPU/ACPI.h>
 
+#include <stdio.h>
+
 static PML4_t* VMM_PML4;
 
 static uint64_t VMM_VGA_virt;
@@ -31,22 +33,13 @@ uint64_t VMM_get_AHCI_MMIO_virt(void)
     return VMM_AHCI_MMIO_virt;
 }
 
-int debug = 0;
-void VMM_init(void)
-{
-    VMM_map_kernel();
-    VMM_identity_mapping();
-    VMM_load_cr3();
-
-    debug = 1;
-}
-
 void VMM_map_kernel(void)
 {
     uint64_t phys_base = PMM_get_kernel_start();
     uint64_t phys_end = PMM_get_kernel_end();
 
     VMM_PML4 = (PML4_t*) PMM_alloc_page();
+    VMM_identity_map_all();
 
     uint64_t virt_addr = phys_base;
 
@@ -65,40 +58,32 @@ void VMM_map_kernel(void)
     virt_addr += 0x1000;
 }
 
-void VMM_identity_mapping(void)
+void VMM_identity_map_all(void)
 {
-    uintptr_t kernel_start = PMM_get_kernel_start();
-    uintptr_t kernel_end = PMM_get_kernel_end();
-
     PMM_region_t* regions = PMM_get_regions();
     for (int i = 0; i < PMM_get_num_regions(); i++)
     {
         PMM_region_t region = regions[i];
-
-        uintptr_t phys = region.addr_start;
-        for (uintptr_t phys = region.addr_start; phys < region.addr_end; phys += PHYS_PAGE_SIZE)
-        {
-            if (phys >= kernel_start && phys <= kernel_end) // Check if it's the kernel area.
-                continue;
-
+        for (uintptr_t phys = region.addr_start; phys < region.addr_end; phys += PHYS_PAGE_SIZE)   
             VMM_map_page(phys, phys);
-
-            phys += PHYS_PAGE_SIZE;
-        }
 
         printf("The region %d is now identity mapped !\n", i);
     }
+}
 
-    ACPI_memory_map();
-
+void VMM_identity_mapping(void)
+{
     VMM_map_page(VMM_VGA_virt, VGA_BUFFER_ADDRESS); // Map the VGA textmode buffer to another location.
     TTY_set_buffer((uint16_t*) VMM_VGA_virt);       // Set the TTY buffer to the new virtual address.
 
     VMM_map_page(VMM_AHCI_MMIO_virt, AHCI_MMIO_BUFFER_ADDRESS);
 }
 
+bool debug;
 void VMM_map_page(uint64_t virt, uint64_t phys)
 {
+    printf("Mapping 0x%H to 0x%H !\n", virt, phys);
+
     PDPT_t* PDPT;
     PDT_t* PDT;
     PT_t* PT;
@@ -117,7 +102,7 @@ void VMM_map_page(uint64_t virt, uint64_t phys)
         add_attribute(&PDPT_entry, WRITABLE);
         VMM_PML4->entries[PML4_INDEX((uint64_t) virt)] = PDPT_entry;
     }
-    
+
     uint64_t PDPT_entry = PDPT->entries[PDPT_INDEX(virt)];
     if (is_present(&PDPT_entry))
     {
@@ -173,4 +158,6 @@ void VMM_load_cr3(void)
 {
     uint64_t pml4_addr = (uint64_t) VMM_PML4;
     __asm__ __volatile__("mov %0, %%cr3":: "b"(pml4_addr));
+
+    debug = true;
 }

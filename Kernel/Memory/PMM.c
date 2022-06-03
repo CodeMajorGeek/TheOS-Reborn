@@ -123,9 +123,15 @@ void* PMM_alloc_page(void)
     PMM_region_t region;
 
     size_t i = 0;
-    while (index == -1 || i < PMM_num_regions)
-        index = PMM_get_index_of_free_page(region = PMM_regions[i++]);
-    
+    for (i = 0; i < PMM_num_regions; i++)
+    {
+        region = PMM_regions[i];
+        index = PMM_get_index_of_free_page(region);
+
+        if (index != -1)
+            break;
+    }
+
     if (index == -1)
         return NULL; // Out of memory.
 

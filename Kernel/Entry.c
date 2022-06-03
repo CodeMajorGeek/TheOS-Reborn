@@ -42,12 +42,17 @@ __attribute__((__noreturn__)) void k_entry(const void* mbt2_info)
 
     read_multiboot2_info(mbt2_info);
 
-    VMM_init();
+    VMM_map_kernel();
 
     MADT = (APIC_MADT_t*) ACPI_get_table(ACPI_APIC_SIGNATURE);
 
+    VMM_identity_mapping();
+    VMM_load_cr3();
+
     IDT_init();
-    APIC_init(MADT);
+
+    if (APIC_check())
+        APIC_init(MADT);
 
     PIT_init();
     ATA_init();
