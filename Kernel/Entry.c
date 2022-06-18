@@ -31,15 +31,14 @@ static APIC_MADT_t* MADT = NULL;
 __attribute__((__noreturn__)) void k_entry(const void* mbt2_info)
 {
     TTY_init();
+    PCI_init();
     logger_init();
 
     PMM_init((uint64_t) &kernel_start, (uint64_t) &kernel_end);
-    printf("Kernel start at 0x%H%H and end at 0x%H%H\n",
+    printf("Kernel start at 0x%X%X and end at 0x%X%X\n",
         (unsigned) ((uint64_t) &kernel_start >> 32), (unsigned) ((uint64_t) &kernel_start & 0xffffffff),
         (unsigned) ((uint64_t) &kernel_end >> 32), (unsigned) ((uint64_t) &kernel_end & 0xffffffff));
-
-    PMM_init_AHCI();
-
+    
     read_multiboot2_info(mbt2_info);
 
     VMM_map_kernel();
@@ -60,7 +59,8 @@ __attribute__((__noreturn__)) void k_entry(const void* mbt2_info)
 
     PIT_init();
     ATA_init();
-    PCI_init();
+    AHCI_init();
+
     Keyboard_init();
     Syscall_init();
 
@@ -95,7 +95,7 @@ void read_multiboot2_info(const void* mbt2_info)
                 {
                     if (mmap->type == MULTIBOOT_MEMORY_AVAILABLE)
                     {
-                        printf("MMAP avaliable found at addr 0x%H%H with size of 0x%H%H !\n",
+                        printf("MMAP avaliable found at addr 0x%X%X with size of 0x%X%X !\n",
                             (unsigned) (mmap->addr >> 32),
                             (unsigned) (mmap->addr & 0xffffffff),
                             (unsigned) (mmap->len >> 32),

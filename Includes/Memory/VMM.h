@@ -35,13 +35,14 @@ typedef struct PT
     uint64_t entries[512];
 } PT_t;
 
-uint64_t VMM_get_AHCI_MMIO_virt(void);
+uintptr_t VMM_get_AHCI_MMIO_virt(void);
+uintptr_t VMM_get_AHCI_buffer_virt(void);
 
 void VMM_map_kernel(void);
 void VMM_identity_map_all(void);
 void VMM_identity_mapping(void);
 
-void VMM_map_page(uint64_t virt, uint64_t phys);
+void VMM_map_page(uintptr_t virt, uintptr_t phys);
 void VMM_map_pages(uintptr_t virt, uintptr_t phys, size_t len);
 
 void VMM_load_cr3(void);

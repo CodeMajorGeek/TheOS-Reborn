@@ -8,28 +8,23 @@
 
 #include <stdio.h>
 
-static PCI_func_t PCI_AHCI;
-
-static void* PCI_pages_for_ahci_start;
-static void* PCI_pages_for_ahci_end;
+PCI_func_t PCI_AHCI = { .vendor_id = AHCI_PCI_VENDOR_ID,
+	                    .device_id = AHCI_PCI_DEVICE_ID,
+	                    .MMIO_reg  = AHCI_PCI_MMIO_REG,
+	                    .interrupt_reg = AHCI_PCI_INT_REG };
 
 void PCI_init(void)
 {
-    /* AHCI + SATA setup. */
-    PCI_AHCI.vendor_id = PCI_AHCI_VENDOR_ID;
-    PCI_AHCI.device_id = PCI_AHCI_DEVICE_ID;
-    PCI_AHCI.MMIO_reg = PCI_AHCI_MMIO_REG;
-    PCI_AHCI.interrupt_reg = PCI_AHCI_INT_REG;
+    if (PCI_scan_bus(&PCI_AHCI))
+    {
+        printf("PCI bus for AHCI controller found !\n");
 
-    PCI_scan_bus(&PCI_AHCI);
-    PCI_get_MMIO_space_size(&PCI_AHCI);
+        PCI_get_MMIO_space_size(&PCI_AHCI);
 
-    PCI_AHCI.start_virtual_address = VMM_get_AHCI_MMIO_virt();
-    PCI_pages_for_ahci_start = (void*) PMM_get_AHCI_phys();
-
-    AHCI_probe_port((HBA_MEM_t*) PCI_AHCI.start_virtual_address);
-
-    SATA_init_table();
+        printf("\tMMIO space is %d !\n", PCI_AHCI.MMIO_reg_size);
+	    printf("\tMMIO address is 0x%X !\n", PCI_AHCI.MMIO_reg_addr);
+    } else
+		printf("Cannot find PCI bus for AHCI controller !\n");
 }
 
 uint16_t PCI_config_read_word(uint8_t bus, uint8_t slot, uint8_t func, uint8_t offset)
@@ -128,6 +123,4 @@ void PCI_change_IRQ(PCI_func_t* PCI_device, int IRQ)
     IO_outl(0xCFC, (val & 0xFFFFFF00) | IRQ);
 
     PCI_device->IRQ_line = PCI_read_word(lbus, lslot, 0, PCI_device->interrupt_reg & 0xFF);
-
-    // PCI_pages_for_ahci_start = VMM_get_AHCI_phys();
 }

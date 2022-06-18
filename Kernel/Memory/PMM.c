@@ -17,8 +17,6 @@ static uintptr_t PMM_kernel_end;
 
 static bool is_kmem_initialized = FALSE;
 
-static uintptr_t PMM_AHCI_phys;
-
 void PMM_init(uintptr_t kernel_start, uintptr_t kernel_end)
 {
     PMM_kernel_start = kernel_start;
@@ -33,11 +31,6 @@ uintptr_t PMM_get_kernel_start(void)
 uintptr_t PMM_get_kernel_end(void)
 {
     return PMM_kernel_end;
-}
-
-uintptr_t PMM_get_AHCI_phys(void)
-{
-    PMM_AHCI_phys;
 }
 
 PMM_region_t* PMM_get_regions(void)
@@ -144,10 +137,4 @@ void PMM_dealloc_page(void* ptr)
     uint64_t addr = (uint64_t) ptr;
     // TODO: method to get the region of a page.
     
-}
-
-void PMM_init_AHCI(void)
-{
-    PMM_AHCI_phys = PMM_kernel_end;
-    PMM_kernel_end += AHCI_SIZE;
 }

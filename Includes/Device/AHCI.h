@@ -6,6 +6,11 @@
 #include <stdbool.h>
 #include <stdint.h>
 
+#define AHCI_PCI_VENDOR_ID  0x8086
+#define AHCI_PCI_DEVICE_ID  0x2922
+#define AHCI_PCI_MMIO_REG   0x24
+#define AHCI_PCI_INT_REG    0x3C
+
 #define	SATA_SIG_ATA	0x00000101	// SATA drive
 #define	SATA_SIG_ATAPI	0xEB140101	// SATAPI drive
 #define	SATA_SIG_SEMB	0xC33C0101	// Enclosure management bridge
@@ -33,7 +38,9 @@
 #define ATA_CMD_READ_DMA_EX     0x25
 #define HBA_PxIS_TFES 			(1 << 30) // TFES - Task File Error Status.
 
-#define AHCI_MMIO_BUFFER_ADDRESS	0xFEBF0000
+#define AHCI_SECTOR_SIZE	512 // Sector size in byte.
+#define AHCI_SIZE			(120 * 1024)
+
 
 #define trace_ahci(...) printf(__VA_ARGS__)
 
@@ -338,6 +345,7 @@ typedef struct HBA_CMD_TBL
 	HBA_PRDT_ENTRY_t	prdt_entry[1];	// Physical region descriptor table entries, 0 ~ 65535
 } HBA_CMD_TBL_t;
 
+void AHCI_init(void);
 
 void AHCI_probe_port(HBA_MEM_t* abar);
 static int AHCI_check_type(HBA_PORT_t* port);

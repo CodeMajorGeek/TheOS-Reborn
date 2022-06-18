@@ -1,17 +1,25 @@
 #include <Device/AHCI.h>
 
+#include <CPU/PCI.h>
+#include <Memory/VMM.h>
+#include <Storage/SATA.h>
+
 #include <string.h>
 #include <stdio.h>
 
-static HBA_MEM_t* abar;
+HBA_MEM_t* AHCI_ABAR;
 
 void AHCI_init(void)
 {
-    ISR_register_IRQ(IRQ10, AHCI_callback);
+	ISR_register_IRQ(IRQ10, AHCI_callback);
+
+	AHCI_probe_port((HBA_MEM_t*) VMM_get_AHCI_MMIO_virt());
 }
 
 void AHCI_probe_port(HBA_MEM_t* abar_temp)
 {
+	trace_ahci("Trying to probe AHCI ports !\n");
+
 	// Search disk in implemented ports
 	uint32_t pi = abar_temp->pi;
 	int i = 0;
@@ -22,24 +30,27 @@ void AHCI_probe_port(HBA_MEM_t* abar_temp)
 			int dt = AHCI_check_type(&abar_temp->ports[i]);
 			if (dt == AHCI_DEV_SATA)
             {
-                trace_ahci("SATA drive found at port %d\n", i);
-                abar = abar_temp;
-                AHCI_port_rebase(abar->ports, i);
-                trace_ahci("DONE AHCI INITIALISATION :: PORT REBASE");
+                trace_ahci("SATA drive found at port %d !\n", i);
+                AHCI_ABAR = abar_temp;
+                AHCI_port_rebase(&AHCI_ABAR->ports[0], i);
+				SATA_init_table(&AHCI_ABAR->ports[0]);
+                trace_ahci("\tDONE AHCI INITIALISATION :: PORT REBASE\n");
             }
 			else if (dt == AHCI_DEV_SATAPI)
-				trace_ahci("SATAPI drive found at port %d\n", i);
+				trace_ahci("SATAPI drive found at port %d !\n", i);
 			else if (dt == AHCI_DEV_SEMB)
-				trace_ahci("SEMB drive found at port %d\n", i);
+				trace_ahci("SEMB drive found at port %d !\n", i);
 			else if (dt == AHCI_DEV_PM)
-				trace_ahci("PM drive found at port %d\n", i);
+				trace_ahci("PM drive found at port %d !\n", i);
 			else
-				trace_ahci("No drive found at port %d\n", i);
+				trace_ahci("No drive found at port %d !\n", i);
 		}
  
 		pi >>= 1;
 		i++;
 	}
+
+	trace_ahci("AHCI ports probing done !\n");
 }
 
 // Check device type
@@ -227,7 +238,7 @@ int AHCI_find_cmdslot(HBA_PORT_t* port)
 {
 	// If not set in SACT and CI, the slot is free
 	uint32_t slots = (port->sact | port->ci);
-    int cmdslots = (abar->cap & 0x0f00) >> 8; // Bit 8-12
+    int cmdslots = (AHCI_ABAR->cap & 0x0f00) >> 8; // Bit 8-12
 
 	for (int i = 0; i < cmdslots; i++)
 	{
@@ -243,16 +254,14 @@ static void AHCI_callback(interrupt_frame_t* frame)
 {
     trace_ahci("AHCI INTERRUPT TRIGGERED !\n");
 
-    if (abar->ports[0].is & HBA_PxIS_TFES)
+    if (AHCI_ABAR->ports[0].is & HBA_PxIS_TFES)
         trace_ahci("Read disk error !\n");
 
-    trace_ahci("\tTFD=[%d],\n", ((HBA_PORT_t*) &abar->ports[0])->tfd);
-    trace_ahci("\tSSTS=[%d],\n", ((HBA_PORT_t*) &abar->ports[0])->ssts);
-    trace_ahci("\tIE=[%d],\n", ((HBA_PORT_t*) &abar->ports[0])->ie);
-    trace_ahci("\tSERR=[%d],\n", ((HBA_PORT_t*) &abar->ports[0])->serr);
-    trace_ahci("\tIS=[%d]\n", ((HBA_PORT_t*) &abar->ports[0])->is);
+    trace_ahci("\tTFD=[%d],\n", ((HBA_PORT_t*) &AHCI_ABAR->ports[0])->tfd);
+    trace_ahci("\tSSTS=[%d],\n", ((HBA_PORT_t*) &AHCI_ABAR->ports[0])->ssts);
+    trace_ahci("\tIE=[%d],\n", ((HBA_PORT_t*) &AHCI_ABAR->ports[0])->ie);
+    trace_ahci("\tSERR=[%d],\n", ((HBA_PORT_t*) &AHCI_ABAR->ports[0])->serr);
+    trace_ahci("\tIS=[%d]\n", ((HBA_PORT_t*) &AHCI_ABAR->ports[0])->is);
 
-    abar->ports[0].is = 0xFFFF;
-
-    while (TRUE);
+    AHCI_ABAR->ports[0].is = 0xFFFF;
 }

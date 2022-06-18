@@ -52,10 +52,12 @@ void TTY_putc(char c)
     COM_putc(TTY_COM_PORT, c);
 #endif
 
-    if (TTY_row >= VGA_HEIGHT - 1)
+    if (TTY_row >= VGA_HEIGHT)
     {
-        memcpyw(TTY_buffer, TTY_buffer + VGA_WIDTH, VGA_WIDTH * (VGA_HEIGHT - 2) * sizeof (uint16_t));
-        --TTY_row;
+        // TODO: implement scrolling :).
+        TTY_clear();
+        TTY_row = 0;
+        TTY_col = 0;
     }
 
     switch (c)

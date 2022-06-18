@@ -123,9 +123,9 @@ int __printf(char* buff, size_t buff_len, const char* __restrict format, va_list
 
             written += len;
         }
-        else if (*format == 'h' || *format == 'H')
+        else if (*format == 'x' || *format == 'X')
         {
-            bool uppercase = *format == 'H';
+            bool uppercase = *format == 'X';
             format++;
             int v = va_arg(parameters, int);
             

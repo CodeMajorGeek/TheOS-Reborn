@@ -12,8 +12,8 @@
 typedef struct malloc_header
 {
     uint16_t state;                             // The state of the current memory frame.
-    size_t size;                              // Size in bytes.
-    struct malloc_header* prev_malloc_header; // The previous malloc header.
+    size_t size;                                // Size in bytes.
+    struct malloc_header* prev_malloc_header;   // The previous malloc header.
 } malloc_header_t;
 
 void kmem_init(uint64_t heap_start);

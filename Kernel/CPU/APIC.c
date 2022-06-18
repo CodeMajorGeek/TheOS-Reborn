@@ -117,14 +117,14 @@ void APIC_init(APIC_MADT_t* madt)
 {
     APIC_detect_cores(madt);
 
-    printf("Found %d cores, LAPIC 0x%H, Processor IDs:", APIC_num_core, APIC_local_ptr);
+    printf("Found %d cores, LAPIC 0x%X, Processor IDs:", APIC_num_core, APIC_local_ptr);
     for(int i = 0; i < APIC_num_core; i++)
         printf(" %d", APIC_lapic_IDs[i]);
     printf("\n");
 
     printf("Found %d IOAPIC:\n", APIC_IO_num);
     for(int i = 0; i < APIC_IO_num; i++)
-        printf("\tID: %d, Ptr: 0x%H, IRQ base: %d, IRQ end: %d !\n", APIC_IOs[i].id, APIC_IOs[i].ptr, APIC_IOs[i].irq_base, APIC_IOs[i].irq_end);
+        printf("\tID: %d, Ptr: 0x%X, IRQ base: %d, IRQ end: %d !\n", APIC_IOs[i].id, APIC_IOs[i].ptr, APIC_IOs[i].irq_base, APIC_IOs[i].irq_end);
 
     printf("Redirection entries found:\n");
     for (int i = 0; i < sizeof(APIC_IRQ_overrides); i++)

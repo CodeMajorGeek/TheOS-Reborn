@@ -4,10 +4,7 @@
 #include <stdint.h>
 #include <stdbool.h>
 
-#define PCI_AHCI_VENDOR_ID  0x8086
-#define PCI_AHCI_DEVICE_ID  0x2922
-#define PCI_AHCI_MMIO_REG   0x24
-#define PCI_AHCI_INT_REG    0x3C
+#include <Device/AHCI.h>
 
 typedef struct PCI_func
 {
@@ -20,10 +17,12 @@ typedef struct PCI_func
     uint32_t MMIO_reg_addr;
     uint32_t MMIO_reg_size;
     uint32_t IRQ_line;
-    uint32_t start_virtual_address;
+    uint64_t start_virtual_address;
 } PCI_func_t;
 
 void PCI_init(void);
+
+uint32_t PCI_get_ABAR(PCI_func_t* device);
 
 uint16_t PCI_config_read_word(uint8_t bus, uint8_t slot, uint8_t func, uint8_t offset);
 uint32_t PCI_read_word(uint16_t bus, uint16_t slot, uint16_t func, uint16_t offset);

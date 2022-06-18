@@ -2,6 +2,7 @@
 #define _VGA_H
 
 #define VGA_BUFFER_ADDRESS  0xB8000
+#define VGA_BUFFER_LENGTH   0x5000
 
 #define VGA_WIDTH   80
 #define VGA_HEIGHT  25
