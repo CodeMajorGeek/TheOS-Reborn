@@ -13,12 +13,9 @@
 #include <Memory/VMM.h>
 #include <CPU/UserMode.h>
 #include <Device/Keyboard.h>
-#include <Storage/ATA.h>
-#include <Device/AHCI.h>
 #include <CPU/PCI.h>
 #include <CPU/Syscall.h>
 #include <Device/PIC.h>
-
 #include <stdio.h>
 
 void read_multiboot2_info(const void*);
@@ -31,7 +28,6 @@ static APIC_MADT_t* MADT = NULL;
 __attribute__((__noreturn__)) void k_entry(const void* mbt2_info)
 {
     TTY_init();
-    PCI_init();
     logger_init();
 
     PMM_init((uint64_t) &kernel_start, (uint64_t) &kernel_end);
@@ -49,6 +45,7 @@ __attribute__((__noreturn__)) void k_entry(const void* mbt2_info)
     VMM_load_cr3();
 
     IDT_init();
+    PCI_init();
 
     if (APIC_check())
     {
@@ -58,13 +55,11 @@ __attribute__((__noreturn__)) void k_entry(const void* mbt2_info)
     }
 
     PIT_init();
-    ATA_init();
-    AHCI_init();
 
     Keyboard_init();
     Syscall_init();
 
-    printf("Je suis un petit test ! :)\n");
+    printf("Je suis un petit test ! :)");
 
     // switch_to_usermode();
 

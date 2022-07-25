@@ -5,7 +5,6 @@ set(KERNEL_BOOT_SOURCES
 )
 
 set(KERNEL_CPU_SOURCES
-    CPU/IO.c
     CPU/IDT.c
     CPU/Interrupts.S
     CPU/ISR.c
@@ -20,6 +19,7 @@ set(KERNEL_CPU_SOURCES
 
 set(KERNEL_DEBUG_SOURCES
     Debug/Logger.c
+    Debug/Spinlock.c
 )
 
 set(KERNEL_DEVICES_SOURCES
@@ -28,7 +28,6 @@ set(KERNEL_DEVICES_SOURCES
     Device/PIC.c
     Device/PIT.c
     Device/Keyboard.c
-    Device/AHCI.c
 )
 
 set(KERNEL_MEMORY_SOURCES
@@ -38,8 +37,7 @@ set(KERNEL_MEMORY_SOURCES
 )
 
 set(KERNEL_STORAGE_SOURCES
-    Storage/ATA.c
-    Storage/SATA.c
+    Storage/AHCI.c
 )
 
 set(KERNEL_SOURCES

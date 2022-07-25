@@ -15,6 +15,14 @@
 
 #define FRAME           0xFFFFFFFFFFFFF000
 
+#define HILO2ADDR(hi, lo)   ((((uint64_t) hi) << 32) + lo)
+
+#define ADDRHI(a)           ((a >> 32) & 0xFFFFFFFF)
+#define ADDRLO(a)           (a & 0xFFFFFFFF)
+
+#define V2P(a)              ((uintptr_t) a)
+#define P2V(a)              ((uintptr_t) a)
+
 typedef struct PML4
 {
     uint64_t entries[512];
@@ -34,9 +42,6 @@ typedef struct PT
 {
     uint64_t entries[512];
 } PT_t;
-
-uintptr_t VMM_get_AHCI_MMIO_virt(void);
-uintptr_t VMM_get_AHCI_buffer_virt(void);
 
 void VMM_map_kernel(void);
 void VMM_identity_map_all(void);

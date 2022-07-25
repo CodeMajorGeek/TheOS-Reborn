@@ -9,8 +9,6 @@
 static PML4_t* VMM_PML4;
 
 static uintptr_t VMM_VGA_virt;
-static uintptr_t VMM_AHCI_MMIO_virt;
-static uintptr_t VMM_AHCI_buffer_virt;
 
 extern PCI_func_t PCI_AHCI;
 
@@ -27,16 +25,6 @@ static int is_present(uintptr_t* entry)
 static uintptr_t get_address(uintptr_t* entry)
 {
     return (*entry & FRAME);
-}
-
-uintptr_t VMM_get_AHCI_MMIO_virt(void)
-{
-    return VMM_AHCI_MMIO_virt;
-}
-
-uintptr_t VMM_get_AHCI_buffer_virt(void)
-{
-    return VMM_AHCI_buffer_virt;
 }
 
 void VMM_map_kernel(void)
@@ -59,12 +47,6 @@ void VMM_map_kernel(void)
 
     VMM_VGA_virt = virt_addr;
     virt_addr += VGA_BUFFER_LENGTH;
-
-    VMM_AHCI_MMIO_virt = virt_addr;
-    virt_addr += 0x1000;
-
-    VMM_AHCI_buffer_virt = virt_addr;
-    virt_addr += AHCI_SIZE;
 }
 
 void VMM_identity_map_all(void)
@@ -82,11 +64,6 @@ void VMM_identity_mapping(void)
 {
     VMM_map_pages(VMM_VGA_virt, VGA_BUFFER_ADDRESS, VGA_BUFFER_LENGTH / PHYS_PAGE_SIZE);    // Map the VGA textmode buffer to another location.
     TTY_set_buffer((uint16_t*) VMM_VGA_virt);                                               // Set the TTY buffer to the new virtual address.
-
-    VMM_map_page(VMM_AHCI_MMIO_virt, (uintptr_t) PCI_AHCI.MMIO_reg_addr);
-
-    for (uintptr_t virt = VMM_AHCI_buffer_virt; virt < VMM_AHCI_buffer_virt + AHCI_SIZE; virt += PHYS_PAGE_SIZE)
-        VMM_map_page(virt, (uintptr_t) PMM_alloc_page());
 }
 
 void VMM_map_page(uintptr_t virt, uintptr_t phys)
