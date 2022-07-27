@@ -1,6 +1,5 @@
 #include <Memory/VMM.h>
 
-#include <CPU/PCI.h>
 #include <Memory/PMM.h>
 #include <Device/VGA.h>
 #include <Device/TTY.h>
@@ -9,8 +8,6 @@
 static PML4_t* VMM_PML4;
 
 static uintptr_t VMM_VGA_virt;
-
-extern PCI_func_t PCI_AHCI;
 
 static void add_attribute(uintptr_t* entry, uintptr_t attribute)
 {

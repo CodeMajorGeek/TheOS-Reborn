@@ -8,91 +8,80 @@
 
 void PCI_init(void)
 {
-    printf("Probing PCI !\n");
+    printf("Probing PCI bus 0 !\n");
 
-    static PCI_bus_t root_bus;
-    memset(&root_bus, 0, sizeof (root_bus));
-
-    PCI_scan_bus(&root_bus);
+    PCI_scan_bus(0);
 }
 
-static void PCI_conf_set_addr(uint32_t bus, uint32_t dev, uint32_t func, uint32_t offset)
+uint16_t PCI_config_readw(uint8_t bus, uint8_t slot, uint8_t func, uint8_t offset)
 {
-    assert(bus < 256);
-    assert(dev < 32);
+    assert(slot < 32);
     assert(func < 8);
-    assert(offset < 256);
-    assert((offset & 0x3) == 0);
 
-    uint32_t v = (1 << 31) | (bus << 16) | (dev << 11) | (func << 8) | offset;
-    IO_outl(PCI_CONF_ADDR_IO_PORT, v);
+    uint32_t lbus = (uint32_t) bus;
+    uint32_t lslot = (uint32_t) slot;
+    uint32_t lfunc = (uint32_t) func;
+
+    uint32_t address = (uint32_t) ((lbus << 16) | (lslot << 11) | (lfunc << 8) | (offset & 0xFC) | (1 << 31));
+
+    IO_outl(PCI_CONF_ADDR_IO_PORT, address);
+    return (uint16_t) ((IO_inl(PCI_CONF_DATA_IO_PORT) >> ((offset & 2) * 8)) & 0xFFFF);
 }
 
-uint32_t PCI_config_read(PCI_func_t* func, uint8_t offset)
+void PCI_check_device(uint8_t bus, uint8_t slot)
 {
-    PCI_conf_set_addr(func->bus->bus_no, func->dev, func->func, offset);
-    return IO_inl(PCI_CONF_DATA_IO_PORT);
-}
+    uint8_t function = 0;
 
-bool PCI_scan_device(PCI_func_t* func)
-{
-    func->dev_id = PCI_config_read(func, PCI_ID_REG);
-    if (PCI_VENDOR(func->dev_id) == 0xFFFF)
-        return false;
+    uint16_t vendor_id = PCI_config_readw(bus, slot, function, PCI_VENDOR_REG);
+    if (vendor_id == 0xFFFF)
+        return; // No device attached.
 
-    uint32_t intr = PCI_config_read(func, PCI_INTERRUPT_REG);
-    func->IRQ_line = PCI_INTERRUPT_LINE(intr);
+    uint16_t device_id = PCI_config_readw(bus, slot, function, PCI_DEVICE_REG);
 
-    func->dev_class = PCI_config_read(func, PCI_CLASS_REG);
-
-    return true;
-}
-
-int PCI_scan_bus(PCI_bus_t* bus)
-{
-    int tdev = 0;
-
-    PCI_func_t f;
-    memset(&f, 0, sizeof (f));
-    f.bus = bus;
-
-
-    for (f.dev = 0; f.dev < 32; f.dev++)
-    {
-        uint32_t bhlc = PCI_config_read(&f, PCI_BHLC_REG);
-        if (PCI_HDRTYPE_TYPE(bhlc) > 1)
-            continue;
-
-        ++tdev;
-
-        for (f.func = 0; f.func < (PCI_HDRTYPE_MULTIFN(bhlc) ? 8 : 1); f.func++)
-        {
-            if (!PCI_scan_device(&f))
-                continue;
-            else
-                PCI_try_attach(&f);
-        }
-    }
+    PCI_try_attach(bus, slot, function, vendor_id, device_id);
     
-    return tdev;
-}
-
-static void PCI_try_attach(PCI_func_t* func)
-{
-    uint16_t dev_class = PCI_CLASS(func->dev_class);
-    switch (dev_class)
+    PCI_check_function(bus, slot, function);
+    uint8_t header_type = (uint8_t) (PCI_config_readw(bus, slot, function, PCI_BIST_REG) & 0xFF);
+    if ((header_type & 0x80) != 0) // It's a multi function device.
     {
-        case PCI_DEV_CLASS_STORAGE:
-        case PCI_DEV_CLASS_BRIDGE:
-            PCI_attach_storage_dev(func);
-            break;
-        default:
-            break;
+        for (function = 1; function < 8; function++)
+            PCI_check_function(bus, slot, function);
     }
 }
 
-static void PCI_attach_storage_dev(PCI_func_t* func)
+void PCI_check_function(uint8_t bus, uint8_t slot, uint8_t function)
 {
-    printf("Trying setup PCI bus no: %d, dev: %d, func: %d \n", func->bus->bus_no, func->dev, func->func);
-    AHCI_try_setup_device(func->bus->bus_no, func->dev, func->func);
+    uint8_t base_class = (uint8_t) ((PCI_config_readw(bus, slot, function, PCI_CLASS_REG) >> 8) & 0XFF);
+    uint8_t sub_class = (uint8_t) (PCI_config_readw(bus, slot, function, PCI_CLASS_REG) & 0XFF);
+
+    if (base_class == 0x6 && sub_class == 0x4)
+    {
+        uint8_t secondary_bus = (uint8_t) (PCI_config_readw(bus, slot, function, PCI_SECONDARY_BUS_REG) & 0XFF);
+        PCI_scan_bus(secondary_bus);
+    }
+}
+
+void PCI_scan_bus(uint8_t bus)
+{
+    for (uint8_t device = 0; device < 32; device++)
+        PCI_check_device(bus, device);
+}
+
+static void PCI_try_attach(uint8_t bus, uint16_t slot, uint16_t function, uint16_t vendor, uint16_t device)
+{
+    uint8_t base_class = (uint8_t) ((PCI_config_readw(bus, slot, function, PCI_CLASS_REG) >> 8) & 0XFF); // TODO: Maybe try to execute once...
+    switch (base_class)
+    {
+    case PCI_DEV_CLASS_STORAGE:
+    case PCI_DEV_CLASS_BRIDGE:
+        PCI_attach_storage_dev(bus, device, function, vendor, device);
+        break;
+    default:
+        break;
+    }
+}
+
+static void PCI_attach_storage_dev(uint8_t bus, uint16_t slot, uint16_t function, uint16_t vendor, uint16_t device)
+{
+    printf("Found PCI Mass storage on bus=%d, slot=%d, vendor=0x%X, device=0x%X !\n", bus, slot, vendor, device);
 }

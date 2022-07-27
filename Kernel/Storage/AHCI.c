@@ -1,5 +1,6 @@
 #include <Storage/AHCI.h>
 
+#include <CPU/PCI.h>
 #include <CPU/IO.h>
 
 #include <stdbool.h>
@@ -9,24 +10,16 @@ static AHCI_device_t AHCI_devices[] =
     { AHCI_VENDOR_INTEL, AHCI_ICH7_SATA, "Intel ICH7 SATA Controller" },
     { AHCI_VENDOR_INTEL, 0x2829, "Intel ICH8M" },
     { AHCI_VENDOR_INTEL, 0x1922, "Intel ICH9" },
+    { AHCI_VENDOR_INTEL, 0x2922, "Intel ICH9R" },
     { AHCI_VENDOR_INTEL, 0x1E03, "Intel Panther Point" },
     { AHCI_VENDOR_VMWARE, 0x07E0, "VMWare SATA" },
     { AHCI_VENDOR_VMWARE, 0x2829, "VMWare PCIE Root" },
     { 0, 0, "" } // Terminal node.
 };
 
-uint16_t AHCI_probe(uint16_t bus, uint16_t slot, uint16_t func, uint16_t offset)
-{
-    uint32_t address = AHCI_get_address(bus, slot, func, offset);
-    IO_outl(AHCI_HBA_PORT, address);
-
-    uint32_t reg_value = IO_inl(0xCFC);
-
-    return (uint16_t) ((reg_value >> ((offset & 2) * 8)) & 0xFFFF);
-}
-
 void AHCI_try_setup_device(uint16_t bus, uint32_t slot, uint16_t func)
 {
+    /*
     uint16_t vendor = AHCI_probe(bus, slot, func, AHCI_VENDOR_OFFSET);
     uint16_t device = AHCI_probe(bus, slot, func, AHCI_DEVICE_OFFSET);
     
@@ -57,6 +50,7 @@ void AHCI_try_setup_device(uint16_t bus, uint32_t slot, uint16_t func)
                 
         }
     }
+    */
 }
 
 void AHCI_try_setup_known_device(char* name, uintptr_t AHCI_base, uint16_t bus, uint16_t slot, uint16_t func)
