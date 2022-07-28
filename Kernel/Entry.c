@@ -25,6 +25,8 @@ extern void* kernel_end;
 
 static APIC_MADT_t* MADT = NULL;
 
+uintptr_t ROOT_DEV = 1;
+
 __attribute__((__noreturn__)) void k_entry(const void* mbt2_info)
 {
     TTY_init();
@@ -45,7 +47,6 @@ __attribute__((__noreturn__)) void k_entry(const void* mbt2_info)
     VMM_load_cr3();
 
     IDT_init();
-    PCI_init();
 
     if (APIC_check())
     {
@@ -54,6 +55,7 @@ __attribute__((__noreturn__)) void k_entry(const void* mbt2_info)
         APIC_enable();
     }
 
+    PCI_init();
     PIT_init();
 
     Keyboard_init();

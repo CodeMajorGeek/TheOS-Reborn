@@ -15,17 +15,19 @@
 #define PCI_BIST_REG            0x0C
 #define PCI_CLASS_REG           0x08
 #define PCI_SECONDARY_BUS_REG   0x1A
+#define PCI_BAR5_ADDR_REG       0x24
 
 typedef struct PCI_bus PCI_bus_t;
 
 void PCI_init(void);
 
-uint16_t PCI_config_readw(uint8_t bus, uint8_t slot, uint8_t func, uint8_t offset);
+uint32_t PCI_config_read(uint8_t bus, uint8_t slot, uint8_t function, uint8_t offset);
+uint16_t PCI_config_readw(uint8_t bus, uint8_t slot, uint8_t function, uint8_t offset);
 
 void PCI_check_device(uint8_t bus, uint8_t slot);
 void PCI_check_function(uint8_t bus, uint8_t slot, uint8_t function);
 
-static void PCI_try_attach(uint8_t bus, uint16_t slot, uint16_t function, uint16_t vendor, uint16_t device);
-static void PCI_attach_storage_dev(uint8_t bus, uint16_t slot, uint16_t function, uint16_t vendor, uint16_t device);
+static void PCI_try_attach(uint8_t bus, uint8_t slot, uint8_t function, uint16_t vendor, uint16_t device);
+static void PCI_attach_storage_dev(uint8_t bus, uint8_t slot, uint8_t function, uint16_t vendor, uint16_t device);
 
 #endif

@@ -1,5 +1,6 @@
 #include <Memory/VMM.h>
 
+#include <Storage/AHCI.h>
 #include <Memory/PMM.h>
 #include <Device/VGA.h>
 #include <Device/TTY.h>
@@ -8,6 +9,9 @@
 static PML4_t* VMM_PML4;
 
 static uintptr_t VMM_VGA_virt;
+static uintptr_t VMM_AHCI_virt;
+
+// TODO: Implement a fixed version of kernel mapping & recursive mapping.
 
 static void add_attribute(uintptr_t* entry, uintptr_t attribute)
 {
@@ -44,6 +48,8 @@ void VMM_map_kernel(void)
 
     VMM_VGA_virt = virt_addr;
     virt_addr += VGA_BUFFER_LENGTH;
+    VMM_AHCI_virt = virt_addr;
+    virt_addr += AHCI_MEM_LENGTH;
 }
 
 void VMM_identity_map_all(void)
@@ -61,6 +67,7 @@ void VMM_identity_mapping(void)
 {
     VMM_map_pages(VMM_VGA_virt, VGA_BUFFER_ADDRESS, VGA_BUFFER_LENGTH / PHYS_PAGE_SIZE);    // Map the VGA textmode buffer to another location.
     TTY_set_buffer((uint16_t*) VMM_VGA_virt);                                               // Set the TTY buffer to the new virtual address.
+    AHCI_set_port_base(VMM_AHCI_virt);                                                      // Set the AHCI port base to the new virtual address.
 }
 
 void VMM_map_page(uintptr_t virt, uintptr_t phys)
