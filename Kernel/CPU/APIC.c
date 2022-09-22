@@ -155,14 +155,14 @@ void APIC_local_write(uint64_t offset, uint64_t value)
 
 uint32_t APIC_IO_read(uint8_t index, uint32_t reg)
 {
-   uint32_t volatile* ioapic = (uint32_t volatile*) APIC_IOs[index].ptr;
+   uint32_t volatile* ioapic = (uint32_t volatile*) ((uintptr_t) APIC_IOs[index].ptr);
    ioapic[0] = (reg & 0xff);
    return ioapic[4];
 }
  
 void APIC_IO_write(uint8_t index, uint32_t reg, uint32_t value)
 {
-   uint32_t volatile *ioapic = (uint32_t volatile *) APIC_IOs[index].ptr;
+   uint32_t volatile* ioapic = (uint32_t volatile*) ((uintptr_t) APIC_IOs[index].ptr);
    ioapic[0] = (reg & 0xff);
    ioapic[4] = value;
 }

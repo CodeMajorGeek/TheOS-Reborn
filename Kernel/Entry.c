@@ -43,7 +43,7 @@ __attribute__((__noreturn__)) void k_entry(const void* mbt2_info)
 
     MADT = (APIC_MADT_t*) ACPI_get_table(ACPI_APIC_SIGNATURE);
 
-    VMM_identity_mapping();
+    VMM_hardware_mapping();
     VMM_load_cr3();
 
     IDT_init();
@@ -104,12 +104,12 @@ void read_multiboot2_info(const void* mbt2_info)
             case MULTIBOOT_TAG_TYPE_ACPI_OLD:
                 struct multiboot_tag_old_acpi* old_acpi = (struct multiboot_tag_old_acpi*) tag;
                 if (ACPI_RSDP_old_check(old_acpi->rsdp))
-                    ACPI_init_RSDT(old_acpi->rsdp);
+                    ACPI_init_RSDT((ACPI_RSDP_descriptor10_t*) old_acpi->rsdp);
                 break;
             case MULTIBOOT_TAG_TYPE_ACPI_NEW:
                 struct multiboot_tag_new_acpi* new_acpi = (struct multiboot_tag_new_acpi*) tag;
                 if (ACPI_RSDP_new_check(new_acpi->rsdp))
-                    ACPI_init_XSDT(new_acpi->rsdp);
+                    ACPI_init_XSDT((ACPI_RSDP_descriptor20_t*) new_acpi->rsdp);
                 break;
         }
     }

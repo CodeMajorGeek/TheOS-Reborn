@@ -4,9 +4,9 @@
 #include <stdint.h>
 #include <stdbool.h>
 
-#define AHCI_MEM_LENGTH     0x1100
+#define AHCI_MEM_LENGTH         (1024 * 1024 * 32)
 
-#define AHCI_MAX_SLOT       0x1F
+#define AHCI_MAX_SLOT           0x1F
 
 #define FIS_TYPE_REG_H2D        0x27
 #define ATA_CMD_READ_DMA_EX     0x25
@@ -93,6 +93,7 @@ typedef struct HBA_CMD_HEADER
     uint8_t b:1;                // BIST.
     uint8_t c:1;                // Clear busy upon R_OK.
     uint8_t rsv0:1;             // Reserved.
+    uint8_t pmp:4;              // Port multiplier.
 
     uint16_t prdtl;             // Physical region descriptor table length in entries.
     // DW1:
@@ -101,7 +102,7 @@ typedef struct HBA_CMD_HEADER
     uint32_t ctba;              // Command table descriptor base address.
     uint32_t ctbau;             // Command table descriptor base address upper 32 bits.
     // DW4 - 7:
-    uint32_t rsc1[4];           // Reserved.
+    uint32_t rsv1[4];           // Reserved.
 
 } HBA_CMD_HEADER_t;
 
@@ -155,18 +156,17 @@ typedef struct HBA_CMD_TBL
     HBA_PRDT_ENTRY_t prdt_entry[1]; // Physical region descriptor table entries, 0 ~ 65535.
 } HBA_CMD_TBL_t;
 
-void AHCI_set_port_base(uintptr_t port_base);
-
 void AHCI_try_setup_device(uint16_t bus, uint32_t slot, uint16_t function, uint16_t vendor, uint16_t device);
-void AHCI_try_setup_known_device(char* name, uintptr_t AHCI_base, uint16_t bus, uint16_t slot, uint16_t func);
+void AHCI_try_setup_known_device(char* name, HBA_MEM_t* AHCI_base, uint16_t bus, uint16_t slot, uint16_t func);
 
 void AHCI_SATA_init(HBA_PORT_t* port, int num);
 bool AHCI_rebase_port(HBA_PORT_t* port, int num);
 
 bool AHCI_stop_port(HBA_PORT_t* port);
 void AHCI_start_port(HBA_PORT_t* port);
-
 int AHCI_find_cmdslot(HBA_PORT_t* port);
+
 int AHCI_sata_read(HBA_PORT_t* port, uint32_t startl, uint32_t starth, uint32_t count, uint8_t* buf);
+int AHCI_SATA_write(HBA_PORT_t* port, uint32_t startl, uint32_t starth, uint32_t count, uint8_t* buf);
 
 #endif

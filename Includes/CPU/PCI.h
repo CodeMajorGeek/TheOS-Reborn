@@ -27,6 +27,8 @@ uint16_t PCI_config_readw(uint8_t bus, uint8_t slot, uint8_t function, uint8_t o
 void PCI_check_device(uint8_t bus, uint8_t slot);
 void PCI_check_function(uint8_t bus, uint8_t slot, uint8_t function);
 
+void PCI_scan_bus(uint8_t bus);
+
 static void PCI_try_attach(uint8_t bus, uint8_t slot, uint8_t function, uint16_t vendor, uint16_t device);
 static void PCI_attach_storage_dev(uint8_t bus, uint8_t slot, uint8_t function, uint16_t vendor, uint16_t device);
 

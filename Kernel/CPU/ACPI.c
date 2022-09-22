@@ -1,6 +1,7 @@
 #include <CPU/ACPI.h>
 
 #include <Memory/VMM.h>
+#include <CPU/PCI.h>
 
 #include <stddef.h>
 #include <string.h>
@@ -50,13 +51,13 @@ bool ACPI_SDT_check(ACPI_SDT_header_t* sdt_header_ptr)
 
 void ACPI_init_RSDT(ACPI_RSDP_descriptor10_t* desc)
 {
-    ACPI_RSDT = (ACPI_RSDT_t*) desc->RSDT_ptr;
+    ACPI_RSDT = (ACPI_RSDT_t*) ((uintptr_t) desc->RSDT_ptr);
 }
 
 void ACPI_init_XSDT(ACPI_RSDP_descriptor20_t* desc)
 {
-    ACPI_XSDT = (ACPI_XSDT_t*) desc->XSDT_ptr;
-    ACPI_RSDT = (ACPI_RSDT_t*) desc->first_part.RSDT_ptr;
+    ACPI_XSDT = (ACPI_XSDT_t*) ((uintptr_t) desc->XSDT_ptr);
+    ACPI_RSDT = (ACPI_RSDT_t*) ((uintptr_t) desc->first_part.RSDT_ptr);
 }
 
 void* ACPI_get_table_old(ACPI_RSDT_t* rsdt, char signature[4])
@@ -65,7 +66,7 @@ void* ACPI_get_table_old(ACPI_RSDT_t* rsdt, char signature[4])
 
     for (int i = 0; i < entries; i++)
     {
-        ACPI_SDT_header_t* SDT_header = (ACPI_SDT_header_t*) rsdt->ptr_next_SDT[i];
+        ACPI_SDT_header_t* SDT_header = (ACPI_SDT_header_t*) ((uintptr_t) rsdt->ptr_next_SDT[i]);
         if (!ACPI_SDT_check(SDT_header))
             continue;
 

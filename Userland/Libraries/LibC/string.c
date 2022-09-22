@@ -66,9 +66,9 @@ size_t strlen(const char* str)
     return len;
 }
 
-char* strcpy(char* __restrict dest, const char * __restrict src)
+char* strcpy(char* __restrict dest, const char* __restrict src)
 {
-    return memcpy(dest, src, strlen(src));
+    return memcpy(dest, (char*) src, strlen(src));
 }
 
 int strncmp(const char* first, const char* second, size_t length)

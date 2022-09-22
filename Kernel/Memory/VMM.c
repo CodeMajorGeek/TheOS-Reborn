@@ -28,6 +28,11 @@ static uintptr_t get_address(uintptr_t* entry)
     return (*entry & FRAME);
 }
 
+uintptr_t VMM_get_AHCI_virt(void)
+{
+    return VMM_AHCI_virt;
+}
+
 void VMM_map_kernel(void)
 {
     uintptr_t phys_base = PMM_get_kernel_start();
@@ -63,11 +68,10 @@ void VMM_identity_map_all(void)
     }
 }
 
-void VMM_identity_mapping(void)
+void VMM_hardware_mapping(void)
 {
     VMM_map_pages(VMM_VGA_virt, VGA_BUFFER_ADDRESS, VGA_BUFFER_LENGTH / PHYS_PAGE_SIZE);    // Map the VGA textmode buffer to another location.
     TTY_set_buffer((uint16_t*) VMM_VGA_virt);                                               // Set the TTY buffer to the new virtual address.
-    AHCI_set_port_base(VMM_AHCI_virt);                                                      // Set the AHCI port base to the new virtual address.
 }
 
 void VMM_map_page(uintptr_t virt, uintptr_t phys)

@@ -4,6 +4,7 @@
 #include <Util/Buffer.h>
 #include <Storage/VFS.h>
 #include <Memory/VMM.h>
+#include <Memory/PMM.h>
 #include <CPU/PCI.h>
 #include <CPU/IO.h>
 
@@ -23,16 +24,11 @@ static const AHCI_device_t AHCI_devices[] =
     { 0, 0, "" } // Terminal node.
 };
 
-static uintptr_t AHCI_port_base;
+static HBA_MEM_t* AHCI_base_address;
 static uint32_t SATA_device_count = 0;
 static HBA_PORT_t* BLOCK_DEVICES[AHCI_MAX_SLOT];
 
 extern uintptr_t ROOT_DEV;
-
-void AHCI_set_port_base(uintptr_t port_base)
-{
-    AHCI_port_base = port_base;
-}
 
 void AHCI_try_setup_device(uint16_t bus, uint32_t slot, uint16_t function, uint16_t vendor, uint16_t device)
 {
@@ -53,32 +49,31 @@ void AHCI_try_setup_device(uint16_t bus, uint32_t slot, uint16_t function, uint1
 
         if (identified)
         {
+            AHCI_base_address = (HBA_MEM_t*) VMM_get_AHCI_virt();
+
             VMM_map_pages(AHCI_base, AHCI_base, AHCI_MEM_LENGTH);
-            AHCI_try_setup_known_device((char*) name, AHCI_base, bus, slot, function);
+            AHCI_try_setup_known_device((char*) name, (HBA_MEM_t*) AHCI_base, bus, slot, function);
         }
     }
 }
 
-void AHCI_try_setup_known_device(char* name, uintptr_t AHCI_base, uint16_t bus, uint16_t slot, uint16_t function)
+void AHCI_try_setup_known_device(char* name, HBA_MEM_t* AHCI, uint16_t bus, uint16_t slot, uint16_t function)
 {
-    printf("%s controller found (bus=%d, slot=%d, function=%d, ABAR=0x%X).\n", name, bus, slot, function, AHCI_base);
+    printf("%s controller found (bus=%d, slot=%d, function=%d, ABAR=0x%X).\n", name, bus, slot, function, AHCI);
+    printf("HBA is in %s mode.\n", (AHCI->ghc == 0 ? "legacy" : "AHCI-only"));
 
-    HBA_MEM_t* ptr = (HBA_MEM_t*) AHCI_base;
-    printf("HBA is in %s mode.\n", (ptr->ghc == 0 ? "legacy" : "AHCI-only"));
-
-    uint64_t pi = ptr->pi;
+    uint64_t pi = AHCI->pi;
     for (int i = 0; i != 32; i++)
     {
         uint64_t port_mask = 1 << i;
         if ((pi & port_mask) == 0)
             continue;
 
-        HBA_PORT_t* HBA_port = (HBA_PORT_t*) &ptr->ports[i];
-
+        HBA_PORT_t* HBA_port = (HBA_PORT_t*) &AHCI->ports[i];
         if (HBA_port->sig != SATA_SIG_ATAPI && HBA_port->sig != SATA_SIG_SEMB && HBA_port->sig != SATA_SIG_PM)
         {
             uint64_t ssts = HBA_port->ssts;
-
+        
             uint8_t ipm = (ssts >> 8) & 0x0F;
             uint8_t spd = (ssts >> 4) & 0x0F;
             uint8_t det = ssts & 0x07; // The device detection (DET) flags are the bottom 3 bits.
@@ -96,6 +91,7 @@ void AHCI_try_setup_known_device(char* name, uintptr_t AHCI_base, uint16_t bus, 
                 printf("SATA device detected:\n");
                 printf("\tport[%d].sig = 0x%X.\n", i, HBA_port->sig);
                 printf("\tipm=0x%X, spd=0x%X, det=0x%X\n", ipm, spd, det);
+
                 AHCI_SATA_init(HBA_port, i);
             }
         }
@@ -107,7 +103,9 @@ void AHCI_SATA_init(HBA_PORT_t* port, int num)
     if (AHCI_rebase_port(port, num))
     {
         uint8_t buf[512];
-        int result = AHCI_sata_read(port, 1, 0, 1, &buf[0]);
+        memset(buf, 0xFF, sizeof (buf));
+
+        int result = AHCI_sata_read(port, 1, 0, 1, buf);
         if (result == SATA_IO_SUCCESS)
         {
             uint32_t dev_num = SATA_device_count++;
@@ -115,8 +113,6 @@ void AHCI_SATA_init(HBA_PORT_t* port, int num)
             BLOCK_DEVICES[dev_num] = port;
             if (dev_num == 0)
                 ROOT_DEV = TODEVNUM(DEV_SATA, 0);
-
-            printf("First sector data: 0x%X\n", buf);
         } else
             printf("\tInit failure !\n");
     }
@@ -132,30 +128,38 @@ bool AHCI_rebase_port(HBA_PORT_t* port, int num)
         return false;
     }
 
-    uintptr_t AHCI_base = AHCI_port_base + 1024 * 1024 * num; // Port base + 1MB/port.
+    uintptr_t AHCI_base = (uintptr_t) AHCI_base_address + 1024 * 1024 * num; // Port base + 1MB/port.
     port->clb = ADDRLO(AHCI_base);
     port->clbu = ADDRHI(AHCI_base);
-    memset((void*) AHCI_base, 0, 1024);
 
-    uintptr_t FB_addr = AHCI_base + (32 << 10) + (num << 8);
+    uintptr_t FB_addr = (uintptr_t) AHCI_base_address + (32 << 10) + (num << 8);
     port->fb = ADDRLO(FB_addr);
     port->fbu = ADDRHI(FB_addr);
-    memset((void*) FB_addr, 0, 1024);
 
     port->serr = 1; // For each implemented port, clear the PxSERR register by writting 1 to each implement location.
     port->is = 0;
     port->ie = 1;
+    
+    memset((void*) AHCI_base, 0, 1024);
+    memset((void*) FB_addr, 0, 256);
 
-    HBA_CMD_HEADER_t* cmd_header = (HBA_CMD_HEADER_t*) AHCI_base;
+    HBA_CMD_HEADER_t* cmd_header = (HBA_CMD_HEADER_t*) HILO2ADDR(port->clbu, port->clb);
     for (uint8_t i = 0; i < 32; i++)
     {
         cmd_header[i].prdtl = 8; // 8 prdt entries per command table.
-        cmd_header[i].ctba = ((AHCI_base + (uint64_t) ((40 << 10) / 8) + (uint64_t) ((i << 8) / 8)) & 0xFFFFFFFF);
-        cmd_header[i].ctbau = (((AHCI_base + (uint64_t) ((40 << 10) / 8) + (uint64_t) ((i << 8) / 8)) >> 32) & 0xFFFFFFFF);
+        
+        cmd_header[i].ctba = (((uint64_t) AHCI_base_address
+		                      + (uint64_t) ((40 << 10) / 8) + (uint64_t) ((i << 8) / 8))
+		                     & 0xffffffff);
+        cmd_header[i].ctbau = ((((uint64_t) AHCI_base_address + (uint64_t) ((40 << 10) / 8)
+			   + (uint64_t) ((i << 8) / 8)) >> 32) & 0xffffffff);
+    
+        memset((void*) HILO2ADDR(cmd_header[i].ctbau, cmd_header[i].ctba), 0, 256);
     }
 
     AHCI_start_port(port);
     printf("\tDONE !\n");
+
     return true;
 }
 
@@ -215,7 +219,7 @@ int AHCI_sata_read(HBA_PORT_t* port, uint32_t startl, uint32_t starth, uint32_t 
     cmd_header->prdtl = (uint16_t) ((count - 1) >> 4) + 1; // PRDT entries count.
 
     HBA_CMD_TBL_t* cmd_tbl = (HBA_CMD_TBL_t*) P2V(HILO2ADDR(cmd_header->ctbau, cmd_header->ctba));
-    memset(cmd_tbl, 0, sizeof (HBA_CMD_TBL_t) + (cmd_header->prdtl -1) * sizeof (HBA_PRDT_ENTRY_t));
+    memset(cmd_tbl, 0, sizeof (HBA_CMD_TBL_t) + (cmd_header->prdtl - 1) * sizeof (HBA_PRDT_ENTRY_t));
 
     uintptr_t addr = V2P(buf);
     if (addr & 0x1)
@@ -229,8 +233,8 @@ int AHCI_sata_read(HBA_PORT_t* port, uint32_t startl, uint32_t starth, uint32_t 
         cmd_tbl->prdt_entry[i].dbau = ADDRHI(addr);
         cmd_tbl->prdt_entry[i].dbc = 8 * 1024 - 1;
         cmd_tbl->prdt_entry[i].i = 1;
-        buf += 4 * 1024; // 4K words.
-        count -= 16;
+        buf += 4 * 1024;    // 4K words.
+        count -= 16;        // 16 sectors.
     }
 
     // Last entry.
@@ -259,7 +263,62 @@ int AHCI_sata_read(HBA_PORT_t* port, uint32_t startl, uint32_t starth, uint32_t 
     while ((port->tfd & (ATA_DEV_BUSY | ATA_DEV_DRQ)) && spin < SATA_IO_MAX_WAIT) // Wait until the port is no longer busy.
         spin++; 
 
-    printf("Total spin: %d.\n", spin);
+    if (spin == SATA_IO_MAX_WAIT)
+        return SATA_IO_ERROR_HUNG_PORT;
+
+    port->ci = 1 << slot; // Issue command.
+
+    return SATA_IO_SUCCESS;
+}
+
+int AHCI_SATA_write(HBA_PORT_t* port, uint32_t startl, uint32_t starth, uint32_t count, uint8_t* buf)
+{
+    port->is = (uint32_t) -1;
+
+    uint32_t slot = AHCI_find_cmdslot(port);
+    if (slot == -1)
+        return SATA_IO_ERROR_NO_SLOT;
+
+    HBA_CMD_HEADER_t* cmd_header = (HBA_CMD_HEADER_t*) P2V(HILO2ADDR(port->clbu, port->clb));
+    cmd_header += slot;
+
+    cmd_header->cfl = sizeof (FIS_REG_H2D_t) / sizeof (uint32_t);
+    cmd_header->w = 1; // Write to device.
+    cmd_header->c = 1;
+    cmd_header->prdtl = 1; // PRDT entries count.
+
+    HBA_CMD_TBL_t* cmd_tbl = (HBA_CMD_TBL_t*) P2V(HILO2ADDR(cmd_header->ctbau, cmd_header->ctba));
+    memset(cmd_tbl, 0, sizeof (HBA_CMD_TBL_t) + (cmd_header->prdtl - 1) * sizeof (HBA_PRDT_ENTRY_t));
+
+    uint64_t addr = V2P(buf);
+    if (addr & 0x1)
+        panic("SATA CBA address isn't word aligned !");
+
+    cmd_tbl->prdt_entry[0].dba = ADDRLO(addr);
+    cmd_tbl->prdt_entry[0].dbau = ADDRHI(addr);
+    cmd_tbl->prdt_entry[0].dbc = 511; // 512 bytes per sector.
+    cmd_tbl->prdt_entry[0].i = 0;
+
+    FIS_REG_H2D_t* cmd_fis = (FIS_REG_H2D_t*) (&cmd_tbl->cfis);
+
+    cmd_fis->fis_type = FIS_TYPE_REG_H2D;
+    cmd_fis->c = 1; // Cmd.
+    cmd_fis->command = ATA_CMD_WRITE_DMA_EXT;
+
+    cmd_fis->lba0 = (uint8_t) startl;
+    cmd_fis->lba1 = (uint8_t) (startl >> 8);
+    cmd_fis->lba2 = (uint8_t) (startl >> 16);
+    cmd_fis->device = FIS_LBA_MODE;
+    cmd_fis->lba3 = (uint8_t) (startl >> 24);
+    cmd_fis->lba4 = (uint8_t) starth;
+    cmd_fis->lba5 = (uint8_t) (starth >> 8);
+    
+    cmd_fis->countl = 2;
+    cmd_fis->counth = 0;
+
+    int spin = 0;
+    while ((port->tfd & (ATA_DEV_BUSY | ATA_DEV_DRQ)) && spin < SATA_IO_MAX_WAIT) // Wait until the port is no longer busy.
+        spin++; 
 
     if (spin == SATA_IO_MAX_WAIT)
         return SATA_IO_ERROR_HUNG_PORT;
