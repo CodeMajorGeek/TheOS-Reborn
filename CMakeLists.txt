@@ -62,7 +62,7 @@ include_directories(${CMAKE_BINARY_DIR})
 add_link_options(--sysroot ${CMAKE_BINARY_DIR}/Root)
 
 include_directories(Includes)
-include_directories(Includes/LibC)
+include_directories(Userland/Libraries/LibC/Includes)
 
 add_subdirectory(Userland)
 add_subdirectory(Kernel)

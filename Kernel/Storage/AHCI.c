@@ -42,7 +42,8 @@ void AHCI_try_setup_device(uint16_t bus, uint32_t slot, uint16_t function, uint1
 
         for (uint16_t i = 0; AHCI_devices[i].vendor != 0 && !identified; i++)
         {
-            if (AHCI_devices[i].vendor == vendor && AHCI_devices[i].device == device) {
+            if (AHCI_devices[i].vendor == vendor && AHCI_devices[i].device == device)
+            {
                 name = AHCI_devices[i].name;
                 identified = true;
             } 
@@ -115,15 +116,7 @@ void AHCI_SATA_init(HBA_PORT_t* port, int num)
             if (dev_num == 0)
                 ROOT_DEV = TODEVNUM(DEV_SATA, 0);
 
-            puts("VALUES:\n");
-            for (int i = 0; i < 30; i++)
-            {
-                printf("%X ", buf[i]);
-
-                if (i % 10 == 0)
-                    puts("\n");
-            }
-            puts("\n");
+            printf("0x400 : 0x%X%X\n", buf[0], buf[1]);
         } else
             printf("\tInit failure !\n");
     }
@@ -154,10 +147,10 @@ bool AHCI_rebase_port(HBA_PORT_t* port, int num)
     memset((void*) AHCI_base, 0, 1024);
     memset((void*) FB_addr, 0, 256);
 
-    HBA_CMD_HEADER_t* cmd_header = (HBA_CMD_HEADER_t*) HILO2ADDR(port->clbu, port->clb);
+    HBA_CMD_HEADER_t* cmd_header = (HBA_CMD_HEADER_t*) AHCI_base;
     for (uint8_t i = 0; i < 32; i++)
     {
-        uintptr_t CT_addr = AHCI_base_address + (40 << 10) + (num << 13) + (i << 8);
+        uintptr_t CT_addr = (uintptr_t) AHCI_base_address + (40 << 10) + (num << 13) + (i << 8);
 
         cmd_header[i].prdtl = 8; // 8 prdt entries per command table.
         cmd_header[i].ctba = ADDRLO(CT_addr);
@@ -182,7 +175,8 @@ bool AHCI_stop_port(HBA_PORT_t* port)
     {
         if (!(port->cmd & (HBA_PxCMD_CR | HBA_PxCMD_FR)))
             break;
-    } while (count++ < 1000);
+    }
+    while (count++ < 1000);
     
     port->cmd &= ~HBA_PxCMD_FRE; // Clear FRE (bit 4).
 }
