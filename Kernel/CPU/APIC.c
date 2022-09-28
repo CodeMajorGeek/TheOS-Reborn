@@ -64,7 +64,6 @@ void APIC_detect_cores(APIC_MADT_t* madt)
     for (size_t i = 0; i < sizeof(APIC_IRQ_overrides); i++)
         APIC_IRQ_overrides[i] = i;
 
-
     APIC_local_ptr = madt->lapic_ptr;
     VMM_map_page((uintptr_t) APIC_local_ptr, (uintptr_t) APIC_local_ptr);
 

@@ -3,8 +3,8 @@
 
 #include <Multiboot2/multiboot2.h>
 
-#include <stdint.h>
 #include <stdbool.h>
+#include <stdint.h>
 
 #define ACPI_APIC_SIGNATURE "APIC"
 #define ACPI_BERT_SIGNATURE "BERT"

@@ -25,6 +25,7 @@ static const AHCI_device_t AHCI_devices[] =
 };
 
 static HBA_MEM_t* AHCI_base_address;
+
 static uint32_t SATA_device_count = 0;
 static HBA_PORT_t* BLOCK_DEVICES[AHCI_MAX_SLOT];
 
@@ -105,7 +106,7 @@ void AHCI_SATA_init(HBA_PORT_t* port, int num)
         uint8_t buf[512];
         memset(buf, 0xFF, sizeof (buf));
 
-        int result = AHCI_sata_read(port, 1, 0, 1, buf);
+        int result = AHCI_sata_read(port, 2, 0, 1, buf);
         if (result == SATA_IO_SUCCESS)
         {
             uint32_t dev_num = SATA_device_count++;
@@ -113,6 +114,16 @@ void AHCI_SATA_init(HBA_PORT_t* port, int num)
             BLOCK_DEVICES[dev_num] = port;
             if (dev_num == 0)
                 ROOT_DEV = TODEVNUM(DEV_SATA, 0);
+
+            puts("VALUES:\n");
+            for (int i = 0; i < 30; i++)
+            {
+                printf("%X ", buf[i]);
+
+                if (i % 10 == 0)
+                    puts("\n");
+            }
+            puts("\n");
         } else
             printf("\tInit failure !\n");
     }
@@ -128,7 +139,7 @@ bool AHCI_rebase_port(HBA_PORT_t* port, int num)
         return false;
     }
 
-    uintptr_t AHCI_base = (uintptr_t) AHCI_base_address + 1024 * 1024 * num; // Port base + 1MB/port.
+    uintptr_t AHCI_base = (uintptr_t) AHCI_base_address + (num << 8); // Port base + 1MB/port.
     port->clb = ADDRLO(AHCI_base);
     port->clbu = ADDRHI(AHCI_base);
 
@@ -146,15 +157,13 @@ bool AHCI_rebase_port(HBA_PORT_t* port, int num)
     HBA_CMD_HEADER_t* cmd_header = (HBA_CMD_HEADER_t*) HILO2ADDR(port->clbu, port->clb);
     for (uint8_t i = 0; i < 32; i++)
     {
+        uintptr_t CT_addr = AHCI_base_address + (40 << 10) + (num << 13) + (i << 8);
+
         cmd_header[i].prdtl = 8; // 8 prdt entries per command table.
-        
-        cmd_header[i].ctba = (((uint64_t) AHCI_base_address
-		                      + (uint64_t) ((40 << 10) / 8) + (uint64_t) ((i << 8) / 8))
-		                     & 0xffffffff);
-        cmd_header[i].ctbau = ((((uint64_t) AHCI_base_address + (uint64_t) ((40 << 10) / 8)
-			   + (uint64_t) ((i << 8) / 8)) >> 32) & 0xffffffff);
+        cmd_header[i].ctba = ADDRLO(CT_addr);
+        cmd_header[i].ctbau = ADDRHI(CT_addr);
     
-        memset((void*) HILO2ADDR(cmd_header[i].ctbau, cmd_header[i].ctba), 0, 256);
+        memset((void*) CT_addr, 0, 256);
     }
 
     AHCI_start_port(port);

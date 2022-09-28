@@ -4,7 +4,7 @@
 #include <stdint.h>
 #include <stdbool.h>
 
-#define AHCI_MEM_LENGTH         (1024 * 1024 * 32)
+#define AHCI_MEM_LENGTH         (1024 * 32)
 
 #define AHCI_MAX_SLOT           0x1F
 
