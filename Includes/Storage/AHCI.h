@@ -5,6 +5,7 @@
 #include <stdbool.h>
 
 #define AHCI_MEM_LENGTH         (1024 * 32)
+#define AHCI_SECTOR_SIZE        0x200       // 512 bytes.
 
 #define AHCI_MAX_SLOT           0x1F
 

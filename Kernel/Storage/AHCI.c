@@ -1,5 +1,6 @@
 #include <Storage/AHCI.h>
 
+#include <FileSystem/ext4.h>
 #include <Storage/SATA.h>
 #include <Util/Buffer.h>
 #include <Storage/VFS.h>
@@ -107,7 +108,7 @@ void AHCI_SATA_init(HBA_PORT_t* port, int num)
         uint8_t buf[512];
         memset(buf, 0xFF, sizeof (buf));
 
-        int result = AHCI_sata_read(port, 2, 0, 1, buf);
+        int result = AHCI_sata_read(port, 1, 0, 1, buf);
         if (result == SATA_IO_SUCCESS)
         {
             uint32_t dev_num = SATA_device_count++;
@@ -116,7 +117,7 @@ void AHCI_SATA_init(HBA_PORT_t* port, int num)
             if (dev_num == 0)
                 ROOT_DEV = TODEVNUM(DEV_SATA, 0);
 
-            printf("0x400 : 0x%X%X\n", buf[0], buf[1]);
+            printf("This disk %s ext4 !\n", ext4_check_format(port) ? "is" : "isn\'t");
         } else
             printf("\tInit failure !\n");
     }

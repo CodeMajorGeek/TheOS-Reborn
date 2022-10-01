@@ -1,10 +1,13 @@
 #ifndef _EXT4_H
 #define _EXT4_H
 
+#include <Storage/AHCI.h>
+
+#include <stdbool.h>
 #include <stdint.h>
 
 #define EXT4_MAGIC_SIGNATURE    0xEF53
-#define EXT4_SUPERBLOCK_ADDR    
+#define EXT4_SUPERBLOCK_ADDR    0x400
 
 typedef struct ext4_dynamic
 {
@@ -65,5 +68,6 @@ typedef struct ext4_superblock
     // ext4_extended_t extended_fields;
 } ext4_superblock_t;
 
+bool ext4_check_format(HBA_PORT_t* port);
 
 #endif
