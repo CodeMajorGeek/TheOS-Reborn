@@ -32,6 +32,8 @@ void ISR_handler(interrupt_frame_t frame)
     {
         puts(exception_messages[frame.int_no]);
         puts(" Exception Handled !\n");
+
+        printf("Error code = 0x%X !\n", frame.err_code);
     }
     else if (frame.int_no == SYSCALL_INT)
     {

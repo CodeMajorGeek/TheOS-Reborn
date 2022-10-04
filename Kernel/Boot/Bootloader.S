@@ -25,7 +25,7 @@
 .set EFER_MSR,          1 << 8
 .set PAGING_FLAG,       (1 << 31) | (1 << 0)
 
-.set CPUID_FLAG_MSR,    1 << 5
+.set CPUID_FLAG_MSR,    (0b11 << 5)
 
 # Access bits.
 .set PRESENT,           1 << 7
@@ -34,11 +34,10 @@
 .set DC,                1 << 2
 .set RW,                1 << 1
 .set ACCESSED,          1 << 0
-.set RING_USER,         1 << 5
+.set RING_USER,         0b01100000
  
 # Flags bits.
 .set GRAN_4K,           1 << 7
-.set SZ_32,             1 << 6
 .set LONG_MODE,         1 << 5
 
 .section .multiboot
@@ -85,6 +84,8 @@ mb2_hdr_end:
 .code32
 .section .text
 .globl multiboot_entry
+
+.globl TSS_GDT_segment
 
 # Execute our first loader code segment starting at multiboot_entry.
 multiboot_entry:   
@@ -257,12 +258,13 @@ pd:
 
 .comm stack, STACK_SIZE # Our stack area.
 
-.section .rodata
+.section .data
 .align 8
 
-# We define our GDTs in the rodata section.
+# We define our GDTs in the data section.
 gdt64:
 # Null segment.
+.equ gdt64.null_segment, . - gdt64
     .quad 0
 
 # Kernel code segment.
@@ -270,32 +272,38 @@ gdt64:
     .long 0xFFFF                            # limit & base 0 to 15 bits.
     .byte 0                                 # base 16 to 23 bits.
     .byte PRESENT | NOT_SYS | EXEC | RW     # access byte.
-    .byte GRAN_4K | LONG_MODE | 0xF         # high 4 bits for flags and lower 4 bits for limit.
+    .byte 0b00100000                        # high 4 bits for flags and lower 4 bits for limit.
     .byte 0                                 # base last 24 to 31 bits.
 
 # Kernel data segment.
 .equ gdt64.kernel_data, . - gdt64           # 0x10
-    .long 0xFFFF
+    .long 0
     .byte 0
     .byte PRESENT | NOT_SYS | RW
-    .byte GRAN_4K | SZ_32 | 0xF
+    .byte LONG_MODE
     .byte 0
 
 # User code segment.
 .equ gdt64.user_code, . - gdt64             #0x18
     .long 0xFFFF
     .byte 0
-    .byte PRESENT | NOT_SYS | EXEC | RING_USER
-    .byte LONG_MODE | 0xF
+    .byte PRESENT | NOT_SYS | EXEC | RW | RING_USER
+    .byte LONG_MODE
     .byte 0
 
-# User code segment.
+# User data segment.
 .equ gdt64.user_data, . - gdt64             #0x20
     .long 0xFFFF
     .byte 0
     .byte PRESENT | NOT_SYS | RW | RING_USER
-    .byte LONG_MODE | 0xF
+    .byte LONG_MODE
     .byte 0
+
+# TSS system segment.
+.equ gdt64.TSS, . - gdt64                   #0x28
+TSS_GDT_segment:
+    .quad 0
+    .quad 0
 
 gdt64.pointer:
     .word . - gdt64 - 1

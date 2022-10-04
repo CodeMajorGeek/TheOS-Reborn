@@ -11,6 +11,7 @@
 #include <Device/PIT.h>
 #include <Memory/PMM.h>
 #include <Memory/VMM.h>
+#include <Task/Task.h>
 #include <CPU/APIC.h>
 #include <CPU/ACPI.h>
 #include <CPU/IDT.h>
@@ -62,6 +63,8 @@ __attribute__((__noreturn__)) void k_entry(const void* mbt2_info)
 
     Keyboard_init();
     Syscall_init();
+
+    task_init();
 
     printf("Je suis un petit test ! :)");
 

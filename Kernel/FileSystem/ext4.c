@@ -2,6 +2,8 @@
 
 bool ext4_check_format(HBA_PORT_t* port)
 {
+    return FALSE; // FIXME: raise GP.
+
     char buf[512];
     AHCI_sata_read(port, EXT4_SUPERBLOCK_ADDR / AHCI_SECTOR_SIZE, 0, 1, buf);
 

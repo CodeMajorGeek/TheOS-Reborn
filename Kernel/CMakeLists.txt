@@ -15,6 +15,8 @@ set(KERNEL_CPU_SOURCES
     CPU/Syscall.c
     CPU/Syscall.S
     CPU/APIC.c
+    CPU/TSS.S
+    CPU/GDT.c
 )
 
 set(KERNEL_DEBUG_SOURCES
@@ -45,7 +47,7 @@ set(KERNEL_FILESYSTEM_SOURCES
 )
 
 set(KERNEL_TASK_SOURCES
-    Task/Process.c)
+    Task/Task.c)
 
 set(KERNEL_SOURCES
     Entry.c
