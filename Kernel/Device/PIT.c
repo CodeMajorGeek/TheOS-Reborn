@@ -1,5 +1,6 @@
 #include <Device/PIT.h>
 
+#include <Task/Task.h>
 #include <CPU/IO.h>
 
 #include <stdio.h>
@@ -34,4 +35,6 @@ void PIT_sleep_ms(uint32_t ms)
 static void PIT_callback(interrupt_frame_t* frame)
 {
     ++ticks;
+
+    task_switch();
 }

@@ -92,6 +92,7 @@ void VMM_map_page(uintptr_t virt, uintptr_t phys)
         
         add_attribute(&PDPT_entry, PRESENT);
         add_attribute(&PDPT_entry, WRITABLE);
+        add_attribute(&PDPT_entry, USER_MODE);
         VMM_PML4->entries[PML4_INDEX((uintptr_t) virt)] = PDPT_entry;
     }
 
@@ -107,6 +108,7 @@ void VMM_map_page(uintptr_t virt, uintptr_t phys)
 
         add_attribute(&PDT_entry, PRESENT);
         add_attribute(&PDT_entry, WRITABLE);
+        add_attribute(&PDT_entry, USER_MODE);
         PDPT->entries[PDPT_INDEX((uintptr_t) virt)] = PDT_entry;
     }
 
@@ -122,12 +124,14 @@ void VMM_map_page(uintptr_t virt, uintptr_t phys)
 
         add_attribute(&PT_entry, PRESENT);
         add_attribute(&PT_entry, WRITABLE);
+        add_attribute(&PT_entry, USER_MODE);
         PDT->entries[PDT_INDEX(virt)] = PT_entry;
     }
 
     uintptr_t entry = phys;
     add_attribute(&entry, PRESENT);
     add_attribute(&entry, WRITABLE);
+    add_attribute(&entry, USER_MODE);
     PT->entries[PT_INDEX(virt)] = entry;
 }
 

@@ -2,9 +2,6 @@
 
 void GDT_load_TSS_segment(TSS_t* tss)
 {
-    memset(TSS_GDT_segment, 0, sizeof (system_segment_descriptor_t));
-    memset(tss, 0, sizeof (TSS_t));
-
     uintptr_t base = (uintptr_t) tss;
     uint32_t limit = sizeof (TSS_t) - 1;
 

@@ -47,7 +47,9 @@ set(KERNEL_FILESYSTEM_SOURCES
 )
 
 set(KERNEL_TASK_SOURCES
-    Task/Task.c)
+    Task/Task.c
+    Task/Task.S
+)
 
 set(KERNEL_SOURCES
     Entry.c

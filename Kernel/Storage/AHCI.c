@@ -92,9 +92,6 @@ void AHCI_try_setup_known_device(char* name, HBA_MEM_t* AHCI, uint16_t bus, uint
             else
             {
                 printf("SATA device detected:\n");
-                printf("\tport[%d].sig = 0x%X.\n", i, HBA_port->sig);
-                printf("\tipm=0x%X, spd=0x%X, det=0x%X\n", ipm, spd, det);
-
                 AHCI_SATA_init(HBA_port, i);
             }
         }
@@ -117,7 +114,7 @@ void AHCI_SATA_init(HBA_PORT_t* port, int num)
             if (dev_num == 0)
                 ROOT_DEV = TODEVNUM(DEV_SATA, 0);
 
-            printf("This disk %s ext4 !\n", ext4_check_format(port) ? "is" : "isn\'t");
+            printf("\tThis disk %s ext4 !\n", ext4_check_format(port) ? "is" : "isn\'t");
         } else
             printf("\tInit failure !\n");
     }

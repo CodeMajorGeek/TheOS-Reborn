@@ -26,6 +26,9 @@ void read_multiboot2_info(const void*);
 extern void* kernel_start;
 extern void* kernel_end;
 
+extern void* kernel_stack_top;
+extern void* kernel_stack_bottom;
+
 static APIC_MADT_t* MADT = NULL;
 
 uintptr_t ROOT_DEV = 1;
@@ -59,19 +62,19 @@ __attribute__((__noreturn__)) void k_entry(const void* mbt2_info)
     }
 
     PCI_init();
-    PIT_init();
 
     Keyboard_init();
     Syscall_init();
 
-    task_init();
+    task_init((uintptr_t) &kernel_stack_bottom);
+    PIT_init();
 
-    printf("Je suis un petit test ! :)");
+    printf("Je suis un petit test ! :)\n");
 
     // switch_to_usermode();
-
+    
     while (TRUE)
-        __asm__ __volatile__("hlt");
+        __asm__ __volatile__("nop");
 
     __builtin_unreachable();
 }

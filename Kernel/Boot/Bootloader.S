@@ -13,8 +13,8 @@
 # define AOUT_KLUDGE MULTIBOOT_AOUT_KLUDGE
 #endif
 
-/* The size of our stack (16KiB). */
-#define STACK_SIZE  0x4000
+/* The size of our stack (4KiB). */
+#define STACK_SIZE  0x1000
 
 .set HEADER_LEN,        mb2_hdr_end - mb2_hdr
 .set CHECKSUM,          -(MULTIBOOT2_HEADER_MAGIC + MULTIBOOT_ARCHITECTURE_I386 + HEADER_LEN)
@@ -86,6 +86,8 @@ mb2_hdr_end:
 .globl multiboot_entry
 
 .globl TSS_GDT_segment
+.globl kernel_stack_top
+.globl kernel_stack_bottom
 
 # Execute our first loader code segment starting at multiboot_entry.
 multiboot_entry:   
@@ -256,7 +258,9 @@ pdp:
 pd:
     .zero 4096
 
+kernel_stack_top:
 .comm stack, STACK_SIZE # Our stack area.
+kernel_stack_bottom:
 
 .section .data
 .align 8
