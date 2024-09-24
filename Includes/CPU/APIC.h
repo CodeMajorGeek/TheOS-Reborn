@@ -77,8 +77,8 @@ void APIC_init(APIC_MADT_t* madt);
 uintptr_t APIC_get_base(void);
 void APIC_set_base(uintptr_t apic);
 
-uint64_t APIC_local_read(uint64_t offset);
-void APIC_local_write(uint64_t offset, uint64_t value);
+uint32_t APIC_local_read(uint32_t offset);
+void APIC_local_write(uint32_t offset, uint32_t value);
 
 uint32_t APIC_IO_read(uint8_t index, uint32_t reg);
 void APIC_IO_write(uint8_t index, uint32_t reg, uint32_t value);

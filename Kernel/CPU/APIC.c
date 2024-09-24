@@ -33,30 +33,21 @@ bool APIC_check(void)
 void APIC_enable(void)
 {
     APIC_disable_PIC_mode();
-    APIC_set_base(APIC_get_base()); // Hardware enable the local APIC if it wasn't enabled yet.
+    APIC_set_base(APIC_local_ptr); // Hardware enable the local APIC if it wasn't enabled yet.
 
     APIC_local_write(APIC_DFR, 0xffffffff);
-
     uint32_t ldrval = APIC_local_read(APIC_LDR);
     ldrval &= 0x0ffffff;
     ldrval |= 1;
-
     APIC_local_write(APIC_LDR, ldrval);
+    
     APIC_local_write(APIC_LVT_TMR, APIC_DISABLE);
     APIC_local_write(APIC_LVT_PERF, APIC_NMI);
     APIC_local_write(APIC_LVT_LINT0, APIC_DISABLE);
     APIC_local_write(APIC_LVT_LINT1, APIC_DISABLE);
     APIC_local_write(APIC_TASKPRIOR, 0);
 
-    asm volatile (
-                "movq $0x1b,%%rcx\n"
-                "rdmsr\n"
-                "bts $11,%%rax\n"
-                "wrmsr"
-                  :::"rax");
-    APIC_local_write(APIC_SPURIOUS, 0x1ff);
-
-    // APIC_local_write(APIC_SPURIOUS, APIC_local_read(APIC_SPURIOUS) | 0x100);
+    APIC_local_write(APIC_SPURIOUS, APIC_local_read(APIC_SPURIOUS) | 0x100);
 }
 
 void APIC_detect_cores(APIC_MADT_t* madt)
@@ -142,14 +133,14 @@ void APIC_set_base(uintptr_t apic)
     MSR_set(IA32_APIC_BASE_MSR, (apic & 0xFFFFF0000) | IA32_APIC_BASE_MSR_ENABLE);
 }
 
-uint64_t APIC_local_read(uint64_t offset)
+uint32_t APIC_local_read(uint32_t offset)
 {
-    return *((volatile uint32_t*) ((volatile uint64_t) APIC_local_ptr + offset));
+    return *((volatile uint32_t*) ((volatile uintptr_t) APIC_local_ptr + offset));
 }
 
-void APIC_local_write(uint64_t offset, uint64_t value)
+void APIC_local_write(uint32_t offset, uint32_t value)
 {
-    *((volatile uint64_t*) ((volatile uint64_t) APIC_local_ptr + offset)) = value;
+    *((volatile uint32_t*) ((volatile uintptr_t) APIC_local_ptr + offset)) = value;
 }
 
 uint32_t APIC_IO_read(uint8_t index, uint32_t reg)

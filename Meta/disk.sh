@@ -4,7 +4,7 @@
 
 [ -z "$THEOS_DISK_NAME" ] && THEOS_DISK_NAME="disk.img"
 
-[ -z "$THEOS_BASE_FOLDER" ] && THEOS_BASE_FOLDER="../../Base"
+[ -z "$THEOS_BASE_FOLDER" ] && THEOS_BASE_FOLDER="../Base"
 
 qemu-img create -f raw $THEOS_DISK_NAME $THEOS_DISK_SIZE
 
