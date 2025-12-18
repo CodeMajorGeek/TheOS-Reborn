@@ -9,6 +9,7 @@
 #include <Device/TTY.h>
 #include <Device/COM.h>
 #include <Device/PIT.h>
+#include <Device/RTC.h>
 #include <Memory/PMM.h>
 #include <Memory/VMM.h>
 #include <Task/Task.h>
@@ -19,6 +20,7 @@
 #include <CPU/PCI.h>
 #include <CPU/IO.h>
 
+#include <stdint.h>
 #include <stdio.h>
 
 void read_multiboot2_info(const void*);
@@ -61,13 +63,18 @@ __attribute__((__noreturn__)) void k_entry(const void* mbt2_info)
         APIC_enable();
     }
 
-    PCI_init();
+    // PCI_init();
 
     Keyboard_init();
     Syscall_init();
 
     task_init((uintptr_t) &kernel_stack_bottom);
     PIT_init();
+
+
+    RTC_t rtc;
+    RTC_read(&rtc);
+    printf("%d:%d:%d %s %d/%d/%d\n", rtc.hours, rtc.minutes, rtc.seconds, rtc.weekday, rtc.month_day, rtc.month, rtc.year);
 
     printf("Je suis un petit test ! :)\n");
 

@@ -30,6 +30,8 @@ set(KERNEL_DEVICES_SOURCES
     Device/PIC.c
     Device/PIT.c
     Device/Keyboard.c
+    Device/CMOS.c
+    Device/RTC.c
 )
 
 set(KERNEL_MEMORY_SOURCES

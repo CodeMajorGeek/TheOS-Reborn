@@ -1,5 +1,4 @@
 #include <Device/Keyboard.h>
-
 #include <CPU/IO.h>
 
 #include <stdio.h>
@@ -52,8 +51,6 @@ bool Keyboard_is_uppercase(void)
 
 static void Keyboard_callback(interrupt_frame_t* frame)
 {
-    printf("Key pressed !\n");
-
     uint8_t status = IO_inb(PORT_STATUS);
     if (status & 0x01)
     {
