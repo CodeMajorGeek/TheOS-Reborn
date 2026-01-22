@@ -3,6 +3,8 @@
 #include <Device/PIC.h>
 #include <CPU/Syscall.h>
 #include <CPU/APIC.h>
+#include <CPU/GDT.h>
+#include <Debug/KDebug.h>
 
 #include <stdbool.h>
 #include <stdint.h>
@@ -11,52 +13,65 @@
 
 IRQ_t IRQ_handlers[MAX_IRQ_ENTRIES];
 
-void ISR_register_IRQ(int index, IRQ_t irq)
+void ISR_register_IRQ(int vector, IRQ_t irq)
 {
-    int irq_index = index - ISR_COUNT_BEFORE_IRQ;
-    if (irq_index < MAX_IRQ_ENTRIES)
-    {
-        if (APIC_is_enabled())
-        {
-            APIC_register_IRQ_vector(index, irq_index, FALSE);
-            APIC_send_EOI();
-        }
+    int irq_index = vector - ISR_COUNT_BEFORE_IRQ;
 
-        IRQ_handlers[irq_index] = irq;
+    if (irq_index < 0 || irq_index >= MAX_IRQ_ENTRIES)
+        return;
+
+    IRQ_handlers[irq_index] = irq;
+
+    if (APIC_is_enabled())
+    {
+        APIC_register_IRQ_vector(vector, irq_index, FALSE);
     }
 }
 
-void ISR_handler(interrupt_frame_t frame)
-{
-    if (frame.int_no < MAX_KNOWN_EXCEPTIONS)
-    {
-        puts(exception_messages[frame.int_no]);
-        puts(" Exception Handled !\n");
 
-        printf("Error code = 0x%X !\n", frame.err_code);
-    }
-    else if (frame.int_no == SYSCALL_INT)
+void ISR_handler(interrupt_frame_t* frame)
+{
+    if (frame->int_no < MAX_KNOWN_EXCEPTIONS)
     {
-        Syscall_interupt_handler(&frame);
-        return;
+        kdebug_printf(
+            "[ISR] Exception %llu (%s)\n"
+            "      RIP=0x%llX  CS=0x%llX  RFLAGS=0x%llX\n",
+            frame->int_no,
+            exception_messages[frame->int_no],
+            frame->rip,
+            frame->cs,
+            frame->rflags
+        );
     }
     else
     {
-        puts("Reserved Exception Handled !\n");
+        kdebug_printf(
+            "[ISR] Exception %llu (Unknown)\n"
+            "      RIP=0x%llX  CS=0x%llX  RFLAGS=0x%llX\n",
+            frame->int_no,
+            frame->rip,
+            frame->cs,
+            frame->rflags
+        );
     }
 
     abort();
 }
 
-void IRQ_handler(interrupt_frame_t frame)
+
+void IRQ_handler(interrupt_frame_t *frame)
 {
-    /* Must send EOI. */
+    int irq = frame->int_no - ISR_COUNT_BEFORE_IRQ;
+
+    if (irq < 0 || irq >= MAX_IRQ_ENTRIES)
+        return;
+
+    IRQ_t handler = IRQ_handlers[irq];
+    if (handler)
+        handler(frame);
+
     if (APIC_is_enabled())
         APIC_send_EOI();
-    else 
-        PIC_send_EOI(frame.err_code); // err_code store the irq index here.  
-
-    IRQ_t handler = IRQ_handlers[frame.err_code];
-    if (handler != 0)
-        handler(&frame);
+    else
+        PIC_send_EOI(irq);
 }

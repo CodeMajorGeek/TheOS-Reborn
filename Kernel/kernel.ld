@@ -48,6 +48,14 @@ SECTIONS
     
     PROVIDE(kernel_end = .);
 
+    /* Stack utilisateur - sera mappée dans l'espace utilisateur */
+    .userland_stack ALIGN(4K) (NOLOAD) : AT(ADDR(.userland_stack))
+    {
+        userland_stack_bottom = .;
+        . += 0x2000;  /* 8 KB de stack utilisateur */
+        userland_stack_top = .;
+    } :bss
+
     /DISCARD/ :
     {
         *(.comment)

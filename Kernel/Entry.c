@@ -3,6 +3,7 @@
 #include <Device/Keyboard.h>
 #include <FileSystem/ext4.h>
 #include <Debug/Logger.h>
+#include <Debug/KDebug.h>
 #include <CPU/UserMode.h>
 #include <CPU/Syscall.h>
 #include <Device/PIC.h>
@@ -39,15 +40,15 @@ __attribute__((__noreturn__)) void k_entry(const void* mbt2_info)
 {
     TTY_init();
     logger_init();
+    kdebug_init();
 
     PMM_init((uint64_t) &kernel_start, (uint64_t) &kernel_end);
-    printf("Kernel start at 0x%X%X and end at 0x%X%X\n",
-        (unsigned) ((uint64_t) &kernel_start >> 32), (unsigned) ((uint64_t) &kernel_start & 0xffffffff),
-        (unsigned) ((uint64_t) &kernel_end >> 32), (unsigned) ((uint64_t) &kernel_end & 0xffffffff));
+    printf("Kernel start at 0x%llX and end at 0x%llX\n", &kernel_start, &kernel_end);
     
     read_multiboot2_info(mbt2_info);
 
     VMM_map_kernel();
+    // VMM_map_userland_stack();
 
     MADT = (APIC_MADT_t*) ACPI_get_table(ACPI_APIC_SIGNATURE);
 
@@ -68,17 +69,15 @@ __attribute__((__noreturn__)) void k_entry(const void* mbt2_info)
     Keyboard_init();
     Syscall_init();
 
-    task_init((uintptr_t) &kernel_stack_bottom);
+    task_init(&kernel_stack_top);
+    task_switch();
     PIT_init();
-
 
     RTC_t rtc;
     RTC_read(&rtc);
     printf("%d:%d:%d %s %d/%d/%d\n", rtc.hours, rtc.minutes, rtc.seconds, rtc.weekday, rtc.month_day, rtc.month, rtc.year);
 
-    printf("Je suis un petit test ! :)\n");
-
-    // switch_to_usermode();
+    switch_to_usermode();
     
     while (TRUE)
         __asm__ __volatile__("nop");
@@ -107,11 +106,7 @@ void read_multiboot2_info(const void* mbt2_info)
                 {
                     if (mmap->type == MULTIBOOT_MEMORY_AVAILABLE)
                     {
-                        printf("MMAP avaliable found at addr 0x%X%X with size of 0x%X%X !\n",
-                            (unsigned) (mmap->addr >> 32),
-                            (unsigned) (mmap->addr & 0xffffffff),
-                            (unsigned) (mmap->len >> 32),
-                            (unsigned) (mmap->len & 0xffffffff));
+                        printf("MMAP avaliable found at addr 0x%llX with size of 0x%llX !\n", mmap->addr, mmap->len);
                         PMM_init_region(mmap->addr, mmap->len);
                     }   
                 }

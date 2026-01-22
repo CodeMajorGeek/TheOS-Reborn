@@ -46,9 +46,23 @@ void VMM_map_kernel(void)
     while (phys_base < phys_end)
     {
         VMM_map_page(virt_addr, phys_base);
-
         phys_base += PHYS_PAGE_SIZE;
         virt_addr += PHYS_PAGE_SIZE;
+    }
+    
+    extern void* userland_stack_top;
+    extern void* userland_stack_bottom;
+    
+    uintptr_t stack_bottom = (uintptr_t) &userland_stack_bottom;
+    uintptr_t stack_top = (uintptr_t) &userland_stack_top;
+    
+    // 4K alignment
+    stack_bottom = stack_bottom & ~0xFFF;
+    stack_top = (stack_top + 0xFFF) & ~0xFFF;
+    
+    for (uintptr_t addr = stack_bottom; addr < stack_top; addr += 0x1000)
+    {
+        VMM_map_page(addr, addr);
     }
 
     VMM_VGA_virt = virt_addr;

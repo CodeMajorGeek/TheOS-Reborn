@@ -7,7 +7,7 @@ uint64_t MSR_get(uint32_t msr)
 
     __asm__ __volatile__("rdmsr" : "=a"(lo), "=d"(hi) : "c"(msr));
 
-    return lo | ((uint64_t) hi >> 32) & 0xFFFFFFFF;
+    return (((uint64_t) hi) << 32) | lo;
 }
 
 void MSR_set(uint32_t msr, uint64_t value)

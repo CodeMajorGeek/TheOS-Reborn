@@ -52,7 +52,7 @@ static const char* exception_messages[MAX_KNOWN_EXCEPTIONS] =
 
 void ISR_register_IRQ(int index, IRQ_t irq);
 
-void ISR_handler(interrupt_frame_t frame);
-void IRQ_handler(interrupt_frame_t frame);
+void ISR_handler(interrupt_frame_t* frame);
+void IRQ_handler(interrupt_frame_t* frame);
 
 #endif

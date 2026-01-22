@@ -46,6 +46,7 @@ typedef struct PT
 uintptr_t VMM_get_AHCI_virt(void);
 
 void VMM_map_kernel(void);
+void VMM_map_userland_stack(void);
 void VMM_identity_map_all(void);
 void VMM_hardware_mapping(void);
 

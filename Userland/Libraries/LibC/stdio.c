@@ -2,6 +2,7 @@
 
 #include <Device/TTY.h>
 
+#include <stdbool.h>
 #include <stdint.h>
 #include <limits.h>
 
@@ -51,6 +52,7 @@ int __printf(char* buff, size_t buff_len, const char* __restrict format, va_list
         }
 
         const char* format_begun_at = format++;
+        
         if (*format == 'c' || *format == 'C')
         {
             bool uppercase = *format == 'C';
@@ -123,26 +125,56 @@ int __printf(char* buff, size_t buff_len, const char* __restrict format, va_list
 
             written += len;
         }
-        else if (*format == 'x' || *format == 'X')
+        else if ((*format == 'l' && format[1] == 'l' && (format[2] == 'x' || format[2] == 'X')) || (*format == 'x' || *format == 'X'))
         {
-            bool uppercase = *format == 'X';
-            format++;
-            int v = va_arg(parameters, int);
+            // Vérifier pour %llx ou %llX (long long)
+            bool is_long_long = (*format == 'l' && format[1] == 'l' && (format[2] == 'x' || format[2] == 'X'));
+            bool uppercase;
             
-            char digits[7]; // max digits size in int hexadecimal.
-            itoa(v, digits, sizeof(digits), HEXADECIMAL);
-
-            size_t len = strlen(digits);
-            if (maxrem < len)
+            if (is_long_long)
             {
-                // TODO: Implement OVERFLOW.
-                return EOF;
+                // %llx ou %llX : long long unsigned
+                uppercase = (format[2] == 'X');
+                format += 3; // Consommer "llx" ou "llX"
+                unsigned long long v = va_arg(parameters, unsigned long long);
+                
+                char digits[17]; // max digits size in long long hexadecimal (16 digits + null terminator).
+                lltoa(v, digits, sizeof(digits), HEXADECIMAL);
+
+                size_t len = strlen(digits);
+                if (maxrem < len)
+                {
+                    // TODO: Implement OVERFLOW.
+                    return EOF;
+                }
+
+                for (size_t i = 0; i < len; i++)
+                    buff[written + i] = uppercase && digits[i] >= 'a' && digits[i] <= 'z' ? digits[i] - 32 : digits[i];
+
+                written += len;
             }
+            else
+            {
+                // %x ou %X : int
+                uppercase = (*format == 'X');
+                format++;
+                int v = va_arg(parameters, int);
+                
+                char digits[7]; // max digits size in int hexadecimal.
+                itoa(v, digits, sizeof(digits), HEXADECIMAL);
 
-            for (size_t i = 0; i < len; i++)
-                buff[written + i] = uppercase && digits[i] >= 'a' && digits[i] <= 'z' ? digits[i] - 32 : digits[i];
+                size_t len = strlen(digits);
+                if (maxrem < len)
+                {
+                    // TODO: Implement OVERFLOW.
+                    return EOF;
+                }
 
-            written += len;
+                for (size_t i = 0; i < len; i++)
+                    buff[written + i] = uppercase && digits[i] >= 'a' && digits[i] <= 'z' ? digits[i] - 32 : digits[i];
+
+                written += len;
+            }
         }
         else
         {
@@ -237,6 +269,46 @@ char* itoa(int value, char* buf, size_t length, unsigned int base)
         else
         {
             int digit = v % base;
+            if (digit <= 9)
+                digits[index++] = '0' + digit;
+            else
+                digits[index++] = 'a' + (digit - 10);
+            v /= base;
+        }
+    }
+    
+
+    int i = index;
+    index = 0;
+    for (i--; i >= 0; i--)
+        buf[index++] = digits[i]; // Ugly but work...
+
+    buf[index] = '\0';
+    return buf;
+}
+
+char* lltoa(unsigned long long value, char* buf, size_t length, unsigned int base)
+{
+    if (base < 2 || base > 36)
+        return buf;
+
+    unsigned long long v = value;
+    char digits[length];
+
+    size_t index = 0;
+    if (value == 0)
+        digits[index++] = '0';
+
+    while (v && index < (length - 1))
+    {
+        if (base == 2)
+        {
+            digits[index++] = '0' + (v & 1);
+            v >>= 1;
+        }
+        else
+        {
+            unsigned long long digit = v % base;
             if (digit <= 9)
                 digits[index++] = '0' + digit;
             else

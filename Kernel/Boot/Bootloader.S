@@ -88,6 +88,8 @@ mb2_hdr_end:
 .globl TSS_GDT_segment
 .globl kernel_stack_top
 .globl kernel_stack_bottom
+; .globl userland_stack_top
+; .globl userland_stack_bottom
 
 # Execute our first loader code segment starting at multiboot_entry.
 multiboot_entry:   
@@ -287,19 +289,19 @@ gdt64:
     .byte LONG_MODE
     .byte 0
 
-# User code segment.
-.equ gdt64.user_code, . - gdt64             #0x18
-    .long 0xFFFF
-    .byte 0
-    .byte PRESENT | NOT_SYS | EXEC | RW | RING_USER
-    .byte LONG_MODE
-    .byte 0
-
 # User data segment.
-.equ gdt64.user_data, . - gdt64             #0x20
+.equ gdt64.user_data, . - gdt64             #0x18
     .long 0xFFFF
     .byte 0
     .byte PRESENT | NOT_SYS | RW | RING_USER
+    .byte LONG_MODE
+    .byte 0
+
+# User code segment.
+.equ gdt64.user_code, . - gdt64             #0x20
+    .long 0xFFFF
+    .byte 0
+    .byte PRESENT | NOT_SYS | EXEC | RW | RING_USER
     .byte LONG_MODE
     .byte 0
 

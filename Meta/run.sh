@@ -6,8 +6,6 @@
 
 [ -z "$THEOS_DISK_NAME" ] && THEOS_DISK_NAME="disk.img"
 
-echo $THEOS_ENABLE_KVM;
-
 qemu-system-x86_64 \
 	-chardev stdio,id=char0,mux=on,logfile=serial.log,signal=off \
 	-monitor telnet::45454,server,nowait \

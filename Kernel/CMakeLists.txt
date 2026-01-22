@@ -22,6 +22,7 @@ set(KERNEL_CPU_SOURCES
 set(KERNEL_DEBUG_SOURCES
     Debug/Logger.c
     Debug/Spinlock.c
+    Debug/KDebug.c
 )
 
 set(KERNEL_DEVICES_SOURCES

@@ -19,5 +19,6 @@ int sprintf(char*, const char* __restrict, ...);
 int snprintf(char*, size_t, const char* __restrict, ...);
 
 char* itoa(int, char*, size_t, unsigned int);
+char* lltoa(unsigned long long, char*, size_t, unsigned int);
 
 #endif
