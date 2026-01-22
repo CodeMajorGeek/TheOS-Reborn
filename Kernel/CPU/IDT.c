@@ -2,6 +2,7 @@
 
 #include <Device/PIC.h>
 #include <CPU/GDT.h>
+#include <CPU/Syscall.h>
 
 #include <stdbool.h>
 
@@ -12,12 +13,12 @@ void IDT_init(void)
 
     PIC_remap(IRQ_BASE, IRQ_BASE + 8);
 
-    // Set DPL=3 for all IDT entries to allow interrupts from user mode (ring 3)
-    // 0x8E = interrupt gate, present, DPL=0
-    // We need DPL=3, so attributes = 0x8E | (3 << 5) = 0xEE
-    // But we pass DPL=3 directly, and IDT_set_descriptor will calculate: 0x8E | (3 << 5) = 0xEE
+    // Default all IDT entries to ring 0 (DPL=0).
     for (int vector = 0; vector < IDT_MAX_VECTORS; ++vector)
-        IDT_set_descriptor(vector, ISR_stub_table[vector], 3);
+        IDT_set_descriptor(vector, ISR_stub_table[vector], 0);
+
+    // Allow only the syscall vector from ring 3.
+    IDT_set_descriptor(SYSCALL_INT, ISR_stub_table[SYSCALL_INT], 3);
 
     __asm__ __volatile__("lidt %0" : : "m"(idtr));  // Load the new IDT.
     __asm__ __volatile__("sti");                    // Set the interrupt FLAG.

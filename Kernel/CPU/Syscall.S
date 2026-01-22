@@ -46,11 +46,13 @@ syscall_handler_stub:
     pushq %rbp
     pushq %rbx
     pushq %r12                # Use R12 to save RAX (syscall number)
+    pushq %r13                # Save R13 (used as a temp)
     
+    movq %rsp, %r13          # Save kernel RSP (after pushes)
     movq %rax, %r12          # R12 = RAX (syscall number)
     movq %rcx, %rbp          # RBP = RCX (user RIP)
     movq %r11, %rbx          # RBX = R11 (user RFLAGS)
-    movq %rsp, %rax          # RAX = user RSP (temporary)
+    lea 32(%rsp), %rax       # RAX = original user RSP before pushes
 
     # Align stack to 16 bytes before C call
     andq $0xFFFFFFFFFFFFFFF0, %rsp
@@ -69,14 +71,15 @@ syscall_handler_stub:
     movq %rsp, %rsi          # RSI = pointer to frame
     callq Syscall_interupt_handler
 
-    # Restore RSP (remove frame from stack)
-    addq $56, %rsp           # 7 * 8 bytes = 56 bytes for frame
-
     # Restore RCX/R11 for sysretq
     movq %rbp, %rcx          # RCX = user RIP
     movq %rbx, %r11          # R11 = user RFLAGS
     
+    # Restore original kernel RSP (before stack alignment)
+    movq %r13, %rsp
+
     # Restore saved registers
+    popq %r13
     popq %r12
     popq %rbx
     popq %rbp

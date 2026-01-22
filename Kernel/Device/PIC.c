@@ -25,7 +25,7 @@ void PIC_remap(int offset1, int offset2)
 
     /* Restore the saved masks. */
     IO_outb(PIC1_DATA, 0x00);
-    IO_outb(PIC1_DATA, 0x00);
+    IO_outb(PIC2_DATA, 0x00);
 }
 
 void PIC_send_EOI(uint8_t irq)

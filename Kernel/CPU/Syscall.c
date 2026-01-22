@@ -8,11 +8,7 @@
 void Syscall_init(void)
 {
     MSR_set(IA32_LSTAR, (uint64_t) &syscall_handler_stub);
-
-    uint64_t fmask = 0;
-    fmask |= (1ULL << 8);   // TF
-    fmask |= (1ULL << 10);  // DF
-    MSR_set(IA32_FMASK, SYSCALL_FMASK_TF_BIT || SYSCALL_FMASK_DF_BIT);
+    MSR_set(IA32_FMASK, SYSCALL_FMASK_TF_BIT | SYSCALL_FMASK_DF_BIT);
 
     enable_syscall_ext();
 }
