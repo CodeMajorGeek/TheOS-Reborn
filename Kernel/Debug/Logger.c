@@ -11,17 +11,16 @@
 #endif
 
 #ifdef __USE_QEMU
-#define LOGGER_COM_PORT COM1
-#endif
-
 void logger_init(void)
 {
-#ifdef __USE_QEMU
     if (!COM_init(LOGGER_COM_PORT))
         abort();
-#endif
 }
-
+#else
+void logger_init(void)
+{
+}
+#endif
 void kputc(int level, char c)
 {
 #ifdef __USE_QEMU

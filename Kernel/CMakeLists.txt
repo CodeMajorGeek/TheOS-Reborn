@@ -11,7 +11,9 @@ set(KERNEL_CPU_SOURCES
     CPU/Interrupts.S
     CPU/ISR.c
     CPU/MSR.c
+    CPU/FPU.c
     CPU/ACPI.c
+    CPU/NUMA.c
     CPU/UserMode.S
     CPU/PCI.c
     CPU/Syscall.c
@@ -57,6 +59,7 @@ set(KERNEL_FILESYSTEM_SOURCES
 
 set(KERNEL_TASK_SOURCES
     Task/Task.c
+    Task/RCU.c
     Task/Task.S
 )
 

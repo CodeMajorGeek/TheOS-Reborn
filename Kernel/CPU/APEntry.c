@@ -1,25 +1,13 @@
 #include <CPU/SMP.h>
 
 #include <CPU/APIC.h>
+#include <CPU/FPU.h>
 #include <CPU/GDT.h>
 #include <CPU/IDT.h>
 #include <CPU/Syscall.h>
 #include <CPU/x86.h>
 #include <Debug/KDebug.h>
 #include <Task/Task.h>
-
-typedef struct SMP_handoff
-{
-    uint64_t magic;
-    uint64_t cr3;
-    uint64_t stack_top;
-    uint64_t entry64;
-    uint64_t arg;
-    uint32_t apic_id;
-    uint32_t cpu_index;
-    volatile uint32_t ready;
-    uint32_t rsv;
-} __attribute__((__packed__)) SMP_handoff_t;
 
 void SMP_ap_entry(uintptr_t handoff_phys)
 {
@@ -33,6 +21,9 @@ void SMP_ap_entry(uintptr_t handoff_phys)
     uint32_t cpu_index = handoff->cpu_index;
     uint8_t apic_id = (uint8_t) handoff->apic_id;
     uintptr_t stack_top = (uintptr_t) handoff->stack_top;
+
+    if (!FPU_init_cpu(cpu_index))
+        goto ap_idle;
 
     APIC_enable();
     APIC_send_EOI();

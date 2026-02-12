@@ -1,5 +1,6 @@
 #include <Debug/Spinlock.h>
 
+#include <Task/Task.h>
 #include <CPU/x86.h>
 #include <Memory/PMM.h>
 
@@ -28,7 +29,12 @@ bool spin_try_lock(spinlock_t* lock)
     if (!lock)
         return false;
 
-    return !__atomic_test_and_set(&lock->locked, __ATOMIC_ACQUIRE);
+    task_preempt_disable();
+    if (!__atomic_test_and_set(&lock->locked, __ATOMIC_ACQUIRE))
+        return true;
+
+    task_preempt_enable();
+    return false;
 }
 
 void spin_lock(spinlock_t* lock)
@@ -36,6 +42,7 @@ void spin_lock(spinlock_t* lock)
     if (!lock)
         return;
 
+    task_preempt_disable();
     while (__atomic_test_and_set(&lock->locked, __ATOMIC_ACQUIRE))
     {
         while (__atomic_load_n(&lock->locked, __ATOMIC_RELAXED))
@@ -49,6 +56,7 @@ void spin_unlock(spinlock_t* lock)
         return;
 
     __atomic_clear(&lock->locked, __ATOMIC_RELEASE);
+    task_preempt_enable();
 }
 
 uint64_t spin_lock_irqsave(spinlock_t* lock)

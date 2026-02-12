@@ -32,11 +32,6 @@ static uint16_t APIC_GSI_flags[256];
 static bool APIC_GSI_flags_valid[256];
 static bool APIC_GSI_is_isa[256];
 
-#define LAPIC_TIMER_DIVIDE_BY_16      0x3U
-#define LAPIC_TIMER_CALIBRATION_MS    50U
-#define APIC_IPI_SPIN_TIMEOUT         1000000U
-#define APIC_IPI_DELAY_SHORT_LOOPS    200000U
-
 static volatile uint32_t APIC_timer_periodic_initial_count = 0;
 static volatile uint32_t APIC_timer_calibrated_hz = 0;
 static volatile uint8_t APIC_timer_calibrated = 0;
@@ -637,6 +632,7 @@ static void APIC_timer_callback(interrupt_frame_t* frame)
     (void) frame;
     task_scheduler_on_tick();
     APIC_send_EOI();
+    task_irq_exit();
 }
 
 static bool APIC_wait_icr_idle(uint32_t spin_limit)

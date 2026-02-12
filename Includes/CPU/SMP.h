@@ -36,6 +36,58 @@
 #define SMP_INVALID_APIC_ID          0xFFFFFFFFU
 #define SMP_INVALID_CPU_ID           0xFFFFFFFFU
 
+#define SMP_AP_READY_TIMEOUT_LOOPS   200000000U
+#define SMP_IPI_READY_TIMEOUT_LOOPS  50000000U
+#define SMP_COUNTER_STRESS_TARGET    1000000U
+#define SMP_COUNTER_STRESS_TIMEOUT   200000000U
+#define SMP_COUNTER_STRESS_ENABLE    1
+#define SMP_SCHED_STRESS_TARGET      1000000U
+#define SMP_SCHED_STRESS_JOBS        128U
+#define SMP_SCHED_STRESS_TIMEOUT     300000000U
+#define SMP_SCHED_STRESS_ENABLE      1
+#define SMP_SCHED_BALANCE_TARGET     200000U
+#define SMP_SCHED_BALANCE_JOBS       128U
+#define SMP_SCHED_BALANCE_TIMEOUT    300000000U
+#define SMP_SCHED_BALANCE_TEST_ENABLE 1
+#define SMP_SCHED_PATHO_SHORT_JOBS   256U
+#define SMP_SCHED_PATHO_TIMEOUT      300000000U
+#define SMP_SCHED_PATHO_LONG_SPINS   60000000U
+#define SMP_SCHED_PATHO_TEST_ENABLE  1
+#define SMP_SCHED_MAX_JOBS           ((SMP_SCHED_STRESS_JOBS > SMP_SCHED_BALANCE_JOBS) ? SMP_SCHED_STRESS_JOBS : SMP_SCHED_BALANCE_JOBS)
+#define SMP_TLB_SHOOTDOWN_TIMEOUT    50000000U
+#define SMP_TLB_TEST_ENABLE          1
+#define SMP_YMM_STRESS_ENABLE        1
+#define SMP_YMM_STRESS_ITERS         4096U
+#define SMP_YMM_STRESS_TIMEOUT       300000000U
+#define SMP_TIMER_INIT_TIMEOUT       50000000U
+
+typedef enum SMP_tlb_shootdown_kind
+{
+    SMP_TLB_SHOOTDOWN_NONE = 0,
+    SMP_TLB_SHOOTDOWN_PAGE = 1,
+    SMP_TLB_SHOOTDOWN_ALL = 2
+} SMP_tlb_shootdown_kind_t;
+
+typedef struct SMP_handoff
+{
+    uint64_t magic;
+    uint64_t cr3;
+    uint64_t stack_top;
+    uint64_t entry64;
+    uint64_t arg;
+    uint32_t apic_id;
+    uint32_t cpu_index;
+    volatile uint32_t ready;
+    uint32_t rsv;
+} __attribute__((__packed__)) SMP_handoff_t;
+
+typedef struct SMP_sched_job
+{
+    uint32_t work;
+    uint8_t expected_cpu;
+    uint8_t rsv[3];
+} SMP_sched_job_t;
+
 typedef struct SMP_cpu_local
 {
     uint32_t apic_id;
@@ -85,6 +137,7 @@ void SMP_ap_entry(uintptr_t handoff_phys);
 void SMP_notify_ap_ready(uint32_t cpu_index, uint8_t apic_id);
 uint32_t SMP_get_ping_count(uint8_t apic_id);
 uint32_t SMP_get_pong_count(uint8_t apic_id);
+uint64_t SMP_get_sched_kick_count(uint32_t cpu_id);
 bool SMP_send_ipi_to_others(uint8_t vector);
 bool SMP_tlb_shootdown_page(uintptr_t virt);
 bool SMP_tlb_shootdown_all(void);

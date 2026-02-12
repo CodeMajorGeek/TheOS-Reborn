@@ -3,6 +3,7 @@
 #include <CPU/IO.h>
 #include <CPU/APIC.h>
 #include <Debug/KDebug.h>
+#include <Task/Task.h>
 
 static volatile uint64_t ticks = 0;
 static bool pit_irq_seen_with_apic = false;
@@ -77,6 +78,7 @@ static void PIT_callback(interrupt_frame_t* frame)
 {
     (void) frame;
     ++ticks;
+    task_scheduler_on_tick();
 
     if (APIC_is_enabled())
     {
@@ -87,4 +89,6 @@ static void PIT_callback(interrupt_frame_t* frame)
         }
         APIC_send_EOI();
     }
+
+    task_irq_exit();
 }

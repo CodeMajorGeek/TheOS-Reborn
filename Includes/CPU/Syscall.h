@@ -16,8 +16,48 @@ enum
 {
     SYS_FS_LS = 1,
     SYS_FS_READ = 2,
-    SYS_FS_CREATE = 3
+    SYS_FS_CREATE = 3,
+    SYS_SLEEP_MS = 4,
+    SYS_TICK_GET = 5,
+    SYS_CPU_INFO_GET = 6,
+    SYS_SCHED_INFO_GET = 7,
+    SYS_AHCI_IRQ_INFO_GET = 8,
+    SYS_RCU_SYNC = 9,
+    SYS_RCU_INFO_GET = 10
 };
+
+typedef struct syscall_cpu_info
+{
+    uint32_t cpu_index;
+    uint32_t apic_id;
+    uint32_t online_cpus;
+    uint32_t tick_hz;
+    uint64_t ticks;
+} syscall_cpu_info_t;
+
+typedef struct syscall_sched_info
+{
+    uint32_t current_cpu;
+    uint32_t preempt_count;
+    uint32_t local_rq_depth;
+    uint32_t total_rq_depth;
+} syscall_sched_info_t;
+
+typedef struct syscall_ahci_irq_info
+{
+    uint32_t mode;
+    uint32_t reserved;
+    uint64_t count;
+} syscall_ahci_irq_info_t;
+
+typedef struct syscall_rcu_info
+{
+    uint64_t gp_seq;
+    uint64_t gp_target;
+    uint64_t callbacks_pending;
+    uint32_t local_read_depth;
+    uint32_t local_preempt_count;
+} syscall_rcu_info_t;
 
 typedef struct syscall_frame
 {
@@ -34,6 +74,6 @@ typedef struct syscall_frame
 
 void Syscall_init(void);
 
-uint64_t Syscall_interupt_handler(uint64_t syscall_num, syscall_frame_t* frame);
+uint64_t Syscall_interupt_handler(uint64_t syscall_num, syscall_frame_t* frame, uint32_t cpu_index);
 
 #endif

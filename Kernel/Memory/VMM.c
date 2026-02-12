@@ -14,12 +14,6 @@ static PML4_t* VMM_PML4;
 static uintptr_t VMM_VGA_virt;
 static uintptr_t VMM_AHCI_virt;
 
-// Keep MMIO mappings in a dedicated high-half range to avoid colliding with
-// identity-mapped RAM (PMM bitmaps, heap, kernel image, stacks, etc.).
-#define VMM_MMIO_BASE       0xFFFFC00000000000ULL
-#define VMM_VGA_VIRT_BASE   (VMM_MMIO_BASE + 0x00000000000B8000ULL)
-#define VMM_AHCI_VIRT_BASE  (VMM_MMIO_BASE + 0x0000000000100000ULL)
-
 static bool VMM_recursive_active = FALSE;
 
 static uintptr_t canonical_address(uintptr_t addr)

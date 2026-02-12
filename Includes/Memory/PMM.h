@@ -5,6 +5,7 @@
 
 #define PHYS_PAGE_SIZE          4096
 #define PMM_MEM_NOTAVALIABLE    0
+#define PMM_MAX_REGIONS         64
 
 typedef struct PMM_region
 {

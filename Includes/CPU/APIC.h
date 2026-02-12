@@ -76,6 +76,11 @@
 #define APIC_ICR_DELIVERY_INIT                  (0x5U << 8)
 #define APIC_ICR_DELIVERY_STARTUP               (0x6U << 8)
 
+#define LAPIC_TIMER_DIVIDE_BY_16                0x3U
+#define LAPIC_TIMER_CALIBRATION_MS              50U
+#define APIC_IPI_SPIN_TIMEOUT                   1000000U
+#define APIC_IPI_DELAY_SHORT_LOOPS              200000U
+
 
 typedef struct APIC_MADT
 {

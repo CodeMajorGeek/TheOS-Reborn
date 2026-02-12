@@ -33,3 +33,38 @@ int fs_create(const char* name, const void* data, size_t size)
     return (int) syscall(SYS_FS_CREATE, (long) name, (long) data, (long) size,
                          0, 0, 0);
 }
+
+int sys_sleep_ms(uint32_t ms)
+{
+    return (int) syscall(SYS_SLEEP_MS, (long) ms, 0, 0, 0, 0, 0);
+}
+
+uint64_t sys_tick_get(void)
+{
+    return (uint64_t) syscall(SYS_TICK_GET, 0, 0, 0, 0, 0, 0);
+}
+
+int sys_cpu_info_get(syscall_cpu_info_t* out_info)
+{
+    return (int) syscall(SYS_CPU_INFO_GET, (long) out_info, 0, 0, 0, 0, 0);
+}
+
+int sys_sched_info_get(syscall_sched_info_t* out_info)
+{
+    return (int) syscall(SYS_SCHED_INFO_GET, (long) out_info, 0, 0, 0, 0, 0);
+}
+
+int sys_ahci_irq_info_get(syscall_ahci_irq_info_t* out_info)
+{
+    return (int) syscall(SYS_AHCI_IRQ_INFO_GET, (long) out_info, 0, 0, 0, 0, 0);
+}
+
+int sys_rcu_sync(void)
+{
+    return (int) syscall(SYS_RCU_SYNC, 0, 0, 0, 0, 0, 0);
+}
+
+int sys_rcu_info_get(syscall_rcu_info_t* out_info)
+{
+    return (int) syscall(SYS_RCU_INFO_GET, (long) out_info, 0, 0, 0, 0, 0);
+}

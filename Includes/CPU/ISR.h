@@ -11,6 +11,10 @@
 #define IRQ_VECTOR_END          (ISR_COUNT_BEFORE_IRQ + MAX_IRQ_ENTRIES - 1)
 #define TICK_VECTOR             IRQ_VECTOR_BASE
 
+#define TICK_LOG_PERIOD         5000ULL
+#define PIC_CHECK_PERIOD        100ULL
+#define PIC_QUIET_REPORT_AFTER  500ULL
+
 #define IRQ0    32
 #define IRQ1    33
 #define IRQ2    34

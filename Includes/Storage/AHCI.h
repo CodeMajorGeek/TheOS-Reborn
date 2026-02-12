@@ -6,6 +6,7 @@
 
 #define AHCI_MEM_LENGTH         (1024 * 32)
 #define AHCI_SECTOR_SIZE        0x200       // 512 bytes.
+#define AHCI_IRQ_VECTOR         0xD0
 
 #define AHCI_MAX_SLOT           32
 
@@ -33,6 +34,12 @@
 #define HBA_PxCMD_FR            0x4000
 #define HBA_PxCMD_CR            0x8000
 #define HBA_PxIS_TFES           (1U << 30)
+#define HBA_GHC_IE              (1U << 1)
+
+#define AHCI_IRQ_MODE_POLL      0
+#define AHCI_IRQ_MODE_MSI       1
+#define AHCI_IRQ_MODE_MSIX      2
+#define AHCI_IO_WAIT_TIMEOUT_MS 5000U
 
 typedef struct AHCI_device
 {
@@ -82,6 +89,13 @@ typedef volatile struct HBA_MEM
     uint8_t vendor[0x100 - 0xA0]; // Vendor specific registers.
     HBA_PORT_t ports[1]; // Port control registers.
 } HBA_MEM_t;
+
+typedef struct AHCI_wait_slot_ctx
+{
+    HBA_PORT_t* port;
+    uint32_t slot_mask;
+    uint32_t port_index;
+} AHCI_wait_slot_ctx_t;
 
 typedef struct HBA_CMD_HEADER
 {
@@ -173,5 +187,8 @@ int AHCI_SATA_write(HBA_PORT_t* port, uint32_t startl, uint32_t starth, uint32_t
 
 int AHCI_get_device_count(void);
 HBA_PORT_t* AHCI_get_device(int index);
+uint8_t AHCI_get_irq_mode(void);
+uint64_t AHCI_get_irq_count(void);
+const char* AHCI_get_irq_mode_name(void);
 
 #endif

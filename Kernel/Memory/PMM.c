@@ -10,8 +10,6 @@
 #include <stdio.h>
 #include <stdlib.h>
 
-#define PMM_MAX_REGIONS 64
-
 static PMM_region_t PMM_regions_store[PMM_MAX_REGIONS];
 static PMM_region_t* PMM_regions = PMM_regions_store;
 

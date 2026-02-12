@@ -6,6 +6,7 @@
 .extern Syscall_interupt_handler
 
 .set TASK_CPU_LOCAL_SYSCALL_RSP0_OFF, 0
+.set TASK_CPU_LOCAL_CPU_INDEX_OFF, 8
 
 # Segment selectors with RPL
 .set USER_CODE_SEGMENT_RPL3,  0x23  # USER_CODE_SEGMENT (0x20) | RPL_3 (0x3)
@@ -77,7 +78,10 @@ syscall_handler_stub:
     # Call C handler with syscall number and frame
     movq %r12, %rdi          # RDI = syscall number (RAX saved in R12)
     movq %rsp, %rsi          # RSI = pointer to syscall_frame_t
+    movl %gs:TASK_CPU_LOCAL_CPU_INDEX_OFF, %edx # RDX = cpu_index (per-CPU via GS after SWAPGS)
+    sti
     callq Syscall_interupt_handler
+    cli
     addq $80, %rsp           # Drop syscall_frame_t
 
     # Restore RCX/R11 for sysretq

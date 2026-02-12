@@ -3,19 +3,7 @@
 #include <CPU/ACPI.h>
 #include <Memory/VMM.h>
 #include <Debug/KDebug.h>
-
-#define HPET_GENERAL_CAP_REG             0x000
-#define HPET_GENERAL_CONFIG_REG          0x010
-#define HPET_MAIN_COUNTER_REG            0x0F0
-
-#define HPET_CFG_ENABLE_CNF              (1ULL << 0)
-#define HPET_COUNTER_SIZE_CAP            (1ULL << 13)
-#define HPET_COUNTER_CLK_PERIOD_SHIFT    32
-#define HPET_COUNTER_CLK_PERIOD_MASK     0xFFFFFFFFULL
-
-#define HPET_ADDR_SPACE_SYSTEM_MEMORY    0
-#define HPET_MAX_PERIOD_FS               100000000ULL
-#define HPET_WAIT_SPIN_GUARD             1000000000ULL
+#include <Task/Task.h>
 
 static volatile uint8_t* HPET_regs = (volatile uint8_t*) 0;
 static uint64_t HPET_period_fs = 0;
@@ -180,4 +168,15 @@ bool HPET_wait_ms(uint32_t ms, uint64_t* elapsed_ticks)
     }
 
     return true;
+}
+
+bool HPET_sleep_ms(uint32_t ms)
+{
+    if (ms == 0)
+        return true;
+
+    if (task_sleep_ms(ms))
+        return true;
+
+    return HPET_wait_ms(ms, NULL);
 }

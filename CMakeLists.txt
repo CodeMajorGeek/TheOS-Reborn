@@ -10,6 +10,7 @@ enable_testing()
 set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 
 set(THEOS_ARCH "x86_64" CACHE STRING "Target architecture for TheOS.")
+option(THEOS_QEMU_NUMA_DEFAULT "Enable QEMU NUMA by default for the run target." ON)
 
 set(CMAKE_C_STANDARD 11)
 set(CMAKE_C_STANDARD_REQUIRED OFF)
@@ -39,7 +40,7 @@ add_custom_target(iso
 add_custom_target(run
 	DEPENDS iso
 	COMMAND chmod +x ${CMAKE_SOURCE_DIR}/Meta/run.sh
-	COMMAND ${CMAKE_SOURCE_DIR}/Meta/run.sh
+	COMMAND ${CMAKE_COMMAND} -E env THEOS_QEMU_NUMA=$<IF:$<BOOL:${THEOS_QEMU_NUMA_DEFAULT}>,1,0> ${CMAKE_SOURCE_DIR}/Meta/run.sh
 	USES_TERMINAL
 )
 

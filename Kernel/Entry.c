@@ -19,8 +19,10 @@
 #include <CPU/APIC.h>
 #include <CPU/ACPI.h>
 #include <CPU/SMP.h>
+#include <CPU/NUMA.h>
 #include <CPU/IDT.h>
 #include <CPU/ISR.h>
+#include <CPU/FPU.h>
 #include <CPU/PCI.h>
 #include <CPU/IO.h>
 #include <CPU/x86.h>
@@ -28,6 +30,7 @@
 #include <stdint.h>
 #include <stdio.h>
 #include <string.h>
+#include <stdlib.h>
 
 void read_multiboot2_info(const void*);
 
@@ -71,6 +74,13 @@ __attribute__((__noreturn__)) void k_entry(const void* mbt2_info)
     IDT_init();
     kdebug_puts("[BOOT] IDT loaded\n");
 
+    if (!FPU_init_cpu(0))
+    {
+        kdebug_puts("[BOOT] FPU init failed\n");
+        abort();
+    }
+    kdebug_puts("[BOOT] FPU init done\n");
+
     if (APIC_check())
     {
         kdebug_puts("[BOOT] APIC supported\n");
@@ -78,6 +88,10 @@ __attribute__((__noreturn__)) void k_entry(const void* mbt2_info)
         kdebug_puts("[BOOT] PIC disabled\n");
         APIC_init(MADT);
         kdebug_puts("[BOOT] APIC init done\n");
+        NUMA_init();
+        kdebug_printf("[BOOT] NUMA %s nodes=%u\n",
+                      NUMA_is_available() ? "enabled" : "disabled",
+                      NUMA_get_node_count());
         APIC_enable();
         kdebug_puts("[BOOT] APIC enabled\n");
     }
@@ -200,6 +214,28 @@ __attribute__((__noreturn__)) void k_entry(const void* mbt2_info)
             ISR_set_tick_source(TICK_SOURCE_PIT_IOAPIC, PIT_TIMER_HZ);
             kdebug_puts("[BOOT] LAPIC timer BSP init failed, PIT kept active\n");
         }
+    }
+
+    if (root_port && AHCI_get_irq_mode() != AHCI_IRQ_MODE_POLL)
+    {
+        uint8_t irq_test_buf[AHCI_SECTOR_SIZE];
+        memset(irq_test_buf, 0, sizeof(irq_test_buf));
+
+        uint64_t irq_before = AHCI_get_irq_count();
+        int irq_read_rc = AHCI_sata_read(root_port, 1, 0, 1, irq_test_buf);
+
+        uint64_t irq_after = AHCI_get_irq_count();
+        for (uint32_t spin = 0; spin < 2000000U && irq_after == irq_before; spin++)
+        {
+            __asm__ __volatile__("pause");
+            irq_after = AHCI_get_irq_count();
+        }
+
+        kdebug_printf("[AHCI] irq smoke mode=%s read_rc=%d irq_before=%llu irq_after=%llu\n",
+                      AHCI_get_irq_mode_name(),
+                      irq_read_rc,
+                      (unsigned long long) irq_before,
+                      (unsigned long long) irq_after);
     }
 
     RTC_t rtc;

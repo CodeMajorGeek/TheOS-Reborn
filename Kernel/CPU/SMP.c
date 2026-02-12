@@ -1,6 +1,7 @@
 #include <CPU/SMP.h>
 
 #include <CPU/APIC.h>
+#include <CPU/FPU.h>
 #include <CPU/ISR.h>
 #include <CPU/x86.h>
 #include <Debug/KDebug.h>
@@ -11,57 +12,8 @@
 
 #include <Task/Task.h>
 
-#define SMP_AP_READY_TIMEOUT_LOOPS   200000000U
-#define SMP_IPI_READY_TIMEOUT_LOOPS  50000000U
-#define SMP_COUNTER_STRESS_TARGET    1000000U
-#define SMP_COUNTER_STRESS_TIMEOUT   200000000U
-#define SMP_COUNTER_STRESS_ENABLE    1
-#define SMP_SCHED_STRESS_TARGET      1000000U
-#define SMP_SCHED_STRESS_JOBS        128U
-#define SMP_SCHED_STRESS_TIMEOUT     300000000U
-#define SMP_SCHED_STRESS_ENABLE      1
-#define SMP_SCHED_BALANCE_TARGET     200000U
-#define SMP_SCHED_BALANCE_JOBS       128U
-#define SMP_SCHED_BALANCE_TIMEOUT    300000000U
-#define SMP_SCHED_BALANCE_TEST_ENABLE 1
-#define SMP_SCHED_PATHO_SHORT_JOBS   256U
-#define SMP_SCHED_PATHO_TIMEOUT      300000000U
-#define SMP_SCHED_PATHO_LONG_SPINS   60000000U
-#define SMP_SCHED_PATHO_TEST_ENABLE  1
-#define SMP_SCHED_MAX_JOBS           ((SMP_SCHED_STRESS_JOBS > SMP_SCHED_BALANCE_JOBS) ? SMP_SCHED_STRESS_JOBS : SMP_SCHED_BALANCE_JOBS)
-#define SMP_TLB_SHOOTDOWN_TIMEOUT    50000000U
-#define SMP_TLB_TEST_ENABLE          1
-#define SMP_TIMER_INIT_TIMEOUT       50000000U
-
-typedef enum SMP_tlb_shootdown_kind
-{
-    SMP_TLB_SHOOTDOWN_NONE = 0,
-    SMP_TLB_SHOOTDOWN_PAGE = 1,
-    SMP_TLB_SHOOTDOWN_ALL = 2
-} SMP_tlb_shootdown_kind_t;
-
-typedef struct SMP_handoff
-{
-    uint64_t magic;
-    uint64_t cr3;
-    uint64_t stack_top;
-    uint64_t entry64;
-    uint64_t arg;
-    uint32_t apic_id;
-    uint32_t cpu_index;
-    volatile uint32_t ready;
-    uint32_t rsv;
-} __attribute__((__packed__)) SMP_handoff_t;
-
 extern uint8_t SMP_ap_trampoline_start[];
 extern uint8_t SMP_ap_trampoline_end[];
-
-typedef struct SMP_sched_job
-{
-    uint32_t work;
-    uint8_t expected_cpu;
-    uint8_t rsv[3];
-} SMP_sched_job_t;
 
 static SMP_cpu_local_t SMP_cpu[SMP_MAX_CPUS];
 static int32_t SMP_apic_to_cpu_id[SMP_APIC_ID_MAP_SIZE];
@@ -73,6 +25,9 @@ static SMP_sched_job_t SMP_sched_jobs[SMP_SCHED_MAX_JOBS];
 static uint32_t SMP_sched_patho_short_done = 0;
 static uint32_t SMP_sched_patho_long_done = 0;
 static uint32_t SMP_sched_patho_short_exec_per_cpu[SMP_MAX_CPUS];
+static uint8_t SMP_ymm_done_cpu[SMP_MAX_CPUS];
+static uint8_t SMP_ymm_fail_cpu[SMP_MAX_CPUS];
+static uint64_t SMP_ymm_signature_cpu[SMP_MAX_CPUS];
 static bool SMP_initialized = false;
 static uint32_t SMP_bsp_apic_id = 0;
 
@@ -95,6 +50,8 @@ static bool SMP_run_sched_balance_tests(void);
 static void SMP_sched_patho_long_job(void* arg);
 static void SMP_sched_patho_short_job(void* arg);
 static bool SMP_run_sched_pathological_test(void);
+static void SMP_ymm_stress_job(void* arg);
+static bool SMP_run_ymm_stress_test(void);
 static bool SMP_validate_tlb_shootdown(void);
 static bool SMP_issue_tlb_shootdown(uint8_t kind, uintptr_t virt);
 
@@ -689,7 +646,7 @@ static bool SMP_run_sched_stress_test(void)
     uint32_t migration_errors = __atomic_load_n(&SMP_tests.sched_migration_errors, __ATOMIC_RELAXED);
     if (migration_errors != 0)
     {
-        kdebug_printf("[SMP] scheduler B1 migration job=%u expected cpu=%u apic=%u got cpu=%u apic=%u\n",
+        kdebug_printf("[SMP] scheduler affinity migration job=%u expected cpu=%u apic=%u got cpu=%u apic=%u\n",
                       __atomic_load_n(&SMP_tests.sched_first_migration_job, __ATOMIC_RELAXED),
                       __atomic_load_n(&SMP_tests.sched_first_expected_cpu, __ATOMIC_RELAXED),
                       __atomic_load_n(&SMP_tests.sched_first_expected_apic, __ATOMIC_RELAXED),
@@ -716,7 +673,7 @@ static bool SMP_run_sched_stress_test(void)
         }
     }
 
-    kdebug_printf("[SMP] scheduler test B1 OK final=%u jobs=%u cpus=%u\n",
+    kdebug_printf("[SMP] scheduler affinity OK final=%u jobs=%u cpus=%u\n",
                   final_counter,
                   job_count,
                   target_count);
@@ -858,8 +815,8 @@ static bool SMP_run_sched_balance_tests(void)
     bool saved_push = task_is_push_balance_enabled();
     bool saved_steal = task_is_work_stealing_enabled();
 
-    bool ok_push = SMP_run_sched_balance_phase(true, false, true, "B2-push");
-    bool ok_steal = SMP_run_sched_balance_phase(false, true, false, "B3-steal");
+    bool ok_push = SMP_run_sched_balance_phase(true, false, true, "push-balance");
+    bool ok_steal = SMP_run_sched_balance_phase(false, true, false, "work-steal");
 
     task_set_push_balance(saved_push);
     task_set_work_stealing(saved_steal);
@@ -989,6 +946,142 @@ static bool SMP_run_sched_pathological_test(void)
                   SMP_SCHED_PATHO_SHORT_JOBS,
                   non_bsp_short,
                   __atomic_load_n(&SMP_sched_patho_short_exec_per_cpu[blocking_cpu], __ATOMIC_RELAXED));
+    return true;
+}
+
+static void SMP_ymm_stress_job(void* arg)
+{
+    (void) arg;
+
+    uint32_t cpu_id = task_get_current_cpu_index();
+    uint64_t signature = 0;
+    bool ok = FPU_stress_ymm_local(SMP_YMM_STRESS_ITERS, &signature);
+
+    if (cpu_id < SMP_MAX_CPUS)
+    {
+        __atomic_store_n(&SMP_ymm_signature_cpu[cpu_id], signature, __ATOMIC_RELAXED);
+        __atomic_store_n(&SMP_ymm_fail_cpu[cpu_id], ok ? 0 : 1, __ATOMIC_RELEASE);
+        __atomic_store_n(&SMP_ymm_done_cpu[cpu_id], 1, __ATOMIC_RELEASE);
+    }
+}
+
+static bool SMP_run_ymm_stress_test(void)
+{
+    if (SMP_get_online_cpu_count() == 0)
+        return true;
+
+    if (!FPU_is_avx_enabled())
+    {
+        kdebug_puts("[SMP] YMM stress skipped (AVX disabled)\n");
+        return true;
+    }
+
+    memset(SMP_ymm_done_cpu, 0, sizeof(SMP_ymm_done_cpu));
+    memset(SMP_ymm_fail_cpu, 0, sizeof(SMP_ymm_fail_cpu));
+    memset(SMP_ymm_signature_cpu, 0, sizeof(SMP_ymm_signature_cpu));
+
+    uint8_t core_count = APIC_get_core_count();
+    uint8_t cpu_targets[SMP_MAX_CPUS];
+    uint8_t apic_targets[SMP_MAX_CPUS];
+    uint32_t target_count = 0;
+
+    for (uint8_t cpu_index = 0; cpu_index < core_count; cpu_index++)
+    {
+        uint8_t apic_id = APIC_get_core_id(cpu_index);
+        if (apic_id == 0xFF || !SMP_is_apic_online(apic_id))
+            continue;
+
+        if (target_count < SMP_MAX_CPUS)
+        {
+            cpu_targets[target_count] = cpu_index;
+            apic_targets[target_count] = apic_id;
+            target_count++;
+        }
+    }
+
+    if (target_count == 0)
+        return true;
+
+    for (uint32_t i = 0; i < target_count; i++)
+    {
+        uint8_t cpu_id = cpu_targets[i];
+        uint8_t apic_id = apic_targets[i];
+        if (!task_schedule_work_on_cpu(cpu_id, SMP_ymm_stress_job, NULL))
+        {
+            kdebug_printf("[SMP] YMM stress enqueue failed cpu=%u apic_id=%u depth_cpu=%u depth_total=%u\n",
+                          cpu_id,
+                          apic_id,
+                          task_runqueue_depth_cpu(cpu_id),
+                          task_runqueue_depth_total());
+            return false;
+        }
+    }
+
+    bool done = false;
+    for (uint32_t spin = 0; spin < SMP_YMM_STRESS_TIMEOUT; spin++)
+    {
+        while (task_run_next_work())
+            ;
+
+        uint32_t done_count = 0;
+        for (uint32_t i = 0; i < target_count; i++)
+        {
+            uint8_t cpu_id = cpu_targets[i];
+            if (__atomic_load_n(&SMP_ymm_done_cpu[cpu_id], __ATOMIC_ACQUIRE) != 0)
+                done_count++;
+        }
+
+        if (done_count == target_count)
+        {
+            done = true;
+            break;
+        }
+
+        __asm__ __volatile__("pause");
+    }
+
+    if (!done)
+    {
+        uint32_t done_count = 0;
+        for (uint32_t i = 0; i < target_count; i++)
+        {
+            uint8_t cpu_id = cpu_targets[i];
+            if (__atomic_load_n(&SMP_ymm_done_cpu[cpu_id], __ATOMIC_RELAXED) != 0)
+                done_count++;
+        }
+
+        kdebug_printf("[SMP] YMM stress timeout done=%u/%u iters=%u depth_total=%u\n",
+                      done_count,
+                      target_count,
+                      SMP_YMM_STRESS_ITERS,
+                      task_runqueue_depth_total());
+        return false;
+    }
+
+    uint32_t failed_cpu = SMP_INVALID_CPU_ID;
+    uint64_t signature_mix = 0;
+    for (uint32_t i = 0; i < target_count; i++)
+    {
+        uint8_t cpu_id = cpu_targets[i];
+        uint64_t signature = __atomic_load_n(&SMP_ymm_signature_cpu[cpu_id], __ATOMIC_RELAXED);
+        signature_mix ^= (signature + (((uint64_t) cpu_id + 1ULL) << 32));
+
+        if (__atomic_load_n(&SMP_ymm_fail_cpu[cpu_id], __ATOMIC_ACQUIRE) != 0 && failed_cpu == SMP_INVALID_CPU_ID)
+            failed_cpu = cpu_id;
+    }
+
+    if (failed_cpu != SMP_INVALID_CPU_ID)
+    {
+        kdebug_printf("[SMP] YMM stress FAILED cpu=%u iters=%u\n",
+                      failed_cpu,
+                      SMP_YMM_STRESS_ITERS);
+        return false;
+    }
+
+    kdebug_printf("[SMP] YMM stress OK cpus=%u iters=%u sig=0x%llX\n",
+                  target_count,
+                  SMP_YMM_STRESS_ITERS,
+                  (unsigned long long) signature_mix);
     return true;
 }
 
@@ -1176,6 +1269,9 @@ bool SMP_init(void)
 
     memset(&SMP_tests, 0, sizeof(SMP_tests));
     memset(SMP_sched_patho_short_exec_per_cpu, 0, sizeof(SMP_sched_patho_short_exec_per_cpu));
+    memset(SMP_ymm_done_cpu, 0, sizeof(SMP_ymm_done_cpu));
+    memset(SMP_ymm_fail_cpu, 0, sizeof(SMP_ymm_fail_cpu));
+    memset(SMP_ymm_signature_cpu, 0, sizeof(SMP_ymm_signature_cpu));
     __atomic_store_n(&SMP_sched_patho_short_done, 0, __ATOMIC_RELAXED);
     __atomic_store_n(&SMP_sched_patho_long_done, 0, __ATOMIC_RELAXED);
     spinlock_init(&SMP_tests.counter_lock);
@@ -1273,6 +1369,11 @@ bool SMP_init(void)
         kdebug_puts("[SMP] scheduler pathological test reported failures\n");
 #endif
 
+#if SMP_YMM_STRESS_ENABLE
+    if (!SMP_run_ymm_stress_test())
+        kdebug_puts("[SMP] YMM stress test reported failures\n");
+#endif
+
 #if SMP_TLB_TEST_ENABLE
     if (!SMP_validate_tlb_shootdown())
         kdebug_puts("[SMP] TLB shootdown validation failed\n");
@@ -1331,6 +1432,15 @@ uint32_t SMP_get_pong_count(uint8_t apic_id)
         return 0;
 
     return __atomic_load_n(&cpu->pong_sent_count, __ATOMIC_RELAXED);
+}
+
+uint64_t SMP_get_sched_kick_count(uint32_t cpu_id)
+{
+    SMP_cpu_local_t* cpu = SMP_cpu_local_from_cpu(cpu_id);
+    if (!cpu)
+        return 0;
+
+    return __atomic_load_n(&cpu->sched_kick_count, __ATOMIC_RELAXED);
 }
 
 bool SMP_start_ap_timers(void)

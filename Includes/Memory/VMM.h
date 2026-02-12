@@ -28,6 +28,10 @@
 #define V2P(a)              ((uintptr_t) a)
 #define P2V(a)              ((uintptr_t) a)
 
+#define VMM_MMIO_BASE       0xFFFFC00000000000ULL
+#define VMM_VGA_VIRT_BASE   (VMM_MMIO_BASE + 0x00000000000B8000ULL)
+#define VMM_AHCI_VIRT_BASE  (VMM_MMIO_BASE + 0x0000000000100000ULL)
+
 typedef struct PML4
 {
     uint64_t entries[512];

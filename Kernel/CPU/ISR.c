@@ -23,10 +23,6 @@ static uint64_t irq_range_seen = 0;
 static tick_source_t tick_source = TICK_SOURCE_PIT_IOAPIC;
 static uint32_t tick_hz = 1000;
 
-#define TICK_LOG_PERIOD             500ULL
-#define PIC_CHECK_PERIOD            100ULL
-#define PIC_QUIET_REPORT_AFTER      500ULL
-
 static const char* ISR_tick_source_name(tick_source_t source)
 {
     switch (source)
