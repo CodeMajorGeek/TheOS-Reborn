@@ -1,33 +1,60 @@
 # TheOS-Reborn
-TheOS is an OS written by me (CodeMajorGeek alias Théo Colinmaire).
-This is the repository of the 64 bits version of TheOS reworked completly from my last attempt.
+TheOS-Reborn is the 64-bit rewrite of my previous TheOS attempt.
 
-# How to compile and test:
-First gcc, binutils, make, cmake, ninja, libmpc, grub2 & qemu are required.
+## Current status
+- x86_64 kernel boot (Multiboot2 + long mode).
+- Basic memory management (PMM/VMM).
+- Interrupt handling (IDT/ISR/IRQ).
+- APIC/IOAPIC setup with MADT parsing and IRQ override flags handling.
+- SMP bring-up (BSP + AP startup with INIT/SIPI).
+- AP idle loop (`sti; hlt`), IPI PING/PONG, and TLB shootdown validation.
+- Syscall foundation with per-CPU kernel stack/TSS integration.
+- AHCI/SATA disk init and basic ext4 interactions.
+- HPET support used to calibrate BSP LAPIC timer.
 
-On Ubuntu :
-    sudo apt install gcc binutils make cmake ninja-build libmpc-dev qemu grub2
+## Known limitations
+- Scheduler SMP Phase B1 is implemented but still shows intermittent migration failures during stress tests.
+- APIC mapping currently targets a practical xAPIC/QEMU workflow; x2APIC-scale topologies are not fully addressed yet.
+- The scheduler is still an early bring-up implementation (no B2/B3 balancing/stealing yet).
 
-TheOS uses a cross-compiler located in the folder Toolchain.
-To build it, just run build.sh in the Toolchain folder and wait (pretty long time).
+## Prerequisites
+On Ubuntu/Debian:
+```bash
+sudo apt install gcc binutils make cmake ninja-build libmpc-dev qemu-system-x86 grub-pc-bin xorriso
+```
 
-On Ubuntu :
-    ./build.sh
+## Build cross toolchain
+The project uses a dedicated cross-compiler in `Toolchain/Local`.
 
-## Things I want in TheOS-Reborn:
-- **HID support (keyboard and mouse).**
-- **Storage support (AHCI, SATA...).**
-- **Have a good LibC implementation for future user space.**
-- **Multitasking support (tasks).**
-- **User-mode ring3 support, syscalls (TSSs).**
-- **PCI IDE Controller support for storage.**
+```bash
+cd Toolchain
+./build.sh
+```
 
-## Ingoing things:
-- **Kernel programming.**
-- **CLib programming.**
+## Build kernel and ISO
+From repository root:
+```bash
+cmake -S . -B Build -G Ninja
+ninja -C Build -j"$(nproc)"
+ninja -C Build iso -j"$(nproc)"
+```
 
-## Check list:
-- **Kernel loader in x86_64 long mode (using multiboot2 and assembly).**
-- **TTY terminal (crapy one, low resolution VGA text mode).**
-- **Interrupt Managment (IRQs & ISRs)**
-- **Memory managment (virtual memory managment, pagging...).**
+## Useful Ninja targets
+From repository root:
+```bash
+# Build + install + create ISO + run QEMU
+ninja -C Build install-run
+
+# Create/update disk image
+ninja -C Build create-disk
+
+# Build ISO then run QEMU
+ninja -C Build run
+```
+
+Environment variables supported by `Meta/run.sh`:
+- `THEOS_RAM_SIZE` (default: `128M`)
+- `THEOS_QEMU_CPU` (default: `max`)
+- `THEOS_DISK_NAME` (default: `disk.img`)
+
+Serial output is written to `Build/serial.log`.
