@@ -4,7 +4,8 @@
 .globl syscall_handler_stub
 
 .extern Syscall_interupt_handler
-.extern syscall_kernel_rsp0
+
+.set TASK_CPU_LOCAL_SYSCALL_RSP0_OFF, 0
 
 # Segment selectors with RPL
 .set USER_CODE_SEGMENT_RPL3,  0x23  # USER_CODE_SEGMENT (0x20) | RPL_3 (0x3)
@@ -42,11 +43,12 @@ syscall_handler_stub:
     #   RSP remains unchanged (points to user stack)
 
     cli
+    swapgs
 
     # SYSCALL does not switch stack automatically in long mode.
-    # Save user RSP, then move to a trusted kernel stack (TSS.rsp0 mirror).
+    # Save user RSP, then move to the per-CPU trusted kernel stack (TSS.rsp0 mirror).
     movq %rsp, %r14
-    movq syscall_kernel_rsp0(%rip), %rsp
+    movq %gs:TASK_CPU_LOCAL_SYSCALL_RSP0_OFF, %rsp
 
     # Save callee-saved registers and syscall context.
     pushq %rbp
@@ -90,6 +92,7 @@ syscall_handler_stub:
     popq %rbx
     popq %rbp
     movq %r14, %rsp
+    swapgs
 
     # No sti here: interrupts will be re-enabled in user mode
     # according to R11 flags, masked by IA32_FMASK.

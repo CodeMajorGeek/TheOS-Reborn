@@ -1,12 +1,16 @@
 #include <CPU/Syscall.h>
 
+#include <CPU/APIC.h>
 #include <CPU/MSR.h>
+#include <Debug/KDebug.h>
 #include <FileSystem/ext4.h>
 #include <Memory/KMem.h>
 
 #include <stdint.h>
 #include <stddef.h>
 #include <string.h>
+
+static volatile uint64_t Syscall_count_per_cpu[256] = { 0 };
 
 void Syscall_init(void)
 {
@@ -18,6 +22,11 @@ void Syscall_init(void)
 
 uint64_t Syscall_interupt_handler(uint64_t syscall_num, syscall_frame_t* frame)
 {
+    uint8_t apic_id = APIC_get_current_lapic_id();
+    uint64_t count = ++Syscall_count_per_cpu[apic_id];
+    if ((count % 1024ULL) == 0)
+        kdebug_printf("[SYSCALL] cpu_apic=%u count=%llu\n", apic_id, (unsigned long long) count);
+
     ext4_fs_t* fs = ext4_get_active();
     if (!fs)
         return (uint64_t) -1;

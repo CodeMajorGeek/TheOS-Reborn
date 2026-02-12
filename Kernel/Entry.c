@@ -9,6 +9,7 @@
 #include <Device/PIC.h>
 #include <Device/TTY.h>
 #include <Device/COM.h>
+#include <Device/HPET.h>
 #include <Device/PIT.h>
 #include <Device/RTC.h>
 #include <Memory/PMM.h>
@@ -17,6 +18,7 @@
 #include <Task/Task.h>
 #include <CPU/APIC.h>
 #include <CPU/ACPI.h>
+#include <CPU/SMP.h>
 #include <CPU/IDT.h>
 #include <CPU/ISR.h>
 #include <CPU/PCI.h>
@@ -137,12 +139,35 @@ __attribute__((__noreturn__)) void k_entry(const void* mbt2_info)
     task_init((uintptr_t) &kernel_stack_top);
     kdebug_puts("[BOOT] task init\n");
 
-    ISR_set_tick_source(TICK_SOURCE_PIT_IOAPIC, PIT_TIMER_HZ);
-    PIT_init();
     if (APIC_is_enabled())
-        kdebug_puts("[BOOT] PIT init (LAPIC calibration source)\n");
-    else
-        kdebug_puts("[BOOT] PIT init\n");
+    {
+        if (SMP_init())
+            kdebug_printf("[BOOT] SMP online cpus=%u\n", (unsigned) SMP_get_online_cpu_count());
+        else
+            kdebug_puts("[BOOT] SMP bring-up failed\n");
+    }
+
+    bool hpet_ready = false;
+    bool pit_started = false;
+
+    if (APIC_is_enabled())
+    {
+        hpet_ready = HPET_init();
+        if (hpet_ready)
+            kdebug_puts("[BOOT] HPET init (LAPIC calibration source)\n");
+    }
+
+    if (!APIC_is_enabled() || !hpet_ready)
+    {
+        ISR_set_tick_source(TICK_SOURCE_PIT_IOAPIC, PIT_TIMER_HZ);
+        PIT_init();
+        pit_started = true;
+
+        if (APIC_is_enabled())
+            kdebug_puts("[BOOT] PIT init (LAPIC calibration fallback)\n");
+        else
+            kdebug_puts("[BOOT] PIT init\n");
+    }
 
     sti();
     kdebug_puts("[BOOT] interrupts enabled\n");
@@ -152,10 +177,19 @@ __attribute__((__noreturn__)) void k_entry(const void* mbt2_info)
         if (APIC_timer_init_bsp(BSP_TIMER_HZ))
         {
             ISR_set_tick_source(TICK_SOURCE_LAPIC_TIMER, BSP_TIMER_HZ);
-            kdebug_puts("[BOOT] LAPIC timer BSP active, PIT stopped\n");
+            if (hpet_ready)
+                kdebug_puts("[BOOT] LAPIC timer BSP active, HPET calibrated\n");
+            else
+                kdebug_puts("[BOOT] LAPIC timer BSP active, PIT stopped\n");
         }
         else
         {
+            if (!pit_started)
+            {
+                ISR_set_tick_source(TICK_SOURCE_PIT_IOAPIC, PIT_TIMER_HZ);
+                PIT_init();
+                pit_started = true;
+            }
             ISR_set_tick_source(TICK_SOURCE_PIT_IOAPIC, PIT_TIMER_HZ);
             kdebug_puts("[BOOT] LAPIC timer BSP init failed, PIT kept active\n");
         }

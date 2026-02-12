@@ -1,11 +1,13 @@
 #include <CPU/APIC.h>
 
 #include <CPU/ISR.h>
+#include <Device/HPET.h>
 #include <Device/PIT.h>
 #include <Memory/VMM.h>
 #include <Memory/PMM.h>
 #include <CPU/IO.h>
 #include <Debug/KDebug.h>
+#include <Task/Task.h>
 
 #include <cpuid.h>
 #include <stdio.h>
@@ -19,6 +21,8 @@ static uint8_t APIC_IO_num = 0;             // Number of IOAPICs detected.
 
 static uint64_t APIC_local_ptr = 0;         // Pointer to the Local APIC MMIO registers.
 static uint8_t APIC_bsp_lapic_id = 0;       // BSP LAPIC ID (route destination for IOAPIC IRQs).
+static uint8_t APIC_io_route_lapic_id = 0;  // Immutable IOAPIC destination LAPIC ID (set on BSP).
+static bool APIC_io_route_lapic_valid = false;
 
 static bool APIC_enabled = false;
 static bool APIC_supported = false;
@@ -30,8 +34,12 @@ static bool APIC_GSI_is_isa[256];
 
 #define LAPIC_TIMER_DIVIDE_BY_16      0x3U
 #define LAPIC_TIMER_CALIBRATION_MS    50U
+#define APIC_IPI_SPIN_TIMEOUT         1000000U
+#define APIC_IPI_DELAY_SHORT_LOOPS    200000U
 
 static void APIC_timer_callback(interrupt_frame_t* frame);
+static bool APIC_wait_icr_idle(uint32_t spin_limit);
+static void APIC_delay_loops(uint32_t loops);
 
 bool APIC_check(void)
 {
@@ -75,7 +83,13 @@ void APIC_enable(void)
     spurious |= 0xFFU;
     spurious |= APIC_SW_ENABLE;
     APIC_local_write(APIC_SPURIOUS, spurious);
-    APIC_bsp_lapic_id = (uint8_t) (APIC_local_read(APIC_APICID) >> 24);
+    uint8_t current_lapic_id = (uint8_t) (APIC_local_read(APIC_APICID) >> 24);
+    if (!APIC_io_route_lapic_valid)
+    {
+        APIC_bsp_lapic_id = current_lapic_id;
+        APIC_io_route_lapic_id = current_lapic_id;
+        APIC_io_route_lapic_valid = true;
+    }
     APIC_enabled = true;
 }
 
@@ -97,6 +111,7 @@ void APIC_detect_cores(APIC_MADT_t* madt)
 
     APIC_num_core = 0;
     APIC_IO_num = 0;
+    APIC_io_route_lapic_valid = false;
 
     APIC_local_ptr = madt->lapic_ptr;
     if (APIC_local_ptr == 0)
@@ -106,6 +121,8 @@ void APIC_detect_cores(APIC_MADT_t* madt)
         uintptr_t lapic_page = (uintptr_t) APIC_local_ptr & 0xFFFFFFFFFFFFF000ULL;
         VMM_map_page(lapic_page, lapic_page);
         APIC_bsp_lapic_id = (uint8_t) (APIC_local_read(APIC_APICID) >> 24);
+        APIC_io_route_lapic_id = APIC_bsp_lapic_id;
+        APIC_io_route_lapic_valid = true;
         kdebug_printf("[APIC] LAPIC base=0x%llX\n", APIC_local_ptr);
     }
 
@@ -190,6 +207,12 @@ void APIC_detect_cores(APIC_MADT_t* madt)
 
     if (APIC_num_core > 0 && APIC_bsp_lapic_id == 0)
         APIC_bsp_lapic_id = APIC_lapic_IDs[0];
+
+    if (!APIC_io_route_lapic_valid && APIC_num_core > 0)
+    {
+        APIC_io_route_lapic_id = APIC_lapic_IDs[0];
+        APIC_io_route_lapic_valid = true;
+    }
 }
 
 void APIC_disable_PIC_mode(void)
@@ -288,6 +311,27 @@ uint8_t APIC_get_current_lapic_id(void)
     return (uint8_t) (APIC_local_read(APIC_APICID) >> 24);
 }
 
+uint8_t APIC_get_bsp_lapic_id(void)
+{
+    if (APIC_io_route_lapic_valid)
+        return APIC_io_route_lapic_id;
+
+    return APIC_bsp_lapic_id;
+}
+
+uint8_t APIC_get_core_count(void)
+{
+    return APIC_num_core;
+}
+
+uint8_t APIC_get_core_id(uint8_t index)
+{
+    if (index >= APIC_num_core)
+        return 0xFF;
+
+    return APIC_lapic_IDs[index];
+}
+
 void APIC_register_IRQ_vector(int vec, int irq, bool disable)
 {
     const size_t irq_override_count = sizeof(APIC_IRQ_overrides) / sizeof(APIC_IRQ_overrides[0]);
@@ -316,9 +360,13 @@ void APIC_register_GSI_vector(int vec, uint32_t gsi, bool disable)
         return;
 
     uint32_t IO_lo = vec & 0xFFU;
-    uint8_t lapic_id = APIC_bsp_lapic_id;
-    if (lapic_id == 0 && APIC_num_core > 0)
-        lapic_id = APIC_lapic_IDs[0];
+    uint8_t lapic_id = APIC_io_route_lapic_id;
+    if (!APIC_io_route_lapic_valid)
+    {
+        lapic_id = APIC_bsp_lapic_id;
+        if (lapic_id == 0 && APIC_num_core > 0)
+            lapic_id = APIC_lapic_IDs[0];
+    }
     uint32_t IO_hi = ((uint32_t) lapic_id) << 24;
 
     bool active_low = false;
@@ -397,6 +445,57 @@ void APIC_register_GSI_vector(int vec, uint32_t gsi, bool disable)
                   disable ? " [masked]" : "");
 }
 
+bool APIC_startup_ap(uint8_t apic_id, uint8_t startup_vector)
+{
+    if (!APIC_enabled)
+        return false;
+
+    if (startup_vector == 0)
+        return false;
+
+    if (!APIC_wait_icr_idle(APIC_IPI_SPIN_TIMEOUT))
+        return false;
+
+    APIC_local_write(APIC_ICRH, ((uint32_t) apic_id) << 24);
+    APIC_local_write(APIC_ICRL, APIC_ICR_DELIVERY_INIT | APIC_ICR_TRIGGER_LEVEL | APIC_ICR_LEVEL_ASSERT);
+    if (!APIC_wait_icr_idle(APIC_IPI_SPIN_TIMEOUT))
+        return false;
+
+    APIC_delay_loops(APIC_IPI_DELAY_SHORT_LOOPS);
+
+    APIC_local_write(APIC_ICRH, ((uint32_t) apic_id) << 24);
+    APIC_local_write(APIC_ICRL, APIC_ICR_DELIVERY_INIT | APIC_ICR_TRIGGER_LEVEL);
+    if (!APIC_wait_icr_idle(APIC_IPI_SPIN_TIMEOUT))
+        return false;
+
+    APIC_delay_loops(APIC_IPI_DELAY_SHORT_LOOPS);
+
+    uint32_t sipi_icr = APIC_ICR_DELIVERY_STARTUP | (uint32_t) startup_vector;
+    APIC_local_write(APIC_ICRH, ((uint32_t) apic_id) << 24);
+    APIC_local_write(APIC_ICRL, sipi_icr);
+    if (!APIC_wait_icr_idle(APIC_IPI_SPIN_TIMEOUT))
+        return false;
+
+    APIC_delay_loops(APIC_IPI_DELAY_SHORT_LOOPS);
+
+    APIC_local_write(APIC_ICRH, ((uint32_t) apic_id) << 24);
+    APIC_local_write(APIC_ICRL, sipi_icr);
+    return APIC_wait_icr_idle(APIC_IPI_SPIN_TIMEOUT);
+}
+
+bool APIC_send_ipi(uint8_t apic_id, uint8_t vector)
+{
+    if (!APIC_enabled)
+        return false;
+
+    if (!APIC_wait_icr_idle(APIC_IPI_SPIN_TIMEOUT))
+        return false;
+
+    APIC_local_write(APIC_ICRH, ((uint32_t) apic_id) << 24);
+    APIC_local_write(APIC_ICRL, (uint32_t) vector);
+    return APIC_wait_icr_idle(APIC_IPI_SPIN_TIMEOUT);
+}
+
 void APIC_send_EOI(void)
 {
     if (!APIC_enabled)
@@ -410,7 +509,9 @@ bool APIC_timer_init_bsp(uint32_t hz)
     if (!APIC_enabled || hz == 0)
         return false;
 
-    PIT_reset_ticks();
+    bool use_hpet = HPET_is_available();
+    if (!use_hpet)
+        PIT_reset_ticks();
 
     APIC_local_write(APIC_TMRDIV, LAPIC_TIMER_DIVIDE_BY_16);
     APIC_local_write(APIC_LVT_TMR, APIC_DISABLE | (TICK_VECTOR & 0xFFU));
@@ -418,16 +519,31 @@ bool APIC_timer_init_bsp(uint32_t hz)
     const uint32_t start_count = 0xFFFFFFFFU;
     APIC_local_write(APIC_TMRINITCNT, start_count);
 
-    uint64_t spin_guard = 0;
-    while (PIT_get_ticks() < LAPIC_TIMER_CALIBRATION_MS)
+    uint64_t calib_ref_ticks = 0;
+    if (use_hpet)
     {
-        __asm__ __volatile__("pause");
-        if (++spin_guard > 1000000000ULL)
+        if (!HPET_wait_ms(LAPIC_TIMER_CALIBRATION_MS, &calib_ref_ticks))
         {
             APIC_local_write(APIC_LVT_TMR, APIC_DISABLE | (TICK_VECTOR & 0xFFU));
-            kdebug_puts("[LAPIC] calibration timeout waiting PIT IRQs\n");
+            kdebug_puts("[LAPIC] calibration timeout waiting HPET\n");
             return false;
         }
+    }
+    else
+    {
+        uint64_t spin_guard = 0;
+        while (PIT_get_ticks() < LAPIC_TIMER_CALIBRATION_MS)
+        {
+            __asm__ __volatile__("pause");
+            if (++spin_guard > 1000000000ULL)
+            {
+                APIC_local_write(APIC_LVT_TMR, APIC_DISABLE | (TICK_VECTOR & 0xFFU));
+                kdebug_puts("[LAPIC] calibration timeout waiting PIT IRQs\n");
+                return false;
+            }
+        }
+
+        calib_ref_ticks = PIT_get_ticks();
     }
 
     uint32_t elapsed = start_count - APIC_local_read(APIC_TMRCURRCNT);
@@ -448,14 +564,28 @@ bool APIC_timer_init_bsp(uint32_t hz)
     APIC_local_write(APIC_LVT_TMR, (TICK_VECTOR & 0xFFU) | TMR_PERIODIC);
     APIC_local_write(APIC_TMRINITCNT, periodic_initial_count);
 
-    PIT_stop();
+    if (!use_hpet)
+        PIT_stop();
 
-    kdebug_printf("[LAPIC] BSP timer enabled: hz=%u init=%u calib=%u ms pit_ticks=%llu cps=%llu\n",
-                  hz,
-                  periodic_initial_count,
-                  LAPIC_TIMER_CALIBRATION_MS,
-                  (unsigned long long) PIT_get_ticks(),
-                  (unsigned long long) lapic_counts_per_sec);
+    if (use_hpet)
+    {
+        kdebug_printf("[LAPIC] BSP timer enabled: hz=%u init=%u calib=%u ms hpet_ticks=%llu hpet_hz=%llu cps=%llu\n",
+                      hz,
+                      periodic_initial_count,
+                      LAPIC_TIMER_CALIBRATION_MS,
+                      (unsigned long long) calib_ref_ticks,
+                      (unsigned long long) HPET_get_frequency_hz(),
+                      (unsigned long long) lapic_counts_per_sec);
+    }
+    else
+    {
+        kdebug_printf("[LAPIC] BSP timer enabled: hz=%u init=%u calib=%u ms pit_ticks=%llu cps=%llu\n",
+                      hz,
+                      periodic_initial_count,
+                      LAPIC_TIMER_CALIBRATION_MS,
+                      (unsigned long long) calib_ref_ticks,
+                      (unsigned long long) lapic_counts_per_sec);
+    }
 
     return true;
 }
@@ -463,5 +593,25 @@ bool APIC_timer_init_bsp(uint32_t hz)
 static void APIC_timer_callback(interrupt_frame_t* frame)
 {
     (void) frame;
+    task_scheduler_on_tick();
     APIC_send_EOI();
+}
+
+static bool APIC_wait_icr_idle(uint32_t spin_limit)
+{
+    for (uint32_t spin = 0; spin < spin_limit; spin++)
+    {
+        if ((APIC_local_read(APIC_ICRL) & APIC_ICR_DELIVERY_STATUS) == 0)
+            return true;
+        __asm__ __volatile__("pause");
+    }
+
+    kdebug_puts("[APIC] ICR delivery timeout\n");
+    return false;
+}
+
+static void APIC_delay_loops(uint32_t loops)
+{
+    for (uint32_t i = 0; i < loops; i++)
+        __asm__ __volatile__("pause");
 }

@@ -18,6 +18,7 @@ SECTIONS
     {
         KEEP(*(.multiboot))
         *(.text)
+        *(.ap_trampoline)
     } :text
 
     .rodata ALIGN(4K) : AT(ADDR(.rodata))

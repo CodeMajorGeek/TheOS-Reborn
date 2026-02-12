@@ -11,6 +11,7 @@
 #include <stdlib.h>
 
 IRQ_t IRQ_handlers[MAX_IRQ_ENTRIES];
+static IRQ_t ISR_vector_handlers[IDT_MAX_VECTORS] = { 0 };
 static bool pic_irq_seen_while_apic = false;
 static bool pic_quiet_reported = false;
 static bool ioapic_vector_seen[MAX_IRQ_ENTRIES] = { false };
@@ -55,6 +56,11 @@ void ISR_register_IRQ(int vector, IRQ_t irq)
     }
 }
 
+void ISR_register_vector(uint8_t vector, IRQ_t handler)
+{
+    ISR_vector_handlers[vector] = handler;
+}
+
 void ISR_set_tick_source(tick_source_t source, uint32_t hz)
 {
     tick_source = source;
@@ -93,6 +99,16 @@ uint64_t ISR_get_pic_activity_count(void)
 
 void ISR_handler(interrupt_frame_t* frame)
 {
+    if (frame->int_no < IDT_MAX_VECTORS)
+    {
+        IRQ_t handler = ISR_vector_handlers[frame->int_no];
+        if (handler)
+        {
+            handler(frame);
+            return;
+        }
+    }
+
     if (frame->int_no < MAX_KNOWN_EXCEPTIONS)
     {
         kdebug_printf(
@@ -104,6 +120,25 @@ void ISR_handler(interrupt_frame_t* frame)
             frame->cs,
             frame->rflags
         );
+
+        abort();
+    }
+
+    if (frame->int_no >= ISR_COUNT_BEFORE_IRQ)
+    {
+        kdebug_printf(
+            "[ISR] Unhandled vector %llu\n"
+            "      RIP=0x%llX  CS=0x%llX  RFLAGS=0x%llX\n",
+            frame->int_no,
+            frame->rip,
+            frame->cs,
+            frame->rflags
+        );
+
+        if (APIC_is_enabled())
+            APIC_send_EOI();
+
+        return;
     }
     else
     {
@@ -115,9 +150,9 @@ void ISR_handler(interrupt_frame_t* frame)
             frame->cs,
             frame->rflags
         );
-    }
 
-    abort();
+        abort();
+    }
 }
 
 

@@ -21,3 +21,35 @@ void GDT_load_TSS_segment(TSS_t* tss)
     TSS_GDT_segment.rsv = 0;
     
 }
+
+void GDT_load_kernel_segments(void)
+{
+    __asm__ __volatile__("lgdt %0" : : "m"(kernel_gdt64_pointer));
+
+    // Reload CS to the kernel code selector from the freshly loaded GDT.
+    // Without this, APs keep the trampoline CS selector value, which may map
+    // to a non-code descriptor in the kernel GDT and trigger #GP on iretq.
+    __asm__ __volatile__(
+        "pushq $0x08\n\t"
+        "leaq 1f(%%rip), %%rax\n\t"
+        "pushq %%rax\n\t"
+        "lretq\n\t"
+        "1:\n\t"
+        :
+        :
+        : "rax", "memory"
+    );
+
+    uint16_t data_selector = KERNEL_DATA_SEGMENT;
+    __asm__ __volatile__(
+        "movw %0, %%ax\n\t"
+        "movw %%ax, %%ds\n\t"
+        "movw %%ax, %%es\n\t"
+        "movw %%ax, %%ss\n\t"
+        "movw %%ax, %%fs\n\t"
+        "movw %%ax, %%gs\n\t"
+        :
+        : "rm"(data_selector)
+        : "ax", "memory"
+    );
+}

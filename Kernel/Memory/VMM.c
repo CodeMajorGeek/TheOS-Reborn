@@ -5,6 +5,7 @@
 #include <Device/VGA.h>
 #include <Device/TTY.h>
 #include <CPU/ACPI.h>
+#include <CPU/SMP.h>
 #include <string.h>
 #include <stdint.h>
 
@@ -75,6 +76,12 @@ static void* VMM_alloc_table(void)
     if (page)
         memset(page, 0, PHYS_PAGE_SIZE);
     return page;
+}
+
+static inline void VMM_invlpg(uintptr_t virt)
+{
+    uintptr_t page = virt & ~(uintptr_t) 0xFFFULL;
+    __asm__ __volatile__("invlpg (%0)" : : "r"(page) : "memory");
 }
 
 // TODO: Implement a fixed version of kernel mapping & recursive mapping.
@@ -223,6 +230,9 @@ void VMM_map_page(uintptr_t virt, uintptr_t phys)
     add_attribute(&entry, WRITABLE);
     add_attribute(&entry, USER_MODE);
     PT->entries[PT_INDEX(virt)] = entry;
+
+    VMM_invlpg(virt);
+    (void) SMP_tlb_shootdown_page(virt);
 }
 
 void VMM_map_pages(uintptr_t virt, uintptr_t phys, size_t len)

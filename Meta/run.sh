@@ -13,7 +13,7 @@ qemu-system-x86_64 \
 	-monitor unix:qemu-monitor-socket,server,nowait \
 	-m $THEOS_RAM_SIZE \
 	-cpu $THEOS_QEMU_CPU \
-	-smp 2 \
+	-smp 4 \
 	-device VGA,vgamem_mb=64 \
 	-cdrom TheOS.iso \
 	-s \

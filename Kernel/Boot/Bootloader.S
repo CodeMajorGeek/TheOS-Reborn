@@ -311,6 +311,8 @@ TSS_GDT_segment:
     .quad 0
     .quad 0
 
+.globl kernel_gdt64_pointer
+kernel_gdt64_pointer:
 gdt64.pointer:
     .word . - gdt64 - 1
     .quad gdt64

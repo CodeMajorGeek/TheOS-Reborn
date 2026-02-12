@@ -34,6 +34,11 @@ void IDT_init(void)
     // Allow only the syscall vector from ring 3.
     IDT_set_descriptor(SYSCALL_INT, ISR_stub_table[SYSCALL_INT], 3);
 
+    IDT_load();
+}
+
+void IDT_load(void)
+{
     __asm__ __volatile__("lidt %0" : : "m"(idtr));  // Load the new IDT.
 }
 

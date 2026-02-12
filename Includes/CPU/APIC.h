@@ -69,6 +69,13 @@
 #define APIC_IORED_TRIGGER_LEVEL                (1U << 15)
 #define APIC_IORED_MASK                         (1U << 16)
 
+// LAPIC ICR helpers.
+#define APIC_ICR_DELIVERY_STATUS                (1U << 12)
+#define APIC_ICR_LEVEL_ASSERT                   (1U << 14)
+#define APIC_ICR_TRIGGER_LEVEL                  (1U << 15)
+#define APIC_ICR_DELIVERY_INIT                  (0x5U << 8)
+#define APIC_ICR_DELIVERY_STARTUP               (0x6U << 8)
+
 
 typedef struct APIC_MADT
 {
@@ -104,8 +111,13 @@ void APIC_IO_write(uint8_t index, uint32_t reg, uint32_t value);
 
 bool APIC_is_enabled(void);
 uint8_t APIC_get_current_lapic_id(void);
+uint8_t APIC_get_bsp_lapic_id(void);
+uint8_t APIC_get_core_count(void);
+uint8_t APIC_get_core_id(uint8_t index);
 void APIC_register_IRQ_vector(int vec, int irq, bool disable);
 void APIC_register_GSI_vector(int vec, uint32_t gsi, bool disable);
+bool APIC_send_ipi(uint8_t apic_id, uint8_t vector);
+bool APIC_startup_ap(uint8_t apic_id, uint8_t startup_vector);
 void APIC_send_EOI(void);
 bool APIC_timer_init_bsp(uint32_t hz);
 

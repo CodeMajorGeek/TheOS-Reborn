@@ -17,6 +17,9 @@ set(KERNEL_CPU_SOURCES
     CPU/Syscall.c
     CPU/Syscall.S
     CPU/APIC.c
+    CPU/SMP.c
+    CPU/APEntry.c
+    CPU/APLoader.S
     CPU/TSS.S
     CPU/GDT.c
 )
@@ -31,6 +34,7 @@ set(KERNEL_DEVICES_SOURCES
     Device/COM.c
     Device/TTY.c
     Device/PIC.c
+    Device/HPET.c
     Device/PIT.c
     Device/Keyboard.c
     Device/CMOS.c

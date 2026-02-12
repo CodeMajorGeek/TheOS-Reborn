@@ -16,6 +16,7 @@
 #define ACPI_FACP_SIGNATURE "FACP"
 #define ACPI_FACS_SIGNATURE "FACS"
 #define ACPI_HEST_SIGNATURE "HEST"
+#define ACPI_HPET_SIGNATURE "HPET"
 #define ACPI_MSCT_SIGNATURE "MSCT"
 #define ACPI_MPST_SIGNATURE "MPST"
 #define ACPI_OEMx_SIGNATURE "OEM"
@@ -69,6 +70,27 @@ typedef struct ACPI_XSDT {
   ACPI_SDT_header_t header;
   uint64_t ptr_next_SDT[];
 } __attribute__((__packed__)) ACPI_XSDT_t;
+
+typedef struct ACPI_generic_address
+{
+    uint8_t address_space_id;
+    uint8_t register_bit_width;
+    uint8_t register_bit_offset;
+    uint8_t access_size;
+    uint64_t address;
+} __attribute__((__packed__)) ACPI_generic_address_t;
+
+typedef struct ACPI_HPET
+{
+    ACPI_SDT_header_t header;
+    uint8_t hardware_rev_id;
+    uint8_t comparator_info;
+    uint16_t pci_vendor_id;
+    ACPI_generic_address_t address;
+    uint8_t hpet_number;
+    uint16_t minimum_tick;
+    uint8_t page_protection;
+} __attribute__((__packed__)) ACPI_HPET_t;
 
 bool ACPI_RSDP_old_check(multiboot_uint8_t* rsdt);
 bool ACPI_RSDP_new_check(multiboot_uint8_t* rsdt);

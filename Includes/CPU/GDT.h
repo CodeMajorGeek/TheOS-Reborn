@@ -41,8 +41,16 @@ typedef struct system_segment_descriptor
     uint32_t rsv;
 } __attribute((__packed__)) system_segment_descriptor_t;
 
+typedef struct GDTR
+{
+    uint16_t limit;
+    uint64_t base;
+} __attribute__((__packed__)) GDTR_t;
+
 extern system_segment_descriptor_t TSS_GDT_segment;
+extern const GDTR_t kernel_gdt64_pointer;
 
 void GDT_load_TSS_segment(TSS_t* tss);
+void GDT_load_kernel_segments(void);
 
 #endif

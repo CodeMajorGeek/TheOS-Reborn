@@ -60,6 +60,7 @@ static const char* exception_messages[MAX_KNOWN_EXCEPTIONS] =
 };
 
 void ISR_register_IRQ(int index, IRQ_t irq);
+void ISR_register_vector(uint8_t vector, IRQ_t handler);
 void ISR_set_tick_source(tick_source_t source, uint32_t hz);
 tick_source_t ISR_get_tick_source(void);
 uint32_t ISR_get_tick_hz(void);

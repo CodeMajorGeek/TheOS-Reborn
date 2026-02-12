@@ -1,0 +1,59 @@
+#include <CPU/SMP.h>
+
+#include <CPU/APIC.h>
+#include <CPU/GDT.h>
+#include <CPU/IDT.h>
+#include <CPU/Syscall.h>
+#include <CPU/x86.h>
+#include <Debug/KDebug.h>
+#include <Task/Task.h>
+
+typedef struct SMP_handoff
+{
+    uint64_t magic;
+    uint64_t cr3;
+    uint64_t stack_top;
+    uint64_t entry64;
+    uint64_t arg;
+    uint32_t apic_id;
+    uint32_t cpu_index;
+    volatile uint32_t ready;
+    uint32_t rsv;
+} __attribute__((__packed__)) SMP_handoff_t;
+
+void SMP_ap_entry(uintptr_t handoff_phys)
+{
+    volatile SMP_handoff_t* handoff = (volatile SMP_handoff_t*) handoff_phys;
+
+    cli();
+
+    GDT_load_kernel_segments();
+    IDT_load();
+
+    uint32_t cpu_index = handoff->cpu_index;
+    uint8_t apic_id = (uint8_t) handoff->apic_id;
+    uintptr_t stack_top = (uintptr_t) handoff->stack_top;
+
+    APIC_enable();
+    APIC_send_EOI();
+
+    if (!task_init_cpu(cpu_index, stack_top, apic_id))
+        goto ap_idle;
+
+    Syscall_init();
+
+    uint8_t current_apic_id = APIC_get_current_lapic_id();
+    if (current_apic_id != 0)
+        apic_id = current_apic_id;
+
+    SMP_notify_ap_ready(cpu_index, apic_id);
+    __asm__ __volatile__("" : : : "memory");
+    handoff->ready = 1;
+
+    sti();
+
+    kdebug_printf("[SMP] AP online apic_id=%u cpu=%u\n", apic_id, cpu_index);
+
+ap_idle:
+    task_idle_loop();
+}

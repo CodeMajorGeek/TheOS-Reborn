@@ -66,6 +66,7 @@ __attribute__((aligned(0x10))) static IDT_entry_t IDT[IDT_MAX_DESCRIPTORS];
 static IDTR_t idtr;
 
 void IDT_init(void);
+void IDT_load(void);
 void IDT_set_descriptor(uint8_t vector, void* isr, uint8_t flags);
 
 #endif
