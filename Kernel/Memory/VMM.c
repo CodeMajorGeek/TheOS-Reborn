@@ -5,11 +5,77 @@
 #include <Device/VGA.h>
 #include <Device/TTY.h>
 #include <CPU/ACPI.h>
+#include <string.h>
+#include <stdint.h>
 
 static PML4_t* VMM_PML4;
 
 static uintptr_t VMM_VGA_virt;
 static uintptr_t VMM_AHCI_virt;
+
+// Keep MMIO mappings in a dedicated high-half range to avoid colliding with
+// identity-mapped RAM (PMM bitmaps, heap, kernel image, stacks, etc.).
+#define VMM_MMIO_BASE       0xFFFFC00000000000ULL
+#define VMM_VGA_VIRT_BASE   (VMM_MMIO_BASE + 0x00000000000B8000ULL)
+#define VMM_AHCI_VIRT_BASE  (VMM_MMIO_BASE + 0x0000000000100000ULL)
+
+static bool VMM_recursive_active = FALSE;
+
+static uintptr_t canonical_address(uintptr_t addr)
+{
+    return (uintptr_t)((int64_t)(addr << 16) >> 16);
+}
+
+static uintptr_t VMM_recursive_base(void)
+{
+    uintptr_t addr = ((uintptr_t)VMM_RECURSIVE_INDEX << 39) |
+                     ((uintptr_t)VMM_RECURSIVE_INDEX << 30) |
+                     ((uintptr_t)VMM_RECURSIVE_INDEX << 21) |
+                     ((uintptr_t)VMM_RECURSIVE_INDEX << 12);
+    return canonical_address(addr);
+}
+
+static PML4_t* VMM_get_pml4(void)
+{
+    if (VMM_recursive_active)
+        return (PML4_t*) VMM_recursive_base();
+    return VMM_PML4;
+}
+
+static PDPT_t* VMM_get_pdpt(uint16_t pml4_index)
+{
+    uintptr_t addr = ((uintptr_t)VMM_RECURSIVE_INDEX << 39) |
+                     ((uintptr_t)VMM_RECURSIVE_INDEX << 30) |
+                     ((uintptr_t)VMM_RECURSIVE_INDEX << 21) |
+                     ((uintptr_t)pml4_index << 12);
+    return (PDPT_t*) canonical_address(addr);
+}
+
+static PDT_t* VMM_get_pdt(uint16_t pml4_index, uint16_t pdpt_index)
+{
+    uintptr_t addr = ((uintptr_t)VMM_RECURSIVE_INDEX << 39) |
+                     ((uintptr_t)VMM_RECURSIVE_INDEX << 30) |
+                     ((uintptr_t)pml4_index << 21) |
+                     ((uintptr_t)pdpt_index << 12);
+    return (PDT_t*) canonical_address(addr);
+}
+
+static PT_t* VMM_get_pt(uint16_t pml4_index, uint16_t pdpt_index, uint16_t pdt_index)
+{
+    uintptr_t addr = ((uintptr_t)VMM_RECURSIVE_INDEX << 39) |
+                     ((uintptr_t)pml4_index << 30) |
+                     ((uintptr_t)pdpt_index << 21) |
+                     ((uintptr_t)pdt_index << 12);
+    return (PT_t*) canonical_address(addr);
+}
+
+static void* VMM_alloc_table(void)
+{
+    void* page = PMM_alloc_page();
+    if (page)
+        memset(page, 0, PHYS_PAGE_SIZE);
+    return page;
+}
 
 // TODO: Implement a fixed version of kernel mapping & recursive mapping.
 
@@ -38,8 +104,13 @@ void VMM_map_kernel(void)
     uintptr_t phys_base = PMM_get_kernel_start();
     uintptr_t phys_end = PMM_get_kernel_end();
 
-    VMM_PML4 = (PML4_t*) PMM_alloc_page();
+    VMM_PML4 = (PML4_t*) VMM_alloc_table();
     VMM_identity_map_all();
+
+    uintptr_t recursive_entry = (uintptr_t) VMM_PML4;
+    add_attribute(&recursive_entry, PRESENT);
+    add_attribute(&recursive_entry, WRITABLE);
+    VMM_PML4->entries[VMM_RECURSIVE_INDEX] = recursive_entry;
 
     uintptr_t virt_addr = phys_base;
 
@@ -65,10 +136,9 @@ void VMM_map_kernel(void)
         VMM_map_page(addr, addr);
     }
 
-    VMM_VGA_virt = virt_addr;
-    virt_addr += VGA_BUFFER_LENGTH;
-    VMM_AHCI_virt = virt_addr;
-    virt_addr += AHCI_MEM_LENGTH;
+    (void) virt_addr;
+    VMM_VGA_virt = VMM_VGA_VIRT_BASE;
+    VMM_AHCI_virt = VMM_AHCI_VIRT_BASE;
 }
 
 void VMM_identity_map_all(void)
@@ -84,7 +154,7 @@ void VMM_identity_map_all(void)
 
 void VMM_hardware_mapping(void)
 {
-    VMM_map_pages(VMM_VGA_virt, VGA_BUFFER_ADDRESS, VGA_BUFFER_LENGTH / PHYS_PAGE_SIZE);    // Map the VGA textmode buffer to another location.
+    VMM_map_pages(VMM_VGA_virt, VGA_BUFFER_ADDRESS, VGA_BUFFER_LENGTH);    // Map the VGA textmode buffer to another location.
     TTY_set_buffer((uint16_t*) VMM_VGA_virt);                                               // Set the TTY buffer to the new virtual address.
 }
 
@@ -94,52 +164,58 @@ void VMM_map_page(uintptr_t virt, uintptr_t phys)
     PDT_t* PDT;
     PT_t* PT;
 
-    uintptr_t PML4_entry = VMM_PML4->entries[PML4_INDEX(virt)];
+    uint16_t pml4_index = PML4_INDEX(virt);
+    uint16_t pdpt_index = PDPT_INDEX(virt);
+    uint16_t pdt_index = PDT_INDEX(virt);
+
+    PML4_t* PML4 = VMM_get_pml4();
+
+    uintptr_t PML4_entry = PML4->entries[pml4_index];
     if (is_present(&PML4_entry))
     {
-        PDPT = (PDPT_t*) get_address(&PML4_entry);
+        PDPT = VMM_recursive_active ? VMM_get_pdpt(pml4_index) : (PDPT_t*) get_address(&PML4_entry);
     }
     else
     {
-        PDPT = (PDPT_t*) PMM_alloc_page();
+        PDPT = (PDPT_t*) VMM_alloc_table();
         uintptr_t PDPT_entry = (uintptr_t) PDPT;
         
         add_attribute(&PDPT_entry, PRESENT);
         add_attribute(&PDPT_entry, WRITABLE);
         add_attribute(&PDPT_entry, USER_MODE);
-        VMM_PML4->entries[PML4_INDEX((uintptr_t) virt)] = PDPT_entry;
+        PML4->entries[pml4_index] = PDPT_entry;
     }
 
-    uintptr_t PDPT_entry = PDPT->entries[PDPT_INDEX(virt)];
+    uintptr_t PDPT_entry = PDPT->entries[pdpt_index];
     if (is_present(&PDPT_entry))
     {
-        PDT = (PDT_t*) get_address(&PDPT_entry);
+        PDT = VMM_recursive_active ? VMM_get_pdt(pml4_index, pdpt_index) : (PDT_t*) get_address(&PDPT_entry);
     }
     else
     {
-        PDT = (PDT_t*) PMM_alloc_page();
+        PDT = (PDT_t*) VMM_alloc_table();
         uintptr_t PDT_entry = (uintptr_t) PDT;
 
         add_attribute(&PDT_entry, PRESENT);
         add_attribute(&PDT_entry, WRITABLE);
         add_attribute(&PDT_entry, USER_MODE);
-        PDPT->entries[PDPT_INDEX((uintptr_t) virt)] = PDT_entry;
+        PDPT->entries[pdpt_index] = PDT_entry;
     }
 
-    uintptr_t pdt_entry = PDT->entries[PDT_INDEX(virt)];
+    uintptr_t pdt_entry = PDT->entries[pdt_index];
     if (is_present(&pdt_entry))
     {
-        PT = (PT_t*) get_address(&pdt_entry);
+        PT = VMM_recursive_active ? VMM_get_pt(pml4_index, pdpt_index, pdt_index) : (PT_t*) get_address(&pdt_entry);
     }
     else
     {
-        PT = (struct PT *) PMM_alloc_page();
+        PT = (struct PT *) VMM_alloc_table();
         uintptr_t PT_entry = (uintptr_t) PT;
 
         add_attribute(&PT_entry, PRESENT);
         add_attribute(&PT_entry, WRITABLE);
         add_attribute(&PT_entry, USER_MODE);
-        PDT->entries[PDT_INDEX(virt)] = PT_entry;
+        PDT->entries[pdt_index] = PT_entry;
     }
 
     uintptr_t entry = phys;
@@ -167,4 +243,101 @@ void VMM_load_cr3(void)
 {
     uintptr_t pml4_addr = (uintptr_t) VMM_PML4;
     __asm__ __volatile__("mov %0, %%cr3":: "b"(pml4_addr));
+    // Keep recursive mode disabled for now; the kernel relies on identity-mapped
+    // physical addresses for page-table access.
+    VMM_recursive_active = FALSE;
+}
+
+bool VMM_virt_to_phys(uintptr_t virt, uintptr_t* phys_out)
+{
+    uint16_t pml4_index = PML4_INDEX(virt);
+    uint16_t pdpt_index = PDPT_INDEX(virt);
+    uint16_t pdt_index = PDT_INDEX(virt);
+    uint16_t pt_index = PT_INDEX(virt);
+
+    PML4_t* PML4 = VMM_get_pml4();
+    uintptr_t pml4_entry = PML4->entries[pml4_index];
+    if (!is_present(&pml4_entry))
+        return FALSE;
+
+    PDPT_t* PDPT = VMM_recursive_active ? VMM_get_pdpt(pml4_index) : (PDPT_t*) get_address(&pml4_entry);
+    uintptr_t pdpt_entry = PDPT->entries[pdpt_index];
+    if (!is_present(&pdpt_entry))
+        return FALSE;
+
+    PDT_t* PDT = VMM_recursive_active ? VMM_get_pdt(pml4_index, pdpt_index) : (PDT_t*) get_address(&pdpt_entry);
+    uintptr_t pdt_entry = PDT->entries[pdt_index];
+    if (!is_present(&pdt_entry))
+        return FALSE;
+
+    PT_t* PT = VMM_recursive_active ? VMM_get_pt(pml4_index, pdpt_index, pdt_index) : (PT_t*) get_address(&pdt_entry);
+    uintptr_t pt_entry = PT->entries[pt_index];
+    if (!is_present(&pt_entry))
+        return FALSE;
+
+    *phys_out = get_address(&pt_entry) | (virt & 0xFFF);
+    return TRUE;
+}
+
+bool VMM_phys_to_virt(uintptr_t phys, uintptr_t* virt_out)
+{
+    uintptr_t phys_frame = phys & FRAME;
+    uintptr_t offset = phys & 0xFFF;
+
+    PML4_t* PML4 = VMM_get_pml4();
+    for (uint16_t pml4_index = 0; pml4_index < 512; ++pml4_index)
+    {
+        uintptr_t pml4_entry = PML4->entries[pml4_index];
+        if (!is_present(&pml4_entry))
+            continue;
+
+        PDPT_t* PDPT = VMM_recursive_active ? VMM_get_pdpt(pml4_index) : (PDPT_t*) get_address(&pml4_entry);
+        for (uint16_t pdpt_index = 0; pdpt_index < 512; ++pdpt_index)
+        {
+            uintptr_t pdpt_entry = PDPT->entries[pdpt_index];
+            if (!is_present(&pdpt_entry))
+                continue;
+
+            PDT_t* PDT = VMM_recursive_active ? VMM_get_pdt(pml4_index, pdpt_index) : (PDT_t*) get_address(&pdpt_entry);
+            for (uint16_t pdt_index = 0; pdt_index < 512; ++pdt_index)
+            {
+                uintptr_t pdt_entry = PDT->entries[pdt_index];
+                if (!is_present(&pdt_entry))
+                    continue;
+
+                PT_t* PT = VMM_recursive_active ? VMM_get_pt(pml4_index, pdpt_index, pdt_index) : (PT_t*) get_address(&pdt_entry);
+                for (uint16_t pt_index = 0; pt_index < 512; ++pt_index)
+                {
+                    uintptr_t pt_entry = PT->entries[pt_index];
+                    if (!is_present(&pt_entry))
+                        continue;
+
+                    if ((pt_entry & FRAME) == phys_frame)
+                    {
+                        uintptr_t virt = ((uintptr_t)pml4_index << 39) |
+                                         ((uintptr_t)pdpt_index << 30) |
+                                         ((uintptr_t)pdt_index << 21) |
+                                         ((uintptr_t)pt_index << 12) |
+                                         offset;
+                        *virt_out = canonical_address(virt);
+                        return TRUE;
+                    }
+                }
+            }
+        }
+    }
+
+    return FALSE;
+}
+
+bool VMM_phys_to_virt_identity(uintptr_t phys, uintptr_t* virt_out)
+{
+    uintptr_t phys_out = 0;
+    if (!VMM_virt_to_phys(phys, &phys_out))
+        return FALSE;
+    if (phys_out != phys)
+        return FALSE;
+
+    *virt_out = phys;
+    return TRUE;
 }

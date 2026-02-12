@@ -13,8 +13,8 @@
 # define AOUT_KLUDGE MULTIBOOT_AOUT_KLUDGE
 #endif
 
-/* The size of our stack (4KiB). */
-#define STACK_SIZE  0x1000
+/* The size of our early kernel stack (16KiB). */
+#define STACK_SIZE  0x4000
 
 .set HEADER_LEN,        mb2_hdr_end - mb2_hdr
 .set CHECKSUM,          -(MULTIBOOT2_HEADER_MAGIC + MULTIBOOT_ARCHITECTURE_I386 + HEADER_LEN)
@@ -93,7 +93,7 @@ mb2_hdr_end:
 
 # Execute our first loader code segment starting at multiboot_entry.
 multiboot_entry:   
-    movl $(stack + STACK_SIZE), %esp    # Let's define our stack pointer where the kernel stack will be.
+    movl $kernel_stack_top, %esp        # Use the dedicated early kernel stack.
     movl $0, %ebp
 
     movl %ebx, %edi                 # Keep the Multiboot2 info ptr for the k_entry function.
@@ -260,9 +260,9 @@ pdp:
 pd:
     .zero 4096
 
-kernel_stack_top:
-.comm stack, STACK_SIZE # Our stack area.
 kernel_stack_bottom:
+    .skip STACK_SIZE
+kernel_stack_top:
 
 .section .data
 .align 8

@@ -4,6 +4,7 @@
 .globl syscall_handler_stub
 
 .extern Syscall_interupt_handler
+.extern syscall_kernel_rsp0
 
 # Segment selectors with RPL
 .set USER_CODE_SEGMENT_RPL3,  0x23  # USER_CODE_SEGMENT (0x20) | RPL_3 (0x3)
@@ -42,47 +43,53 @@ syscall_handler_stub:
 
     cli
 
-    # Save necessary registers in callee-saved registers
+    # SYSCALL does not switch stack automatically in long mode.
+    # Save user RSP, then move to a trusted kernel stack (TSS.rsp0 mirror).
+    movq %rsp, %r14
+    movq syscall_kernel_rsp0(%rip), %rsp
+
+    # Save callee-saved registers and syscall context.
     pushq %rbp
     pushq %rbx
-    pushq %r12                # Use R12 to save RAX (syscall number)
-    pushq %r13                # Save R13 (used as a temp)
-    
-    movq %rsp, %r13          # Save kernel RSP (after pushes)
-    movq %rax, %r12          # R12 = RAX (syscall number)
-    movq %rcx, %rbp          # RBP = RCX (user RIP)
-    movq %r11, %rbx          # RBX = R11 (user RFLAGS)
-    lea 32(%rsp), %rax       # RAX = original user RSP before pushes
+    pushq %r12
+    pushq %r13
+    pushq %r14               # saved user RSP
+    pushq %r15
 
-    # Align stack to 16 bytes before C call
-    andq $0xFFFFFFFFFFFFFFF0, %rsp
-    
-    # Build frame on kernel stack
-    pushq $USER_DATA_SEGMENT_RPL3  # SS (user stack segment)
-    pushq %rax                      # userrsp (user RSP)
-    pushq %rbx                      # eflags (user RFLAGS)
-    pushq $USER_CODE_SEGMENT_RPL3  # CS (user code segment)
-    pushq %rbp                      # rip (user RIP)
-    pushq $0                        # err_code (no error for syscall)
-    pushq $0x80                     # int_no (SYSCALL_INT = 0x80)
-    
+    movq %rax, %r12          # R12 = syscall number
+    movq %rcx, %rbp          # RBP = user RIP
+    movq %r11, %rbx          # RBX = user RFLAGS
+
+    # Build syscall_frame_t on stack
+    subq $80, %rsp
+    movq %rdi, 0(%rsp)       # rdi
+    movq %rsi, 8(%rsp)       # rsi
+    movq %rdx, 16(%rsp)      # rdx
+    movq %r10, 24(%rsp)      # r10
+    movq %r8, 32(%rsp)       # r8
+    movq %r9, 40(%rsp)       # r9
+    movq %rbp, 48(%rsp)      # rip
+    movq %rbx, 56(%rsp)      # rflags
+    movq %r14, 64(%rsp)      # rsp (saved user stack pointer)
+
     # Call C handler with syscall number and frame
     movq %r12, %rdi          # RDI = syscall number (RAX saved in R12)
-    movq %rsp, %rsi          # RSI = pointer to frame
+    movq %rsp, %rsi          # RSI = pointer to syscall_frame_t
     callq Syscall_interupt_handler
+    addq $80, %rsp           # Drop syscall_frame_t
 
     # Restore RCX/R11 for sysretq
     movq %rbp, %rcx          # RCX = user RIP
     movq %rbx, %r11          # R11 = user RFLAGS
     
-    # Restore original kernel RSP (before stack alignment)
-    movq %r13, %rsp
-
-    # Restore saved registers
+    # Restore saved registers and switch back to user RSP for SYSRET.
+    popq %r15
+    popq %r14                # user RSP
     popq %r13
     popq %r12
     popq %rbx
     popq %rbp
+    movq %r14, %rsp
 
     # No sti here: interrupts will be re-enabled in user mode
     # according to R11 flags, masked by IA32_FMASK.

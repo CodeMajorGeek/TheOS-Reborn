@@ -60,6 +60,7 @@ typedef struct interrupt_frame
 } interrupt_frame_t;
 
 extern void* ISR_stub_table[];
+extern void* ISR_stub_table_end[];
 
 __attribute__((aligned(0x10))) static IDT_entry_t IDT[IDT_MAX_DESCRIPTORS];
 static IDTR_t idtr;

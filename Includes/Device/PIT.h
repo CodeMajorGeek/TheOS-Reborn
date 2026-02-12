@@ -29,10 +29,11 @@
 
 
 void PIT_init(void);
+void PIT_stop(void);
 void PIT_phase(uint16_t);
+void PIT_reset_ticks(void);
+uint64_t PIT_get_ticks(void);
 
 void PIT_sleep_ms(uint32_t);
-
-static void PIT_callback(interrupt_frame_t*);
 
 #endif

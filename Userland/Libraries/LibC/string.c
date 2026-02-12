@@ -27,7 +27,7 @@ void* memsetq(void* ptr, uint64_t value, size_t count)
     return ptr;
 }
 
-void* memcpy(void* dest, void* src, size_t count)
+void* memcpy(void* dest, const void* src, size_t count)
 {
     uint8_t* d = dest;
     const uint8_t* s = src;
@@ -37,7 +37,7 @@ void* memcpy(void* dest, void* src, size_t count)
     return dest;
 }
 
-void* memcpyw(void* dest, void* src, size_t count)
+void* memcpyw(void* dest, const void* src, size_t count)
 {
     uint16_t* d = dest;
     const uint16_t* s = src;
@@ -47,7 +47,7 @@ void* memcpyw(void* dest, void* src, size_t count)
     return dest;
 }
 
-void* memcpyq(void* dest, void* src, size_t count)
+void* memcpyq(void* dest, const void* src, size_t count)
 {
     uint64_t* d = dest;
     const uint64_t* s = src;

@@ -7,7 +7,7 @@
 #define AHCI_MEM_LENGTH         (1024 * 32)
 #define AHCI_SECTOR_SIZE        0x200       // 512 bytes.
 
-#define AHCI_MAX_SLOT           0x1F
+#define AHCI_MAX_SLOT           32
 
 #define FIS_TYPE_REG_H2D        0x27
 #define ATA_CMD_READ_DMA_EX     0x25
@@ -32,6 +32,7 @@
 #define HBA_PxCMD_FRE           0x0010
 #define HBA_PxCMD_FR            0x4000
 #define HBA_PxCMD_CR            0x8000
+#define HBA_PxIS_TFES           (1U << 30)
 
 typedef struct AHCI_device
 {
@@ -169,5 +170,8 @@ int AHCI_find_cmdslot(HBA_PORT_t* port);
 
 int AHCI_sata_read(HBA_PORT_t* port, uint32_t startl, uint32_t starth, uint32_t count, uint8_t* buf);
 int AHCI_SATA_write(HBA_PORT_t* port, uint32_t startl, uint32_t starth, uint32_t count, uint8_t* buf);
+
+int AHCI_get_device_count(void);
+HBA_PORT_t* AHCI_get_device(int index);
 
 #endif

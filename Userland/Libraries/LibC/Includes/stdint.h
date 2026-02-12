@@ -14,4 +14,12 @@ typedef unsigned int uint16_t __attribute__((__mode__(__HI__)));
 
 typedef uint64_t uintptr_t;
 
+typedef signed char int8_t;
+typedef signed short int16_t;
+typedef signed int int32_t;
+typedef signed long long int64_t;
+
+typedef signed int int8_t __attribute__((__mode__(__QI__)));
+typedef signed int int16_t __attribute__((__mode__(__HI__)));
+
 #endif

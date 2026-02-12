@@ -1,5 +1,6 @@
 #include <Debug/KDebug.h>
 
+#ifdef THEOS_ENABLE_KDEBUG
 #include <Device/COM.h>
 #include <stdbool.h>
 #include <stdint.h>
@@ -200,4 +201,34 @@ void kdebug_printf(const char* format, ...)
 
     va_end(parameters);
 }
+#else
+void kdebug_init(void)
+{
+}
 
+void kdebug_putc(char c)
+{
+    (void)c;
+}
+
+void kdebug_puts(const char* str)
+{
+    (void)str;
+}
+
+void kdebug_hex(uint64_t value, int width)
+{
+    (void)value;
+    (void)width;
+}
+
+void kdebug_dec(uint64_t value)
+{
+    (void)value;
+}
+
+void kdebug_printf(const char* format, ...)
+{
+    (void)format;
+}
+#endif

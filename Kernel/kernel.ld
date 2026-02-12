@@ -2,7 +2,6 @@ ENTRY(multiboot_entry)
 
 PHDRS
 {
-    boot PT_LOAD;
     text PT_LOAD;
     data PT_LOAD;
     got PT_LOAD;
@@ -15,13 +14,9 @@ SECTIONS
 
     . = kernel_start + SIZEOF_HEADERS;
 
-    .boot ALIGN(4K) : AT (ADDR(.boot))
-    {
-        KEEP(*(.multiboot))
-    } :boot
-
     .text ALIGN(4K) : AT (ADDR(.text))
     {
+        KEEP(*(.multiboot))
         *(.text)
     } :text
 

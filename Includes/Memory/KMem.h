@@ -7,7 +7,7 @@
 #define MEM_STATE_USED      1
 #define MEM_STATE_AVALIABLE 2
 
-#define KMEM_HEAP_SIZE      4096
+#define KMEM_HEAP_SIZE      (2 * 1024 * 1024)
 
 typedef struct malloc_header
 {
@@ -16,7 +16,7 @@ typedef struct malloc_header
     struct malloc_header* prev_malloc_header;   // The previous malloc header.
 } malloc_header_t;
 
-void kmem_init(uint64_t heap_start);
+void kmem_init(uint64_t heap_start, size_t heap_size);
 
 void* kmalloc(size_t size);
 void* krealloc(void* ptr, size_t new_size);

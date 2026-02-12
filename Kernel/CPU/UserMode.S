@@ -42,16 +42,8 @@ switch_to_usermode:
     iretq
 
 in_user_mode:
-    # We are now in user mode (ring 3)!
-    # In 64-bit, DS/ES/FS/GS are largely ignored
-    # Do not load them to avoid any potential issues
-    
-    # Test: make a syscall to verify we're in ring 3
-    movq $1, %rax    # Test syscall number
-    movq $42, %rdi   # First argument (test)
-    syscall          # Call kernel (returns to ring 0, then back to ring 3)
-    
-    # After syscall, we're back in ring 3
-    # Infinite loop
-    jmp in_user_mode
-    retq
+    # We are now in user mode (ring 3).
+    # Keep CPU in a quiet userland loop (no filesystem syscall spam).
+1:
+    pause
+    jmp 1b

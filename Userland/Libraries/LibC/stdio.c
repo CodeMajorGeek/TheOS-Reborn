@@ -1,6 +1,9 @@
 #include <stdio.h>
 
 #include <Device/TTY.h>
+#if defined(__THEOS_KERNEL) && defined(THEOS_ENABLE_KDEBUG)
+#include <Debug/KDebug.h>
+#endif
 
 #include <stdbool.h>
 #include <stdint.h>
@@ -158,10 +161,11 @@ int __printf(char* buff, size_t buff_len, const char* __restrict format, va_list
                 // %x ou %X : int
                 uppercase = (*format == 'X');
                 format++;
-                int v = va_arg(parameters, int);
+                unsigned int v = va_arg(parameters, unsigned int);
                 
-                char digits[7]; // max digits size in int hexadecimal.
-                itoa(v, digits, sizeof(digits), HEXADECIMAL);
+                // 8 hex digits for 32-bit values + null terminator.
+                char digits[9];
+                lltoa((unsigned long long) v, digits, sizeof(digits), HEXADECIMAL);
 
                 size_t len = strlen(digits);
                 if (maxrem < len)
@@ -210,9 +214,15 @@ int printf(const char* __restrict format, ...)
     va_start(parameters, format);
 
     result = __printf(buf, len, format, parameters);
-    
-    for (int i = 0; i < strlen(buf); i++)
+
+    size_t output_len = strlen(buf);
+    for (size_t i = 0; i < output_len; i++)
         putc(buf[i]);
+
+#if defined(__THEOS_KERNEL) && defined(THEOS_ENABLE_KDEBUG)
+    for (size_t i = 0; i < output_len; i++)
+        kdebug_putc(buf[i]);
+#endif
 
     va_end(parameters);
 

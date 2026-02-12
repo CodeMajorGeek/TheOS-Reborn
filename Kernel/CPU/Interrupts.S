@@ -244,7 +244,7 @@ isr_no_err_stub 31
 # Autres interruptions
 # ------------------------------------------------
 .set isrno, 48
-.rept 255 - 48
+.rept 256 - 48
     isr_no_err_stub %isrno
     .set isrno, isrno + 1
 .endr
@@ -266,7 +266,10 @@ ISR_stub_table:
     .endr
 
     .set isrno, 48
-    .rept 255 - 48
+    .rept 256 - 48
         idt_isr_entry_stub %isrno
         .set isrno, isrno + 1
     .endr
+
+.globl ISR_stub_table_end
+ISR_stub_table_end:

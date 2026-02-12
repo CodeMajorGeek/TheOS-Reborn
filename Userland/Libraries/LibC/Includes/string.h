@@ -8,9 +8,9 @@ void* memset(void* ptr, uint8_t value, size_t count);
 void* memsetw(void* ptr, uint16_t value, size_t count);
 void* memsetq(void* ptr, uint64_t value, size_t count);
 
-void* memcpy(void* dest, void* src, size_t count);
-void* memcpyw(void* dest, void* src, size_t count);
-void* memcpyq(void* dest, void* src, size_t count);
+void* memcpy(void* dest, const void* src, size_t count);
+void* memcpyw(void* dest, const void* src, size_t count);
+void* memcpyq(void* dest, const void* src, size_t count);
 
 size_t strlen(const char* str);
 

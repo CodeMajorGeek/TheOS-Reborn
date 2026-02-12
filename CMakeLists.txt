@@ -66,3 +66,6 @@ include_directories(Userland/Libraries/LibC/Includes)
 
 add_subdirectory(Userland)
 add_subdirectory(Kernel)
+
+# Keep run/iso artifacts in sync with current kernel sources/config.
+add_dependencies(iso Kernel)

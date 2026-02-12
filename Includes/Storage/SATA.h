@@ -1,7 +1,7 @@
 #ifndef _SATA_H
 #define _SATA_H
 
-#define SATA_IO_MAX_WAIT    10000
+#define SATA_IO_MAX_WAIT    1000000
 
 #define SATA_SIG_ATAPI      0xEB140101  // SATAPI drive.
 #define SATA_SIG_SEMB       0xC33C0101  // Enclosure management bridge.

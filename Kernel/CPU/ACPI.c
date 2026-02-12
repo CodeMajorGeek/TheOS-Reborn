@@ -22,22 +22,16 @@ bool ACPI_RSDP_old_check(multiboot_uint8_t* rsdp)
 
 bool ACPI_RSDP_new_check(multiboot_uint8_t* rsdp)
 {
-    ACPI_RSDP_descriptor10_t* rsdp_desc10 = (ACPI_RSDP_descriptor10_t*) rsdp;
-
-    size_t sum10 = 0;
-    for (int i = 0; i < sizeof(ACPI_RSDP_descriptor10_t); ++i)
-        sum10 += ((uint8_t*) rsdp_desc10)[i];
-
-    if ((uint8_t) sum10)
-        return false;
-
     ACPI_RSDP_descriptor20_t* rsdp_desc20 = (ACPI_RSDP_descriptor20_t*) rsdp;
+    uint32_t len = rsdp_desc20->length;
+    if (len < sizeof(ACPI_RSDP_descriptor20_t))
+        len = sizeof(ACPI_RSDP_descriptor20_t);
 
-    uint32_t sum20 = 0;
-    for (int i = sizeof(ACPI_RSDP_descriptor10_t); i < sizeof(ACPI_RSDP_descriptor20_t); ++i)
-        sum20 += ((uint8_t*) rsdp_desc20)[i];
+    uint32_t sum = 0;
+    for (uint32_t i = 0; i < len; ++i)
+        sum += ((uint8_t*) rsdp_desc20)[i];
 
-    return ((uint8_t) sum20) == 0;
+    return ((uint8_t) sum) == 0;
 }
 
 bool ACPI_SDT_check(ACPI_SDT_header_t* sdt_header_ptr)

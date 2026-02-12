@@ -50,6 +50,25 @@
 #define TMR_PERIODIC	                    0x20000
 #define TMR_BASEDIV	                        (1 << 20)
 
+// ACPI MADT interrupt source override INTI flags.
+#define APIC_MADT_INTI_POLARITY_MASK            0x3U
+#define APIC_MADT_INTI_POLARITY_CONFORMS        0x0U
+#define APIC_MADT_INTI_POLARITY_ACTIVE_HIGH     0x1U
+#define APIC_MADT_INTI_POLARITY_RESERVED        0x2U
+#define APIC_MADT_INTI_POLARITY_ACTIVE_LOW      0x3U
+
+#define APIC_MADT_INTI_TRIGGER_SHIFT            2U
+#define APIC_MADT_INTI_TRIGGER_MASK             (0x3U << APIC_MADT_INTI_TRIGGER_SHIFT)
+#define APIC_MADT_INTI_TRIGGER_CONFORMS         0x0U
+#define APIC_MADT_INTI_TRIGGER_EDGE             0x1U
+#define APIC_MADT_INTI_TRIGGER_RESERVED         0x2U
+#define APIC_MADT_INTI_TRIGGER_LEVEL            0x3U
+
+// IOAPIC redirection entry low dword bits.
+#define APIC_IORED_POLARITY_LOW                 (1U << 13)
+#define APIC_IORED_TRIGGER_LEVEL                (1U << 15)
+#define APIC_IORED_MASK                         (1U << 16)
+
 
 typedef struct APIC_MADT
 {
@@ -57,7 +76,7 @@ typedef struct APIC_MADT
     uint32_t lapic_ptr;
     uint32_t flags;
     uint8_t records[];
-} APIC_MADT_t;
+} __attribute__((__packed__)) APIC_MADT_t;
 
 typedef struct APIC_IO
 {
@@ -84,7 +103,10 @@ uint32_t APIC_IO_read(uint8_t index, uint32_t reg);
 void APIC_IO_write(uint8_t index, uint32_t reg, uint32_t value);
 
 bool APIC_is_enabled(void);
+uint8_t APIC_get_current_lapic_id(void);
 void APIC_register_IRQ_vector(int vec, int irq, bool disable);
+void APIC_register_GSI_vector(int vec, uint32_t gsi, bool disable);
 void APIC_send_EOI(void);
+bool APIC_timer_init_bsp(uint32_t hz);
 
 #endif

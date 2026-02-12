@@ -8,10 +8,11 @@
 
 qemu-img create -f raw $THEOS_DISK_NAME $THEOS_DISK_SIZE
 
-mkfs.ext4 $THEOS_DISK_NAME
+# Keep ext4 features limited to what the in-kernel driver currently supports.
+mkfs.ext4 -F -O ^has_journal,^64bit,^metadata_csum $THEOS_DISK_NAME
 tune2fs -c0 -i0 $THEOS_DISK_NAME
 
-mkdir tmp/
+mkdir -p tmp/
 
 sudo mount $THEOS_DISK_NAME tmp/
 sudo cp -r $THEOS_BASE_FOLDER/* tmp/

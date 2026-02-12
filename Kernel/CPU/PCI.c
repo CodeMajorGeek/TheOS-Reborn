@@ -1,6 +1,7 @@
 #include <CPU/PCI.h>
 
 #include <Debug/Assert.h>
+#include <Debug/KDebug.h>
 #include <Storage/AHCI.h>
 #include <CPU/IO.h>
 
@@ -40,6 +41,7 @@ void PCI_check_device(uint8_t bus, uint8_t slot)
         return; // No device attached.
 
     uint16_t device_id = PCI_config_readw(bus, slot, function, PCI_DEVICE_REG);
+    kdebug_printf("[PCI] b=%u s=%u f=%u vid=0x%X did=0x%X\n", bus, slot, function, vendor_id, device_id);
 
     PCI_try_attach(bus, slot, function, vendor_id, device_id);
     
@@ -73,6 +75,7 @@ void PCI_scan_bus(uint8_t bus)
 static void PCI_try_attach(uint8_t bus, uint8_t slot, uint8_t function, uint16_t vendor, uint16_t device)
 {
     uint8_t base_class = (uint8_t) ((PCI_config_readw(bus, slot, function, PCI_CLASS_REG) >> 8) & 0XFF); // TODO: Maybe try to execute once...
+    kdebug_printf("[PCI] class b=%u s=%u f=%u class=0x%X\n", bus, slot, function, base_class);
     switch (base_class)
     {
     case PCI_DEV_CLASS_STORAGE:

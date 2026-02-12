@@ -30,6 +30,7 @@ typedef struct task
 extern uint64_t read_rip(void);
 extern uint64_t read_flags(void);
 extern void perform_task_switch(task_t* task);
+extern uintptr_t syscall_kernel_rsp0;
 
 void task_init(uintptr_t kernel_stack);
 void task_switch(void);

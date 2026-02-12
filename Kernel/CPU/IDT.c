@@ -3,11 +3,25 @@
 #include <Device/PIC.h>
 #include <CPU/GDT.h>
 #include <CPU/Syscall.h>
+#include <Debug/KDebug.h>
 
 #include <stdbool.h>
+#include <stddef.h>
+#include <stdlib.h>
 
 void IDT_init(void)
 {
+    size_t isr_stub_count = (size_t) (ISR_stub_table_end - ISR_stub_table);
+    if (isr_stub_count < IDT_MAX_VECTORS)
+    {
+        kdebug_printf(
+            "[IDT] Invalid ISR table size: got=%u need=%u\n",
+            (unsigned) isr_stub_count,
+            (unsigned) IDT_MAX_VECTORS
+        );
+        abort();
+    }
+
     idtr.base = (uint64_t) &IDT[0];
     idtr.limit = (uint16_t) sizeof(IDT_entry_t) * IDT_MAX_DESCRIPTORS - 1;
 
@@ -21,7 +35,6 @@ void IDT_init(void)
     IDT_set_descriptor(SYSCALL_INT, ISR_stub_table[SYSCALL_INT], 3);
 
     __asm__ __volatile__("lidt %0" : : "m"(idtr));  // Load the new IDT.
-    __asm__ __volatile__("sti");                    // Set the interrupt FLAG.
 }
 
 void IDT_set_descriptor(uint8_t vector, void* isr, uint8_t dpl)

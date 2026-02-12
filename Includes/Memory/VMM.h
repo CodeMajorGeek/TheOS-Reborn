@@ -3,10 +3,13 @@
 
 #include <stdint.h>
 #include <stddef.h>
+#include <stdbool.h>
 
 #define PRESENT     1 << 0   
 #define WRITABLE    1 << 1       
 #define USER_MODE   1 << 2       
+
+#define VMM_RECURSIVE_INDEX 510
 
 #define PML4_INDEX(x)   (((x) >> 39) & 0x1FF)
 #define PDPT_INDEX(x)   (((x) >> 30) & 0x1FF)
@@ -54,5 +57,9 @@ void VMM_map_page(uintptr_t virt, uintptr_t phys);
 void VMM_map_pages(uintptr_t virt, uintptr_t phys, size_t len);
 
 void VMM_load_cr3(void);
+
+bool VMM_virt_to_phys(uintptr_t virt, uintptr_t* phys_out);
+bool VMM_phys_to_virt(uintptr_t phys, uintptr_t* virt_out);
+bool VMM_phys_to_virt_identity(uintptr_t phys, uintptr_t* virt_out);
 
 #endif

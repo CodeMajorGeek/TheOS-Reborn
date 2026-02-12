@@ -1,4 +1,6 @@
 set(KERNEL_ARCH x86_64)
+option(THEOS_ENABLE_KDEBUG "Enable serial KDEBUG output and printf mirroring" ON)
+message(STATUS "Kernel: THEOS_ENABLE_KDEBUG=${THEOS_ENABLE_KDEBUG}")
 
 set(KERNEL_BOOT_SOURCES
     Boot/Bootloader.S
@@ -83,6 +85,9 @@ add_link_options(LINKER:-T ${CMAKE_CURRENT_SOURCE_DIR}/kernel.ld -nostdlib -n)
 
 add_compile_definitions(__THEOS_KERNEL)
 add_compile_definitions(__USE_QEMU)
+if(THEOS_ENABLE_KDEBUG)
+    add_compile_definitions(THEOS_ENABLE_KDEBUG)
+endif()
 
 add_executable(Kernel ${SOURCES})
 set_target_properties(Kernel PROPERTIES LINK_DEPENDS ${CMAKE_CURRENT_SOURCE_DIR}/kernel.ld)

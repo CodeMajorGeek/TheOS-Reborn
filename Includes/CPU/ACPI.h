@@ -58,17 +58,17 @@ typedef struct ACPI_SDT_header
     uint32_t OEM_revision;
     uint32_t creator_id;
     uint32_t creator_revision;
-} ACPI_SDT_header_t;
+} __attribute__((__packed__)) ACPI_SDT_header_t;
 
 typedef struct ACPI_RSDT {
   ACPI_SDT_header_t header;
   uint32_t ptr_next_SDT[];
-} ACPI_RSDT_t;
+} __attribute__((__packed__)) ACPI_RSDT_t;
 
 typedef struct ACPI_XSDT {
   ACPI_SDT_header_t header;
   uint64_t ptr_next_SDT[];
-} ACPI_XSDT_t;
+} __attribute__((__packed__)) ACPI_XSDT_t;
 
 bool ACPI_RSDP_old_check(multiboot_uint8_t* rsdt);
 bool ACPI_RSDP_new_check(multiboot_uint8_t* rsdt);

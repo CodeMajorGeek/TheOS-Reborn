@@ -14,6 +14,8 @@ static task_t kernel_task;
 static task_t* current_task;
 static task_t* next_task;
 
+uintptr_t syscall_kernel_rsp0 = 0;
+
 void task_init(uintptr_t kernel_stack)
 {
     memset(&tss, 0, sizeof (tss));
@@ -27,6 +29,7 @@ void task_init(uintptr_t kernel_stack)
     // rsp0 is used by CPU for stack switch when interrupt occurs in user mode
     // IMPORTANT: rsp0 must point to a valid, aligned kernel stack
     tss.rsp0 = kernel_stack & ~0xF;
+    syscall_kernel_rsp0 = tss.rsp0;
     
     // rsp1 and rsp2 are not used for IRQ handling, leave them zero
     tss.rsp1 = 0;
@@ -70,6 +73,7 @@ void task_switch(void)
     // Update rsp0 for new task's kernel stack
     // rsp1 and rsp2 are not used for IRQ handling
     tss.rsp0 = (current_task->stack & ~0xF);
+    syscall_kernel_rsp0 = tss.rsp0;
     
     // IMPORTANT: After modifying TSS, we must reload it in TR
     // The CPU caches TSS data, so changes require a reload

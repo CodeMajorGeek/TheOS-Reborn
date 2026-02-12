@@ -34,5 +34,4 @@ perform_task_switch:
     movq 72(%rdi), %r11
     
     movq $0xDEADBEEF, %rax
-    sti
     jmpq *(%rdi)

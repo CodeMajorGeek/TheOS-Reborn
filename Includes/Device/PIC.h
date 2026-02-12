@@ -10,6 +10,8 @@
 #define PIC2_COMMAND    PIC2_ADDRESS
 #define PIC2_DATA       (PIC2_ADDRESS + 1)
 #define PIC_EOI         0x20        // End Of Interrupt command code.
+#define PIC_READ_IRR    0x0A
+#define PIC_READ_ISR    0x0B
 
 #define ICW1_ICW4       0x01        // ICW4 (not) needed.
 #define ICW1_SINGLE     0x02        // Single (cascade) mode.
@@ -25,6 +27,9 @@
 
 void PIC_remap(int offset1, int offset2);
 void PIC_send_EOI(uint8_t irq);
+uint16_t PIC_get_IRR(void);
+uint16_t PIC_get_ISR(void);
+uint16_t PIC_get_mask(void);
 
 void PIC_disable(void);
 

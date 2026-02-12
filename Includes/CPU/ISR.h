@@ -7,6 +7,9 @@
 
 #define ISR_COUNT_BEFORE_IRQ    32      
 #define MAX_IRQ_ENTRIES         16
+#define IRQ_VECTOR_BASE         ISR_COUNT_BEFORE_IRQ
+#define IRQ_VECTOR_END          (ISR_COUNT_BEFORE_IRQ + MAX_IRQ_ENTRIES - 1)
+#define TICK_VECTOR             IRQ_VECTOR_BASE
 
 #define IRQ0    32
 #define IRQ1    33
@@ -26,6 +29,12 @@
 #define IRQ15   47
 
 typedef void (*IRQ_t)(interrupt_frame_t*);
+
+typedef enum tick_source
+{
+    TICK_SOURCE_PIT_IOAPIC = 0,
+    TICK_SOURCE_LAPIC_TIMER = 1
+} tick_source_t;
 
 static const char* exception_messages[MAX_KNOWN_EXCEPTIONS] =
 {
@@ -51,6 +60,13 @@ static const char* exception_messages[MAX_KNOWN_EXCEPTIONS] =
 };
 
 void ISR_register_IRQ(int index, IRQ_t irq);
+void ISR_set_tick_source(tick_source_t source, uint32_t hz);
+tick_source_t ISR_get_tick_source(void);
+uint32_t ISR_get_tick_hz(void);
+
+uint64_t ISR_get_timer_ticks(void);
+uint64_t ISR_get_vector_count(uint8_t vector);
+uint64_t ISR_get_pic_activity_count(void);
 
 void ISR_handler(interrupt_frame_t* frame);
 void IRQ_handler(interrupt_frame_t* frame);
