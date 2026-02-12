@@ -37,6 +37,10 @@ static bool APIC_GSI_is_isa[256];
 #define APIC_IPI_SPIN_TIMEOUT         1000000U
 #define APIC_IPI_DELAY_SHORT_LOOPS    200000U
 
+static volatile uint32_t APIC_timer_periodic_initial_count = 0;
+static volatile uint32_t APIC_timer_calibrated_hz = 0;
+static volatile uint8_t APIC_timer_calibrated = 0;
+
 static void APIC_timer_callback(interrupt_frame_t* frame);
 static bool APIC_wait_icr_idle(uint32_t spin_limit);
 static void APIC_delay_loops(uint32_t loops);
@@ -509,6 +513,10 @@ bool APIC_timer_init_bsp(uint32_t hz)
     if (!APIC_enabled || hz == 0)
         return false;
 
+    __atomic_store_n(&APIC_timer_calibrated, 0, __ATOMIC_RELEASE);
+    __atomic_store_n(&APIC_timer_periodic_initial_count, 0, __ATOMIC_RELAXED);
+    __atomic_store_n(&APIC_timer_calibrated_hz, 0, __ATOMIC_RELAXED);
+
     bool use_hpet = HPET_is_available();
     if (!use_hpet)
         PIT_reset_ticks();
@@ -564,6 +572,10 @@ bool APIC_timer_init_bsp(uint32_t hz)
     APIC_local_write(APIC_LVT_TMR, (TICK_VECTOR & 0xFFU) | TMR_PERIODIC);
     APIC_local_write(APIC_TMRINITCNT, periodic_initial_count);
 
+    __atomic_store_n(&APIC_timer_periodic_initial_count, periodic_initial_count, __ATOMIC_RELAXED);
+    __atomic_store_n(&APIC_timer_calibrated_hz, hz, __ATOMIC_RELAXED);
+    __atomic_store_n(&APIC_timer_calibrated, 1, __ATOMIC_RELEASE);
+
     if (!use_hpet)
         PIT_stop();
 
@@ -587,6 +599,36 @@ bool APIC_timer_init_bsp(uint32_t hz)
                       (unsigned long long) lapic_counts_per_sec);
     }
 
+    return true;
+}
+
+bool APIC_timer_init_ap(uint32_t hz)
+{
+    if (!APIC_enabled)
+        return false;
+
+    if (__atomic_load_n(&APIC_timer_calibrated, __ATOMIC_ACQUIRE) == 0)
+        return false;
+
+    uint32_t periodic_initial_count = __atomic_load_n(&APIC_timer_periodic_initial_count, __ATOMIC_RELAXED);
+    uint32_t calibrated_hz = __atomic_load_n(&APIC_timer_calibrated_hz, __ATOMIC_RELAXED);
+    if (periodic_initial_count == 0 || calibrated_hz == 0)
+        return false;
+
+    if (hz == 0)
+        hz = calibrated_hz;
+    else if (hz != calibrated_hz)
+        return false;
+
+    ISR_register_IRQ(TICK_VECTOR, APIC_timer_callback);
+    APIC_local_write(APIC_TMRDIV, LAPIC_TIMER_DIVIDE_BY_16);
+    APIC_local_write(APIC_LVT_TMR, (TICK_VECTOR & 0xFFU) | TMR_PERIODIC);
+    APIC_local_write(APIC_TMRINITCNT, periodic_initial_count);
+
+    kdebug_printf("[LAPIC] AP timer enabled: apic_id=%u hz=%u init=%u\n",
+                  APIC_get_current_lapic_id(),
+                  hz,
+                  periodic_initial_count);
     return true;
 }
 

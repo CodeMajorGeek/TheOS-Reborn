@@ -8,6 +8,8 @@
 #define PRESENT     1 << 0   
 #define WRITABLE    1 << 1       
 #define USER_MODE   1 << 2       
+#define WRITE_THROUGH 1 << 3
+#define CACHE_DISABLE 1 << 4
 
 #define VMM_RECURSIVE_INDEX 510
 
@@ -55,6 +57,10 @@ void VMM_hardware_mapping(void);
 
 void VMM_map_page(uintptr_t virt, uintptr_t phys);
 void VMM_map_pages(uintptr_t virt, uintptr_t phys, size_t len);
+void VMM_map_page_flags(uintptr_t virt, uintptr_t phys, uintptr_t flags);
+void VMM_map_pages_flags(uintptr_t virt, uintptr_t phys, size_t len, uintptr_t flags);
+void VMM_map_mmio_uc_page(uintptr_t virt, uintptr_t phys);
+void VMM_map_mmio_uc_pages(uintptr_t virt, uintptr_t phys, size_t len);
 
 void VMM_load_cr3(void);
 

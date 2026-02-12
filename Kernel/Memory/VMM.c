@@ -165,11 +165,14 @@ void VMM_hardware_mapping(void)
     TTY_set_buffer((uint16_t*) VMM_VGA_virt);                                               // Set the TTY buffer to the new virtual address.
 }
 
-void VMM_map_page(uintptr_t virt, uintptr_t phys)
+void VMM_map_page_flags(uintptr_t virt, uintptr_t phys, uintptr_t flags)
 {
     PDPT_t* PDPT;
     PDT_t* PDT;
     PT_t* PT;
+    uintptr_t cache_flags = flags & (WRITE_THROUGH | CACHE_DISABLE);
+    uintptr_t table_flags = PRESENT | WRITABLE | USER_MODE;
+    uintptr_t page_flags = PRESENT | WRITABLE | USER_MODE | cache_flags;
 
     uint16_t pml4_index = PML4_INDEX(virt);
     uint16_t pdpt_index = PDPT_INDEX(virt);
@@ -187,9 +190,7 @@ void VMM_map_page(uintptr_t virt, uintptr_t phys)
         PDPT = (PDPT_t*) VMM_alloc_table();
         uintptr_t PDPT_entry = (uintptr_t) PDPT;
         
-        add_attribute(&PDPT_entry, PRESENT);
-        add_attribute(&PDPT_entry, WRITABLE);
-        add_attribute(&PDPT_entry, USER_MODE);
+        add_attribute(&PDPT_entry, table_flags);
         PML4->entries[pml4_index] = PDPT_entry;
     }
 
@@ -203,9 +204,7 @@ void VMM_map_page(uintptr_t virt, uintptr_t phys)
         PDT = (PDT_t*) VMM_alloc_table();
         uintptr_t PDT_entry = (uintptr_t) PDT;
 
-        add_attribute(&PDT_entry, PRESENT);
-        add_attribute(&PDT_entry, WRITABLE);
-        add_attribute(&PDT_entry, USER_MODE);
+        add_attribute(&PDT_entry, table_flags);
         PDPT->entries[pdpt_index] = PDT_entry;
     }
 
@@ -219,34 +218,50 @@ void VMM_map_page(uintptr_t virt, uintptr_t phys)
         PT = (struct PT *) VMM_alloc_table();
         uintptr_t PT_entry = (uintptr_t) PT;
 
-        add_attribute(&PT_entry, PRESENT);
-        add_attribute(&PT_entry, WRITABLE);
-        add_attribute(&PT_entry, USER_MODE);
+        add_attribute(&PT_entry, table_flags);
         PDT->entries[pdt_index] = PT_entry;
     }
 
-    uintptr_t entry = phys;
-    add_attribute(&entry, PRESENT);
-    add_attribute(&entry, WRITABLE);
-    add_attribute(&entry, USER_MODE);
+    uintptr_t entry = phys & FRAME;
+    add_attribute(&entry, page_flags);
     PT->entries[PT_INDEX(virt)] = entry;
 
     VMM_invlpg(virt);
     (void) SMP_tlb_shootdown_page(virt);
 }
 
-void VMM_map_pages(uintptr_t virt, uintptr_t phys, size_t len)
+void VMM_map_page(uintptr_t virt, uintptr_t phys)
+{
+    VMM_map_page_flags(virt, phys, 0);
+}
+
+void VMM_map_pages_flags(uintptr_t virt, uintptr_t phys, size_t len, uintptr_t flags)
 {
     uintptr_t virtual_address = virt;
     uintptr_t physical_address = phys;
 
     while (physical_address < phys + len)
     {
-        VMM_map_page(virtual_address, physical_address);
+        VMM_map_page_flags(virtual_address, physical_address, flags);
         
         physical_address += PHYS_PAGE_SIZE;
         virtual_address += PHYS_PAGE_SIZE;
     }
+}
+
+void VMM_map_pages(uintptr_t virt, uintptr_t phys, size_t len)
+{
+    VMM_map_pages_flags(virt, phys, len, 0);
+}
+
+void VMM_map_mmio_uc_page(uintptr_t virt, uintptr_t phys)
+{
+    VMM_map_page_flags(virt, phys, WRITE_THROUGH | CACHE_DISABLE);
+}
+
+void VMM_map_mmio_uc_pages(uintptr_t virt, uintptr_t phys, size_t len)
+{
+    VMM_map_pages_flags(virt, phys, len, WRITE_THROUGH | CACHE_DISABLE);
 }
 
 void VMM_load_cr3(void)

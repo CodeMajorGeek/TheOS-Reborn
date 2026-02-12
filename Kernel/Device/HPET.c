@@ -55,7 +55,7 @@ bool HPET_init(void)
 
     uintptr_t hpet_base = (uintptr_t) table->address.address;
     uintptr_t hpet_page = hpet_base & ~(uintptr_t) 0xFFFULL;
-    VMM_map_page(hpet_page, hpet_page);
+    VMM_map_mmio_uc_page(hpet_page, hpet_page);
     HPET_regs = (volatile uint8_t*) hpet_base;
 
     uint64_t cap = HPET_read64(HPET_GENERAL_CAP_REG);

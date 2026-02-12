@@ -23,6 +23,7 @@
 #define SMP_IPI_VECTOR_COUNTER      0xF3
 #define SMP_IPI_VECTOR_SCHED        0xF4
 #define SMP_IPI_VECTOR_TLB          0xF5
+#define SMP_IPI_VECTOR_TIMER_INIT   0xF6
 
 #ifndef ASM_FILE
 
@@ -46,6 +47,8 @@ typedef struct SMP_cpu_local
     uint64_t sched_kick_count;
     uint64_t tlb_ipi_count;
     uint64_t tlb_ack_generation;
+    uint32_t timer_start_count;
+    uint32_t timer_start_fail_count;
 
     uintptr_t kstack_top;
 } SMP_cpu_local_t;
@@ -85,6 +88,7 @@ uint32_t SMP_get_pong_count(uint8_t apic_id);
 bool SMP_send_ipi_to_others(uint8_t vector);
 bool SMP_tlb_shootdown_page(uintptr_t virt);
 bool SMP_tlb_shootdown_all(void);
+bool SMP_start_ap_timers(void);
 
 #endif
 #endif

@@ -120,5 +120,6 @@ bool APIC_send_ipi(uint8_t apic_id, uint8_t vector);
 bool APIC_startup_ap(uint8_t apic_id, uint8_t startup_vector);
 void APIC_send_EOI(void);
 bool APIC_timer_init_bsp(uint32_t hz);
+bool APIC_timer_init_ap(uint32_t hz);
 
 #endif

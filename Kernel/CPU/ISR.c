@@ -12,17 +12,18 @@
 
 IRQ_t IRQ_handlers[MAX_IRQ_ENTRIES];
 static IRQ_t ISR_vector_handlers[IDT_MAX_VECTORS] = { 0 };
-static bool pic_irq_seen_while_apic = false;
-static bool pic_quiet_reported = false;
-static bool ioapic_vector_seen[MAX_IRQ_ENTRIES] = { false };
-static volatile uint64_t irq_vector_count[MAX_IRQ_ENTRIES] = { 0 };
-static volatile uint64_t timer_ticks = 0;
-static volatile uint64_t pic_activity_count = 0;
-static volatile uint64_t irq_range_seen = 0;
-static volatile tick_source_t tick_source = TICK_SOURCE_PIT_IOAPIC;
-static volatile uint32_t tick_hz = 1000;
+static uint8_t pic_irq_seen_while_apic = 0;
+static uint8_t pic_quiet_reported = 0;
+static uint8_t ioapic_vector_seen[MAX_IRQ_ENTRIES] = { 0 };
+static uint64_t irq_vector_count[MAX_IRQ_ENTRIES] = { 0 };
+static uint64_t timer_ticks = 0;
+static uint64_t tick_cpu_hits[256] = { 0 };
+static uint64_t pic_activity_count = 0;
+static uint64_t irq_range_seen = 0;
+static tick_source_t tick_source = TICK_SOURCE_PIT_IOAPIC;
+static uint32_t tick_hz = 1000;
 
-#define TICK_LOG_PERIOD             100ULL
+#define TICK_LOG_PERIOD             500ULL
 #define PIC_CHECK_PERIOD            100ULL
 #define PIC_QUIET_REPORT_AFTER      500ULL
 
@@ -63,25 +64,25 @@ void ISR_register_vector(uint8_t vector, IRQ_t handler)
 
 void ISR_set_tick_source(tick_source_t source, uint32_t hz)
 {
-    tick_source = source;
+    __atomic_store_n(&tick_source, source, __ATOMIC_RELEASE);
 
     if (hz != 0)
-        tick_hz = hz;
+        __atomic_store_n(&tick_hz, hz, __ATOMIC_RELEASE);
 }
 
 tick_source_t ISR_get_tick_source(void)
 {
-    return (tick_source_t) tick_source;
+    return __atomic_load_n(&tick_source, __ATOMIC_ACQUIRE);
 }
 
 uint32_t ISR_get_tick_hz(void)
 {
-    return tick_hz;
+    return __atomic_load_n(&tick_hz, __ATOMIC_ACQUIRE);
 }
 
 uint64_t ISR_get_timer_ticks(void)
 {
-    return timer_ticks;
+    return __atomic_load_n(&timer_ticks, __ATOMIC_ACQUIRE);
 }
 
 uint64_t ISR_get_vector_count(uint8_t vector)
@@ -89,12 +90,12 @@ uint64_t ISR_get_vector_count(uint8_t vector)
     if (vector < IRQ_VECTOR_BASE || vector > IRQ_VECTOR_END)
         return 0;
 
-    return irq_vector_count[vector - IRQ_VECTOR_BASE];
+    return __atomic_load_n(&irq_vector_count[vector - IRQ_VECTOR_BASE], __ATOMIC_ACQUIRE);
 }
 
 uint64_t ISR_get_pic_activity_count(void)
 {
-    return pic_activity_count;
+    return __atomic_load_n(&pic_activity_count, __ATOMIC_ACQUIRE);
 }
 
 void ISR_handler(interrupt_frame_t* frame)
@@ -164,21 +165,25 @@ void IRQ_handler(interrupt_frame_t *frame)
     if (irq < 0 || irq >= MAX_IRQ_ENTRIES)
         return;
 
-    uint64_t vector_hits = ++irq_vector_count[irq];
-    ++irq_range_seen;
+    uint64_t vector_hits = __atomic_add_fetch(&irq_vector_count[irq], 1, __ATOMIC_RELAXED);
+    uint64_t range_hits = __atomic_add_fetch(&irq_range_seen, 1, __ATOMIC_RELAXED);
 
     if ((uint8_t) vector == TICK_VECTOR)
     {
-        timer_ticks = vector_hits;
+        uint32_t cpu_id = APIC_is_enabled() ? (uint32_t) APIC_get_current_lapic_id() : 0;
+        uint32_t cpu_slot = cpu_id & 0xFFU;
+        uint64_t cpu_ticks = __atomic_add_fetch(&tick_cpu_hits[cpu_slot], 1, __ATOMIC_RELAXED);
+        uint64_t total_ticks = __atomic_add_fetch(&timer_ticks, 1, __ATOMIC_RELAXED);
+        tick_source_t source = __atomic_load_n(&tick_source, __ATOMIC_RELAXED);
 
-        if ((vector_hits % TICK_LOG_PERIOD) == 0)
+        if ((cpu_ticks % TICK_LOG_PERIOD) == 0)
         {
-            uint32_t cpu_id = APIC_is_enabled() ? (uint32_t) APIC_get_current_lapic_id() : 0;
-            kdebug_printf("[TICK] src=%s vec=0x%X cpu=%u count=%llu\n",
-                          ISR_tick_source_name((tick_source_t) tick_source),
+            kdebug_printf("[TICK] src=%s vec=0x%X cpu=%u cpu_count=%llu total=%llu\n",
+                          ISR_tick_source_name(source),
                           (unsigned) vector,
-                          cpu_id,
-                          (unsigned long long) vector_hits);
+                          cpu_slot,
+                          (unsigned long long) cpu_ticks,
+                          (unsigned long long) total_ticks);
         }
     }
 
@@ -188,15 +193,15 @@ void IRQ_handler(interrupt_frame_t *frame)
 
     if (APIC_is_enabled())
     {
-        if ((uint8_t) vector != TICK_VECTOR && !ioapic_vector_seen[irq])
+        if ((uint8_t) vector != TICK_VECTOR &&
+            __atomic_exchange_n(&ioapic_vector_seen[irq], 1, __ATOMIC_ACQ_REL) == 0)
         {
-            ioapic_vector_seen[irq] = true;
             kdebug_printf("[IRQ] IOAPIC delivery confirmed vec=0x%X count=%llu\n",
                           (unsigned) vector,
                           (unsigned long long) vector_hits);
         }
 
-        if ((irq_range_seen % PIC_CHECK_PERIOD) == 0)
+        if ((range_hits % PIC_CHECK_PERIOD) == 0)
         {
             uint16_t pic_isr = PIC_get_ISR();
             uint16_t pic_irr = PIC_get_IRR();
@@ -204,26 +209,27 @@ void IRQ_handler(interrupt_frame_t *frame)
             uint16_t pic_unmasked_irr = pic_irr & (uint16_t) ~pic_mask;
             if ((pic_isr | pic_unmasked_irr) != 0)
             {
-                ++pic_activity_count;
-                if (!pic_irq_seen_while_apic)
+                __atomic_fetch_add(&pic_activity_count, 1, __ATOMIC_RELAXED);
+                if (__atomic_exchange_n(&pic_irq_seen_while_apic, 1, __ATOMIC_ACQ_REL) == 0)
                 {
-                    pic_irq_seen_while_apic = true;
                     kdebug_printf("[IRQ] WARNING: PIC active while APIC enabled (ISR=0x%X IRR=0x%X IMR=0x%X vec=0x%X)\n",
                                   pic_isr, pic_irr, pic_mask, (unsigned) vector);
                 }
             }
         }
 
-        if (!pic_quiet_reported && irq_range_seen >= PIC_QUIET_REPORT_AFTER)
+        if (__atomic_load_n(&pic_quiet_reported, __ATOMIC_ACQUIRE) == 0 &&
+            range_hits >= PIC_QUIET_REPORT_AFTER &&
+            __atomic_exchange_n(&pic_quiet_reported, 1, __ATOMIC_ACQ_REL) == 0)
         {
-            pic_quiet_reported = true;
-            if (pic_activity_count == 0)
+            uint64_t pic_hits = __atomic_load_n(&pic_activity_count, __ATOMIC_RELAXED);
+            if (pic_hits == 0)
                 kdebug_printf("[IRQ] anti-PIC check: no PIC activity after %llu IRQ-range vectors\n",
-                              (unsigned long long) irq_range_seen);
+                              (unsigned long long) range_hits);
             else
                 kdebug_printf("[IRQ] anti-PIC check: PIC activity seen %llu times after %llu IRQ-range vectors\n",
-                              (unsigned long long) pic_activity_count,
-                              (unsigned long long) irq_range_seen);
+                              (unsigned long long) pic_hits,
+                              (unsigned long long) range_hits);
         }
 
         // Vector 0x20 acknowledges LAPIC EOI in the active tick callback (PIT during calibration or LAPIC timer).

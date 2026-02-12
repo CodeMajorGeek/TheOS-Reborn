@@ -51,14 +51,14 @@
 # Stack layout at call time (from top to bottom):
 #   [RSP+0]   = R15 (last pushed by PUSH_REGS)
 #   ...
-#   [RSP+120] = RAX (first pushed by PUSH_REGS)
-#   [RSP+128] = int_no (pushed by stub)
-#   [RSP+136] = err_code (pushed by stub, always 0 for IRQ)
-#   [RSP+144] = RIP (pushed by CPU)
-#   [RSP+152] = CS (pushed by CPU)
-#   [RSP+160] = RFLAGS (pushed by CPU)
-#   [RSP+168] = RSP (pushed by CPU if user mode)
-#   [RSP+176] = SS (pushed by CPU if user mode)
+#   [RSP+112] = RAX (first pushed by PUSH_REGS)
+#   [RSP+120] = int_no (pushed by stub)
+#   [RSP+128] = err_code (pushed by stub, always 0 for IRQ)
+#   [RSP+136] = RIP (pushed by CPU)
+#   [RSP+144] = CS (pushed by CPU)
+#   [RSP+152] = RFLAGS (pushed by CPU)
+#   [RSP+160] = RSP (pushed by CPU if user mode)
+#   [RSP+168] = SS (pushed by CPU if user mode)
 # ------------------------------------------------
 irq_common_stub:
     cli
@@ -70,36 +70,27 @@ irq_common_stub:
     movq %rsp, %rdi
     call IRQ_handler
 
+    # Validate/fix user SS while registers are still saved.
+    # Current stack (top): regs + int_no + err_code + CPU frame.
+    # CS is at +144, SS (if CPL3 return) is at +168.
+    movq 144(%rsp), %rax
+    andq $0x3, %rax
+    cmpw $0x3, %ax
+    jne .irq_restore_regs
+
+    movq 168(%rsp), %rax
+    test %rax, %rax
+    jz .fix_ss_irq
+    cmpw $0x1B, %ax
+    je .irq_restore_regs
+
+.fix_ss_irq:
+    movq $0x1B, 168(%rsp)
+
+.irq_restore_regs:
     POP_REGS
 
     addq $16, %rsp  # Remove int_no and err_code
-    # Now stack has: RIP, CS, RFLAGS, (RSP, SS if user mode)
-    # Check CS RPL to determine if we need to fix SS before iretq
-    movq 8(%rsp), %rax       # Load CS from stack
-    andq $0x3, %rax          # Extract RPL
-    cmpw $0x3, %ax           # RPL = 3 (user mode)?
-    jne .iretq_kernel_irq    # No, kernel mode, skip SS check
-    
-    # Returning to user mode: verify SS is valid
-    # Stack frame: [RSP+0] = RIP, [RSP+8] = CS, [RSP+16] = RFLAGS, [RSP+24] = RSP, [RSP+32] = SS
-    movq 32(%rsp), %rax      # Load SS from stack
-    test %rax, %rax          # SS is NULL?
-    jz .fix_ss_irq           # Yes, fix it
-    cmpw $0x1B, %ax          # SS = USER_DATA_SEGMENT_RPL3 (0x1B)?
-    je .iretq_user_irq       # Yes, correct
-    
-.fix_ss_irq:
-    # Fix SS on stack to USER_DATA_SEGMENT_RPL3
-    movq $0x1B, 32(%rsp)     # SS = USER_DATA_SEGMENT_RPL3
-    
-.iretq_user_irq:
-    # User mode: RIP, CS, RFLAGS, RSP, SS on stack
-    # iretq will read all 5 values
-    iretq
-    
-.iretq_kernel_irq:
-    # Kernel mode: only RIP, CS, RFLAGS on stack
-    # iretq will not read RSP/SS
     iretq
 
 # ------------------------------------------------
@@ -107,14 +98,14 @@ irq_common_stub:
 # Stack layout at call time (from top to bottom):
 #   [RSP+0]   = R15 (last pushed by PUSH_REGS)
 #   ...
-#   [RSP+120] = RAX (first pushed by PUSH_REGS)
-#   [RSP+128] = int_no (pushed by stub)
-#   [RSP+136] = err_code (pushed by CPU for isr_err_stub, or by stub for isr_no_err_stub)
-#   [RSP+144] = RIP (pushed by CPU)
-#   [RSP+152] = CS (pushed by CPU)
-#   [RSP+160] = RFLAGS (pushed by CPU)
-#   [RSP+168] = RSP (pushed by CPU if user mode)
-#   [RSP+176] = SS (pushed by CPU if user mode)
+#   [RSP+112] = RAX (first pushed by PUSH_REGS)
+#   [RSP+120] = int_no (pushed by stub)
+#   [RSP+128] = err_code (pushed by CPU for isr_err_stub, or by stub for isr_no_err_stub)
+#   [RSP+136] = RIP (pushed by CPU)
+#   [RSP+144] = CS (pushed by CPU)
+#   [RSP+152] = RFLAGS (pushed by CPU)
+#   [RSP+160] = RSP (pushed by CPU if user mode)
+#   [RSP+168] = SS (pushed by CPU if user mode)
 # ------------------------------------------------
 isr_common_stub:
     cli
@@ -126,36 +117,27 @@ isr_common_stub:
     movq %rsp, %rdi
     call ISR_handler
 
+    # Validate/fix user SS while registers are still saved.
+    # Current stack (top): regs + int_no + err_code + CPU frame.
+    # CS is at +144, SS (if CPL3 return) is at +168.
+    movq 144(%rsp), %rax
+    andq $0x3, %rax
+    cmpw $0x3, %ax
+    jne .isr_restore_regs
+
+    movq 168(%rsp), %rax
+    test %rax, %rax
+    jz .fix_ss_isr
+    cmpw $0x1B, %ax
+    je .isr_restore_regs
+
+.fix_ss_isr:
+    movq $0x1B, 168(%rsp)
+
+.isr_restore_regs:
     POP_REGS
 
     addq $16, %rsp  # Remove int_no and err_code
-    # Now stack has: RIP, CS, RFLAGS, (RSP, SS if user mode)
-    # Check CS RPL to determine if we need to fix SS before iretq
-    movq 8(%rsp), %rax       # Load CS from stack
-    andq $0x3, %rax          # Extract RPL
-    cmpw $0x3, %ax           # RPL = 3 (user mode)?
-    jne .iretq_kernel_isr    # No, kernel mode, skip SS check
-    
-    # Returning to user mode: verify SS is valid
-    # Stack frame: [RSP+0] = RIP, [RSP+8] = CS, [RSP+16] = RFLAGS, [RSP+24] = RSP, [RSP+32] = SS
-    movq 32(%rsp), %rax      # Load SS from stack
-    test %rax, %rax          # SS is NULL?
-    jz .fix_ss_isr           # Yes, fix it
-    cmpw $0x1B, %ax          # SS = USER_DATA_SEGMENT_RPL3 (0x1B)?
-    je .iretq_user_isr       # Yes, correct
-    
-.fix_ss_isr:
-    # Fix SS on stack to USER_DATA_SEGMENT_RPL3
-    movq $0x1B, 32(%rsp)     # SS = USER_DATA_SEGMENT_RPL3
-    
-.iretq_user_isr:
-    # User mode: RIP, CS, RFLAGS, RSP, SS on stack
-    # iretq will read all 5 values
-    iretq
-    
-.iretq_kernel_isr:
-    # Kernel mode: only RIP, CS, RFLAGS on stack
-    # iretq will not read RSP/SS
     iretq
 
 # ------------------------------------------------

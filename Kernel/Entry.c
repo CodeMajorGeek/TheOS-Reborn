@@ -177,6 +177,13 @@ __attribute__((__noreturn__)) void k_entry(const void* mbt2_info)
         if (APIC_timer_init_bsp(BSP_TIMER_HZ))
         {
             ISR_set_tick_source(TICK_SOURCE_LAPIC_TIMER, BSP_TIMER_HZ);
+            if (SMP_get_online_cpu_count() > 1)
+            {
+                if (SMP_start_ap_timers())
+                    kdebug_puts("[BOOT] LAPIC timer AP active on all online CPUs\n");
+                else
+                    kdebug_puts("[BOOT] LAPIC timer AP activation incomplete\n");
+            }
             if (hpet_ready)
                 kdebug_puts("[BOOT] LAPIC timer BSP active, HPET calibrated\n");
             else
