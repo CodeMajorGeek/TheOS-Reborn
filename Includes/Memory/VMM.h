@@ -31,7 +31,6 @@
 #define P2V(a)              ((uintptr_t) (a) + VMM_HHDM_BASE)
 
 #define VMM_MMIO_VIRT(phys) (VMM_MMIO_BASE + (uintptr_t) (phys))
-#define VMM_VGA_VIRT_BASE   (VMM_MMIO_BASE + 0x00000000000B8000ULL)
 #define VMM_AHCI_VIRT_BASE  (VMM_MMIO_BASE + 0x0000000000100000ULL)
 
 typedef struct PML4

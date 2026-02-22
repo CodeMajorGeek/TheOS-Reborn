@@ -46,6 +46,36 @@ extern void* kernel_stack_bottom;
 static APIC_MADT_t* MADT = NULL;
 static const uint32_t BSP_TIMER_HZ = 100;
 static const uint32_t PIT_TIMER_HZ = 1000;
+static TTY_framebuffer_info_t boot_framebuffer = { 0 };
+static bool boot_framebuffer_available = false;
+static bool boot_font_preloaded = false;
+
+#define THEOS_PSF2_FONT_PATH "/system/fonts/ter-powerline-v14n.psf"
+
+#ifdef THEOS_EARLY_PSF2_EMBEDDED
+extern const uint8_t _binary_builtin_console_psf_start[];
+extern const uint8_t _binary_builtin_console_psf_end[];
+#endif
+
+static void boot_load_early_psf2(void)
+{
+#ifdef THEOS_EARLY_PSF2_EMBEDDED
+    size_t font_size = (size_t) (_binary_builtin_console_psf_end - _binary_builtin_console_psf_start);
+    if (font_size == 0)
+        return;
+
+    if (TTY_load_psf2(_binary_builtin_console_psf_start, font_size))
+    {
+        boot_font_preloaded = true;
+        kdebug_printf("[TTY] early embedded PSF2 loaded (%llu bytes)\n",
+                      (unsigned long long) font_size);
+    }
+    else
+    {
+        kdebug_puts("[TTY] early embedded PSF2 load failed\n");
+    }
+#endif
+}
 
 uintptr_t ROOT_DEV = 1;
 
@@ -69,6 +99,7 @@ __attribute__((__noreturn__)) void k_entry(const void* mbt2_info)
     
     read_multiboot2_info(mbt2_info);
     kdebug_puts("[BOOT] multiboot parsed\n");
+    boot_load_early_psf2();
 
     VMM_map_kernel();
     kdebug_puts("[BOOT] VMM kernel map done\n");
@@ -82,6 +113,18 @@ __attribute__((__noreturn__)) void k_entry(const void* mbt2_info)
     kdebug_puts("[BOOT] CR3 loaded\n");
     GDT_load_kernel_segments();
     kdebug_puts("[BOOT] GDT reloaded\n");
+
+    if (boot_framebuffer_available)
+    {
+        if (TTY_init_framebuffer(&boot_framebuffer))
+            kdebug_puts("[BOOT] framebuffer init done\n");
+        else
+            kdebug_puts("[BOOT] framebuffer init failed\n");
+    }
+    else
+    {
+        kdebug_puts("[BOOT] framebuffer unavailable\n");
+    }
 
     IDT_init();
     kdebug_puts("[BOOT] IDT loaded\n");
@@ -128,28 +171,31 @@ __attribute__((__noreturn__)) void k_entry(const void* mbt2_info)
         if (ext4_mount(&fs, root_port))
         {
             ext4_set_active(&fs);
-            if (!ext4_list_root(&fs))
-                printf("Unable to list ext4 root directory\n");
+            kdebug_puts("[BOOT] ext4 mounted\n");
 
-            const char* msg = "Hello from ext4!\n";
-            if (ext4_create_file(&fs, "hello.txt", (const uint8_t*) msg, strlen(msg)))
-                printf("hello.txt created !\n");
-            else
-                printf("Unable to create hello.txt\n");
-
-            if (!ext4_list_root(&fs))
-                printf("Unable to list ext4 root directory\n");
-
-            uint8_t* data = NULL;
-            size_t size = 0;
-            if (ext4_read_file(&fs, "test.txt", &data, &size))
+            if (!boot_font_preloaded)
             {
-                printf("cat test.txt:\n%s\n", data);
-                kfree(data);
+                uint8_t* font_data = NULL;
+                size_t font_size = 0;
+                const char* font_path = THEOS_PSF2_FONT_PATH;
+                if (ext4_read_file(&fs, font_path, &font_data, &font_size))
+                {
+                    if (TTY_load_psf2(font_data, font_size))
+                        kdebug_printf("[TTY] loaded PSF2 from %s (%llu bytes)\n",
+                                      font_path,
+                                      (unsigned long long) font_size);
+                    else
+                        kdebug_printf("[TTY] invalid PSF2 file at %s\n", font_path);
+                    kfree(font_data);
+                }
+                else
+                {
+                    kdebug_printf("[TTY] no PSF2 font found at %s\n", font_path);
+                }
             }
             else
             {
-                printf("Unable to read hello.txt\n");
+                kdebug_puts("[TTY] using early embedded PSF2 (disk font load skipped)\n");
             }
         }
         else
@@ -302,6 +348,54 @@ void read_multiboot2_info(const void* mbt2_info)
                 if (ACPI_RSDP_new_check(new_acpi->rsdp))
                     ACPI_init_XSDT((ACPI_RSDP_descriptor20_t*) new_acpi->rsdp);
                 break;
+            case MULTIBOOT_TAG_TYPE_FRAMEBUFFER:
+            {
+                struct multiboot_tag_framebuffer* fb = (struct multiboot_tag_framebuffer*) tag;
+                struct multiboot_tag_framebuffer_common* common = &fb->common;
+                boot_framebuffer_available = false;
+
+                if (common->framebuffer_type == MULTIBOOT_FRAMEBUFFER_TYPE_RGB &&
+                    common->framebuffer_width != 0 &&
+                    common->framebuffer_height != 0 &&
+                    common->framebuffer_pitch != 0)
+                {
+                    boot_framebuffer.phys_addr = common->framebuffer_addr;
+                    boot_framebuffer.pitch = common->framebuffer_pitch;
+                    boot_framebuffer.width = common->framebuffer_width;
+                    boot_framebuffer.height = common->framebuffer_height;
+                    boot_framebuffer.bpp = common->framebuffer_bpp;
+                    boot_framebuffer.type = common->framebuffer_type;
+                    boot_framebuffer.red_field_position = fb->framebuffer_red_field_position;
+                    boot_framebuffer.red_mask_size = fb->framebuffer_red_mask_size;
+                    boot_framebuffer.green_field_position = fb->framebuffer_green_field_position;
+                    boot_framebuffer.green_mask_size = fb->framebuffer_green_mask_size;
+                    boot_framebuffer.blue_field_position = fb->framebuffer_blue_field_position;
+                    boot_framebuffer.blue_mask_size = fb->framebuffer_blue_mask_size;
+                    boot_framebuffer_available = true;
+
+                    kdebug_printf("[BOOT] MB2 framebuffer addr=0x%llX %ux%u pitch=%u bpp=%u rgb=(r%u:%u g%u:%u b%u:%u)\n",
+                                  (unsigned long long) boot_framebuffer.phys_addr,
+                                  (unsigned int) boot_framebuffer.width,
+                                  (unsigned int) boot_framebuffer.height,
+                                  (unsigned int) boot_framebuffer.pitch,
+                                  (unsigned int) boot_framebuffer.bpp,
+                                  (unsigned int) boot_framebuffer.red_field_position,
+                                  (unsigned int) boot_framebuffer.red_mask_size,
+                                  (unsigned int) boot_framebuffer.green_field_position,
+                                  (unsigned int) boot_framebuffer.green_mask_size,
+                                  (unsigned int) boot_framebuffer.blue_field_position,
+                                  (unsigned int) boot_framebuffer.blue_mask_size);
+                }
+                else
+                {
+                    kdebug_printf("[BOOT] MB2 framebuffer ignored type=%u width=%u height=%u pitch=%u\n",
+                                  (unsigned int) common->framebuffer_type,
+                                  (unsigned int) common->framebuffer_width,
+                                  (unsigned int) common->framebuffer_height,
+                                  (unsigned int) common->framebuffer_pitch);
+                }
+                break;
+            }
         }
     }
 }

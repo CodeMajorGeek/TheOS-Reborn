@@ -7,6 +7,7 @@ set -euo pipefail
 
 [ -z "${THEOS_BASE_FOLDER:-}" ] && THEOS_BASE_FOLDER="../Base"
 [ -z "${THEOS_USERLAND_APP:-}" ] && THEOS_USERLAND_APP="Userland/Apps/TheApp/TheApp"
+[ -z "${THEOS_PSF2_FONT:-}" ] && THEOS_PSF2_FONT=""
 
 if [ ! -f "$THEOS_USERLAND_APP" ] && [ -f "Build/Userland/Apps/TheApp/TheApp" ]; then
 	THEOS_USERLAND_APP="Build/Userland/Apps/TheApp/TheApp"
@@ -28,12 +29,20 @@ if [ -d "$THEOS_BASE_FOLDER" ]; then
 	sudo cp -r "$THEOS_BASE_FOLDER"/* tmp/
 fi
 sudo mkdir -p tmp/bin
+sudo mkdir -p tmp/system/fonts
 
 if [ -f "$THEOS_USERLAND_APP" ]; then
 	echo "[disk] install TheApp -> /bin/TheApp from '$THEOS_USERLAND_APP'"
 	sudo cp "$THEOS_USERLAND_APP" tmp/bin/TheApp
 else
 	echo "[disk] warning: TheApp binary not found at '$THEOS_USERLAND_APP'"
+fi
+
+if [ -n "$THEOS_PSF2_FONT" ] && [ -f "$THEOS_PSF2_FONT" ]; then
+	echo "[disk] install PSF2 font -> /system/fonts/console.psf from '$THEOS_PSF2_FONT'"
+	sudo cp "$THEOS_PSF2_FONT" tmp/system/fonts/console.psf
+else
+	echo "[disk] PSF2 font path not provided (set THEOS_PSF2_FONT to install /system/fonts/console.psf)"
 fi
 
 echo "[disk] sync and unmount image"

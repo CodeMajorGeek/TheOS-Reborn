@@ -1,8 +1,6 @@
 #include <Memory/VMM.h>
 
 #include <Memory/PMM.h>
-#include <Device/VGA.h>
-#include <Device/TTY.h>
 #include <CPU/SMP.h>
 #include <Debug/KDebug.h>
 
@@ -22,7 +20,6 @@ _Static_assert(VMM_MMIO_BASE < VMM_KERNEL_VIRT_BASE,
 static PML4_t* VMM_PML4 = NULL;
 static uintptr_t VMM_PML4_phys = 0;
 
-static uintptr_t VMM_VGA_virt = 0;
 static uintptr_t VMM_AHCI_virt = 0;
 
 static bool VMM_recursive_active = FALSE;
@@ -334,14 +331,12 @@ void VMM_map_kernel(void)
 
     VMM_map_startup_identity();
 
-    VMM_VGA_virt = VMM_VGA_VIRT_BASE;
     VMM_AHCI_virt = VMM_AHCI_VIRT_BASE;
 }
 
 void VMM_hardware_mapping(void)
 {
-    VMM_map_mmio_uc_pages(VMM_VGA_virt, VGA_BUFFER_ADDRESS, VGA_BUFFER_LENGTH);
-    TTY_set_buffer((uint16_t*) VMM_VGA_virt);
+    // Device drivers map MMIO explicitly in the MMIO window.
 }
 
 void VMM_drop_startup_identity_map(void)
