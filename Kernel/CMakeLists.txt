@@ -1,35 +1,21 @@
 set(KERNEL_ARCH x86_64)
 option(THEOS_ENABLE_KDEBUG "Enable serial KDEBUG output and printf mirroring" ON)
+option(KERNEL_DEBUG_LOG_SERIAL "Enable kernel debug log sink to serial COM1" ON)
+option(KERNEL_DEBUG_LOG_FILE "Enable kernel debug log sink to ext4 file (RAM buffered until FS ready)" ON)
 option(THEOS_ENABLE_SCHED_TESTS "Enable SMP scheduler stress/balance/pathological tests" OFF)
-set(THEOS_EARLY_PSF2_FONT "${CMAKE_SOURCE_DIR}/Base/system/fonts/ter-powerline-v14n.psf" CACHE FILEPATH "PSF2 font embedded in kernel for early framebuffer console")
+option(THEOS_ENABLE_X2APIC_SMP_EXPERIMENTAL "Force x2APIC on SMP systems (experimental)." OFF)
+
+
+
 message(STATUS "Kernel: THEOS_ENABLE_KDEBUG=${THEOS_ENABLE_KDEBUG}")
+message(STATUS "Kernel: KERNEL_DEBUG_LOG_SERIAL=${KERNEL_DEBUG_LOG_SERIAL}")
+message(STATUS "Kernel: KERNEL_DEBUG_LOG_FILE=${KERNEL_DEBUG_LOG_FILE}")
 message(STATUS "Kernel: THEOS_ENABLE_SCHED_TESTS=${THEOS_ENABLE_SCHED_TESTS}")
-message(STATUS "Kernel: THEOS_EARLY_PSF2_FONT=${THEOS_EARLY_PSF2_FONT}")
+message(STATUS "Kernel: THEOS_ENABLE_X2APIC_SMP_EXPERIMENTAL=${THEOS_ENABLE_X2APIC_SMP_EXPERIMENTAL}")
 
 set(KERNEL_BOOT_SOURCES
     Boot/Bootloader.S
 )
-
-if(EXISTS "${THEOS_EARLY_PSF2_FONT}")
-    set(KERNEL_EARLY_FONT_BIN ${CMAKE_CURRENT_BINARY_DIR}/builtin_console.psf)
-    set(KERNEL_EARLY_FONT_OBJ ${CMAKE_CURRENT_BINARY_DIR}/builtin_console_psf.o)
-
-    add_custom_command(
-        OUTPUT ${KERNEL_EARLY_FONT_OBJ}
-        COMMAND ${CMAKE_COMMAND} -E copy "${THEOS_EARLY_PSF2_FONT}" "${KERNEL_EARLY_FONT_BIN}"
-        COMMAND ${CMAKE_COMMAND} -E chdir ${CMAKE_CURRENT_BINARY_DIR}
-                ${CMAKE_LINKER} -r -b binary -o builtin_console_psf.o builtin_console.psf
-        DEPENDS "${THEOS_EARLY_PSF2_FONT}"
-        COMMENT "Embedding early PSF2 font into kernel"
-        VERBATIM
-    )
-
-    set_source_files_properties(${KERNEL_EARLY_FONT_OBJ} PROPERTIES GENERATED TRUE EXTERNAL_OBJECT TRUE)
-    list(APPEND KERNEL_BOOT_SOURCES ${KERNEL_EARLY_FONT_OBJ})
-    add_compile_definitions(THEOS_EARLY_PSF2_EMBEDDED=1)
-else()
-    message(WARNING "Kernel: early PSF2 font file not found: ${THEOS_EARLY_PSF2_FONT}")
-endif()
 
 set(KERNEL_CPU_SOURCES
     CPU/IDT.c
@@ -61,6 +47,8 @@ set(KERNEL_DEBUG_SOURCES
 set(KERNEL_DEVICES_SOURCES
     Device/COM.c
     Device/TTY.c
+    Device/TTYVGA.c
+    Device/TTYFramebuffer.c
     Device/PIC.c
     Device/HPET.c
     Device/PIT.c
@@ -121,10 +109,25 @@ add_compile_definitions(__USE_QEMU)
 if(THEOS_ENABLE_KDEBUG)
     add_compile_definitions(THEOS_ENABLE_KDEBUG)
 endif()
+if(KERNEL_DEBUG_LOG_SERIAL)
+    add_compile_definitions(THEOS_KDEBUG_LOG_SERIAL=1)
+else()
+    add_compile_definitions(THEOS_KDEBUG_LOG_SERIAL=0)
+endif()
+if(KERNEL_DEBUG_LOG_FILE)
+    add_compile_definitions(THEOS_KDEBUG_LOG_FILE=1)
+else()
+    add_compile_definitions(THEOS_KDEBUG_LOG_FILE=0)
+endif()
 if(THEOS_ENABLE_SCHED_TESTS)
     add_compile_definitions(THEOS_ENABLE_SCHED_TESTS=1)
 else()
     add_compile_definitions(THEOS_ENABLE_SCHED_TESTS=0)
+endif()
+if(THEOS_ENABLE_X2APIC_SMP_EXPERIMENTAL)
+    add_compile_definitions(THEOS_ENABLE_X2APIC_SMP_EXPERIMENTAL=1)
+else()
+    add_compile_definitions(THEOS_ENABLE_X2APIC_SMP_EXPERIMENTAL=0)
 endif()
 
 add_executable(Kernel ${SOURCES})

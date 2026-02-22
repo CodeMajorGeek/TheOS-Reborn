@@ -46,5 +46,6 @@ void TTY_puts(const char* str);
 
 void TTY_enable_cursor(bool enabled);
 void TTY_update_cursor(uint8_t x, uint8_t y);
+void TTY_on_timer_tick(void);
 
 #endif

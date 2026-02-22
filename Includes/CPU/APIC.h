@@ -115,6 +115,7 @@ uint32_t APIC_IO_read(uint8_t index, uint32_t reg);
 void APIC_IO_write(uint8_t index, uint32_t reg, uint32_t value);
 
 bool APIC_is_enabled(void);
+bool APIC_is_x2apic_enabled(void);
 uint8_t APIC_get_current_lapic_id(void);
 uint8_t APIC_get_bsp_lapic_id(void);
 uint8_t APIC_get_core_count(void);

@@ -1,6 +1,9 @@
 #include <Memory/VMM.h>
 
 #include <Memory/PMM.h>
+#include <Device/VGA.h>
+#include <Device/TTY.h>
+#include <CPU/MSR.h>
 #include <CPU/SMP.h>
 #include <Debug/KDebug.h>
 
@@ -20,11 +23,14 @@ _Static_assert(VMM_MMIO_BASE < VMM_KERNEL_VIRT_BASE,
 static PML4_t* VMM_PML4 = NULL;
 static uintptr_t VMM_PML4_phys = 0;
 
+static uintptr_t VMM_VGA_virt = 0;
 static uintptr_t VMM_AHCI_virt = 0;
 
 static bool VMM_recursive_active = FALSE;
 static bool VMM_cr3_loaded = FALSE;
 static bool VMM_startup_identity_map_active = false;
+static bool VMM_nx_checked = false;
+static bool VMM_nx_supported = false;
 
 #define VMM_STARTUP_IDENTITY_LOW_LIMIT 0x100000ULL
 
@@ -32,6 +38,62 @@ static uintptr_t canonical_address(uintptr_t addr)
 {
     return (uintptr_t) ((int64_t) (addr << 16) >> 16);
 }
+
+static inline void VMM_cpuid_leaf(uint32_t leaf, uint32_t* eax, uint32_t* edx)
+{
+    uint32_t out_eax = 0;
+    uint32_t out_edx = 0;
+    __asm__ __volatile__("cpuid"
+                         : "=a"(out_eax), "=d"(out_edx)
+                         : "a"(leaf)
+                         : "ebx", "ecx");
+    if (eax)
+        *eax = out_eax;
+    if (edx)
+        *edx = out_edx;
+}
+
+static bool VMM_is_nx_supported(void)
+{
+    if (VMM_nx_checked)
+        return VMM_nx_supported;
+
+    uint32_t max_ext_leaf = 0;
+    VMM_cpuid_leaf(0x80000000U, &max_ext_leaf, NULL);
+    if (max_ext_leaf >= 0x80000001U)
+    {
+        uint32_t ext_features_edx = 0;
+        VMM_cpuid_leaf(0x80000001U, NULL, &ext_features_edx);
+        VMM_nx_supported = (ext_features_edx & (1U << 20)) != 0;
+    }
+    else
+    {
+        VMM_nx_supported = false;
+    }
+
+    VMM_nx_checked = true;
+    if (VMM_nx_supported)
+        kdebug_puts("[VMM] NX supported\n");
+    else
+        kdebug_puts("[VMM] NX unsupported (PROT_EXEC enforcement unavailable)\n");
+
+    return VMM_nx_supported;
+}
+
+void VMM_enable_nx_current_cpu(void)
+{
+    if (!VMM_is_nx_supported())
+        return;
+
+    uint64_t efer = MSR_get(IA32_EFER);
+    if ((efer & IA32_EFER_NXE) != 0)
+        return;
+
+    MSR_set(IA32_EFER, efer | IA32_EFER_NXE);
+}
+
+static uintptr_t VMM_hhdm_to_phys(uintptr_t virt);
+static uintptr_t VMM_phys_to_hhdm(uintptr_t phys);
 
 static bool VMM_is_mmio_window_addr(uintptr_t virt)
 {
@@ -59,10 +121,21 @@ static uintptr_t VMM_recursive_base(void)
     return canonical_address(addr);
 }
 
+static inline uintptr_t VMM_read_cr3_phys(void)
+{
+    uintptr_t cr3 = 0;
+    __asm__ __volatile__("mov %%cr3, %0" : "=r"(cr3));
+    return cr3 & FRAME;
+}
+
 static PML4_t* VMM_get_pml4(void)
 {
     if (VMM_recursive_active)
         return (PML4_t*) VMM_recursive_base();
+
+    if (VMM_cr3_loaded)
+        return (PML4_t*) VMM_phys_to_hhdm(VMM_read_cr3_phys());
+
     return VMM_PML4;
 }
 
@@ -213,7 +286,7 @@ static void VMM_map_startup_identity(void)
                   (unsigned long long) total_pages);
 }
 
-static bool VMM_unmap_page_local(uintptr_t virt)
+static bool VMM_unmap_page_local(uintptr_t virt, uintptr_t* old_phys_out)
 {
     uint16_t pml4_index = PML4_INDEX(virt);
     uint16_t pdpt_index = PDPT_INDEX(virt);
@@ -240,6 +313,8 @@ static bool VMM_unmap_page_local(uintptr_t virt)
     if (!is_present(&entry))
         return false;
 
+    if (old_phys_out)
+        *old_phys_out = get_address(&entry);
     PT->entries[pt_index] = 0;
     return true;
 }
@@ -258,7 +333,7 @@ static uint64_t VMM_unmap_startup_identity_range(uintptr_t start, uintptr_t end)
     uint64_t unmapped = 0;
     while (page < limit)
     {
-        if (VMM_unmap_page_local(page))
+        if (VMM_unmap_page_local(page, NULL))
             unmapped++;
         page += PHYS_PAGE_SIZE;
     }
@@ -269,6 +344,11 @@ static uint64_t VMM_unmap_startup_identity_range(uintptr_t start, uintptr_t end)
 uintptr_t VMM_get_AHCI_virt(void)
 {
     return VMM_AHCI_virt;
+}
+
+uintptr_t VMM_get_kernel_cr3_phys(void)
+{
+    return VMM_PML4_phys;
 }
 
 void VMM_map_kernel(void)
@@ -331,12 +411,14 @@ void VMM_map_kernel(void)
 
     VMM_map_startup_identity();
 
+    VMM_VGA_virt = VMM_VGA_VIRT_BASE;
     VMM_AHCI_virt = VMM_AHCI_VIRT_BASE;
 }
 
 void VMM_hardware_mapping(void)
 {
-    // Device drivers map MMIO explicitly in the MMIO window.
+    VMM_map_mmio_uc_pages(VMM_VGA_virt, VGA_BUFFER_ADDRESS, VGA_BUFFER_LENGTH);
+    TTY_set_buffer((uint16_t*) VMM_VGA_virt);
 }
 
 void VMM_drop_startup_identity_map(void)
@@ -387,12 +469,25 @@ void VMM_map_page_flags(uintptr_t virt, uintptr_t phys, uintptr_t flags)
     PDT_t* PDT;
     PT_t* PT;
     bool is_user_mapping = (flags & USER_MODE) != 0;
+    bool no_execute = (flags & NO_EXECUTE) != 0;
     if (is_user_mapping && virt >= VMM_KERNEL_SPACE_MIN)
         panic("VMM: user mapping requested in kernel higher-half");
 
     uintptr_t cache_flags = flags & (WRITE_THROUGH | CACHE_DISABLE);
     uintptr_t table_flags = PRESENT | WRITABLE;
     uintptr_t page_flags = PRESENT | WRITABLE | cache_flags;
+    if (no_execute)
+    {
+        if (VMM_is_nx_supported())
+        {
+            VMM_enable_nx_current_cpu();
+            page_flags |= NO_EXECUTE;
+        }
+        else
+        {
+            // Keep mapping executable on CPUs without NX support.
+        }
+    }
     if (is_user_mapping)
     {
         table_flags |= USER_MODE;
@@ -519,7 +614,7 @@ void VMM_map_mmio_uc_page(uintptr_t virt, uintptr_t phys)
     if (!VMM_is_mmio_window_range(virt, PHYS_PAGE_SIZE))
         panic("VMM: MMIO page mapping outside MMIO window");
 
-    VMM_map_page_flags(virt, phys, WRITE_THROUGH | CACHE_DISABLE);
+    VMM_map_page_flags(virt, phys, WRITE_THROUGH | CACHE_DISABLE | NO_EXECUTE);
 }
 
 void VMM_map_mmio_uc_pages(uintptr_t virt, uintptr_t phys, size_t len)
@@ -527,7 +622,78 @@ void VMM_map_mmio_uc_pages(uintptr_t virt, uintptr_t phys, size_t len)
     if (!VMM_is_mmio_window_range(virt, len))
         panic("VMM: MMIO range mapping outside MMIO window");
 
-    VMM_map_pages_flags(virt, phys, len, WRITE_THROUGH | CACHE_DISABLE);
+    VMM_map_pages_flags(virt, phys, len, WRITE_THROUGH | CACHE_DISABLE | NO_EXECUTE);
+}
+
+bool VMM_unmap_page(uintptr_t virt, uintptr_t* old_phys_out)
+{
+    uintptr_t page = virt & FRAME;
+    if (!VMM_unmap_page_local(page, old_phys_out))
+        return FALSE;
+
+    if (VMM_cr3_loaded)
+    {
+        VMM_invlpg(page);
+        if (VMM_interrupts_enabled())
+            (void) SMP_tlb_shootdown_page(page);
+    }
+
+    return TRUE;
+}
+
+bool VMM_update_page_flags(uintptr_t virt, uintptr_t set_bits, uintptr_t clear_bits)
+{
+    uint16_t pml4_index = PML4_INDEX(virt);
+    uint16_t pdpt_index = PDPT_INDEX(virt);
+    uint16_t pdt_index = PDT_INDEX(virt);
+    uint16_t pt_index = PT_INDEX(virt);
+
+    PML4_t* PML4 = VMM_get_pml4();
+    uintptr_t pml4_entry = PML4->entries[pml4_index];
+    if (!is_present(&pml4_entry))
+        return FALSE;
+
+    PDPT_t* PDPT = VMM_recursive_active ? VMM_get_pdpt(pml4_index) : (PDPT_t*) VMM_phys_to_hhdm(get_address(&pml4_entry));
+    uintptr_t pdpt_entry = PDPT->entries[pdpt_index];
+    if (!is_present(&pdpt_entry))
+        return FALSE;
+
+    PDT_t* PDT = VMM_recursive_active ? VMM_get_pdt(pml4_index, pdpt_index) : (PDT_t*) VMM_phys_to_hhdm(get_address(&pdpt_entry));
+    uintptr_t pdt_entry = PDT->entries[pdt_index];
+    if (!is_present(&pdt_entry))
+        return FALSE;
+
+    PT_t* PT = VMM_recursive_active ? VMM_get_pt(pml4_index, pdpt_index, pdt_index) : (PT_t*) VMM_phys_to_hhdm(get_address(&pdt_entry));
+    uintptr_t entry = PT->entries[pt_index];
+    if (!is_present(&entry))
+        return FALSE;
+
+    uintptr_t allowed_mask = WRITABLE | WRITE_THROUGH | CACHE_DISABLE;
+    if (VMM_is_nx_supported())
+    {
+        if (((set_bits | clear_bits) & NO_EXECUTE) != 0)
+            VMM_enable_nx_current_cpu();
+        allowed_mask |= NO_EXECUTE;
+    }
+    else if ((set_bits & NO_EXECUTE) != 0)
+    {
+        return FALSE;
+    }
+
+    entry |= (set_bits & allowed_mask);
+    entry &= ~(clear_bits & allowed_mask);
+    entry |= PRESENT;
+    PT->entries[pt_index] = entry;
+
+    uintptr_t page = virt & FRAME;
+    if (VMM_cr3_loaded)
+    {
+        VMM_invlpg(page);
+        if (VMM_interrupts_enabled())
+            (void) SMP_tlb_shootdown_page(page);
+    }
+
+    return TRUE;
 }
 
 void VMM_load_cr3(void)
@@ -535,6 +701,7 @@ void VMM_load_cr3(void)
     __asm__ __volatile__("mov %0, %%cr3" : : "r"(VMM_PML4_phys) : "memory");
     VMM_recursive_active = FALSE;
     VMM_cr3_loaded = TRUE;
+    VMM_enable_nx_current_cpu();
 }
 
 bool VMM_virt_to_phys(uintptr_t virt, uintptr_t* phys_out)

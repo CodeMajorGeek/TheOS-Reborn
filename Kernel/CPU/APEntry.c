@@ -18,10 +18,16 @@ void SMP_ap_entry(uintptr_t handoff_phys)
 
     GDT_load_kernel_segments();
     IDT_load();
+    VMM_enable_nx_current_cpu();
 
     uint32_t cpu_index = handoff->cpu_index;
     uint8_t apic_id = (uint8_t) handoff->apic_id;
     uintptr_t stack_top = (uintptr_t) handoff->stack_top;
+
+    kdebug_printf("[SMP] ap_entry start apic_id=%u cpu=%u stack=0x%llX\n",
+                  apic_id,
+                  cpu_index,
+                  (unsigned long long) stack_top);
 
     if (!FPU_init_cpu(cpu_index))
         goto ap_idle;

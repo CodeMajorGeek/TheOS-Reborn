@@ -17,6 +17,7 @@
 #define USERMODE_STACK_SIZE           (64ULL * 1024ULL)
 #define USERMODE_ELF_MAX_SIZE         (4ULL * 1024ULL * 1024ULL)
 #define USERMODE_ELF_MAX_PHDRS        64U
+#define USERMODE_PTE_PS               (1ULL << 7)
 
 #define ELF_IDENT_SIZE                16U
 #define ELF_MAGIC0                    0x7FU
@@ -28,6 +29,8 @@
 #define ELF_TYPE_EXEC                 2U
 #define ELF_MACHINE_X86_64            0x3EU
 #define ELF_PT_LOAD                   1U
+#define ELF_PF_X                      (1U << 0)
+#define ELF_PF_W                      (1U << 1)
 
 typedef struct elf64_ehdr
 {
@@ -72,6 +75,131 @@ static inline uintptr_t UserMode_align_up(uintptr_t value, uintptr_t align)
 static bool UserMode_is_canonical_low(uint64_t value)
 {
     return value < USERMODE_CANONICAL_LOW_MAX;
+}
+
+static inline uintptr_t UserMode_read_cr3_phys(void)
+{
+    uintptr_t cr3 = 0;
+    __asm__ __volatile__("mov %%cr3, %0" : "=r"(cr3));
+    return cr3 & FRAME;
+}
+
+static inline void UserMode_write_cr3_phys(uintptr_t cr3_phys)
+{
+    __asm__ __volatile__("mov %0, %%cr3" : : "r"(cr3_phys) : "memory");
+}
+
+static uintptr_t UserMode_alloc_zero_page_phys(void)
+{
+    uintptr_t phys = (uintptr_t) PMM_alloc_page();
+    if (phys == 0)
+        return 0;
+
+    memset((void*) P2V(phys), 0, 0x1000U);
+    return phys;
+}
+
+static void UserMode_free_user_pt(uintptr_t pt_phys)
+{
+    if (pt_phys == 0)
+        return;
+
+    PT_t* pt = (PT_t*) P2V(pt_phys);
+    for (uint32_t i = 0; i < 512; i++)
+    {
+        uintptr_t entry = pt->entries[i];
+        if ((entry & PRESENT) == 0)
+            continue;
+
+        uintptr_t page_phys = entry & FRAME;
+        if (page_phys != 0)
+            PMM_dealloc_page((void*) page_phys);
+    }
+
+    PMM_dealloc_page((void*) pt_phys);
+}
+
+static void UserMode_free_user_pdt(uintptr_t pdt_phys)
+{
+    if (pdt_phys == 0)
+        return;
+
+    PDT_t* pdt = (PDT_t*) P2V(pdt_phys);
+    for (uint32_t i = 0; i < 512; i++)
+    {
+        uintptr_t entry = pdt->entries[i];
+        if ((entry & PRESENT) == 0)
+            continue;
+        if ((entry & USERMODE_PTE_PS) != 0)
+            continue;
+
+        UserMode_free_user_pt(entry & FRAME);
+    }
+
+    PMM_dealloc_page((void*) pdt_phys);
+}
+
+static void UserMode_free_user_pdpt(uintptr_t pdpt_phys)
+{
+    if (pdpt_phys == 0)
+        return;
+
+    PDPT_t* pdpt = (PDPT_t*) P2V(pdpt_phys);
+    for (uint32_t i = 0; i < 512; i++)
+    {
+        uintptr_t entry = pdpt->entries[i];
+        if ((entry & PRESENT) == 0)
+            continue;
+        if ((entry & USERMODE_PTE_PS) != 0)
+            continue;
+
+        UserMode_free_user_pdt(entry & FRAME);
+    }
+
+    PMM_dealloc_page((void*) pdpt_phys);
+}
+
+static void UserMode_free_address_space(uintptr_t cr3_phys)
+{
+    if (cr3_phys == 0)
+        return;
+
+    PML4_t* pml4 = (PML4_t*) P2V(cr3_phys);
+    for (uint32_t i = 0; i < VMM_HHDM_PML4_INDEX; i++)
+    {
+        uintptr_t entry = pml4->entries[i];
+        if ((entry & PRESENT) == 0)
+            continue;
+
+        UserMode_free_user_pdpt(entry & FRAME);
+    }
+
+    PMM_dealloc_page((void*) cr3_phys);
+}
+
+static bool UserMode_create_isolated_address_space(uintptr_t* out_cr3_phys)
+{
+    if (!out_cr3_phys)
+        return false;
+
+    uintptr_t kernel_cr3 = VMM_get_kernel_cr3_phys();
+    if (kernel_cr3 == 0)
+        kernel_cr3 = UserMode_read_cr3_phys();
+    if (kernel_cr3 == 0)
+        return false;
+
+    uintptr_t user_cr3 = UserMode_alloc_zero_page_phys();
+    if (user_cr3 == 0)
+        return false;
+
+    PML4_t* kernel_pml4 = (PML4_t*) P2V(kernel_cr3);
+    PML4_t* user_pml4 = (PML4_t*) P2V(user_cr3);
+    for (uint32_t i = VMM_HHDM_PML4_INDEX; i < 512; i++)
+        user_pml4->entries[i] = kernel_pml4->entries[i];
+
+    user_pml4->entries[VMM_RECURSIVE_INDEX] = user_cr3 | PRESENT | WRITABLE;
+    *out_cr3_phys = user_cr3;
+    return true;
 }
 
 static bool UserMode_map_user_range(uintptr_t base, size_t size)
@@ -140,6 +268,25 @@ static bool UserMode_load_segment(const uint8_t* elf_image,
         memcpy((void*) (uintptr_t) phdr->p_vaddr,
                elf_image + phdr->p_offset,
                (size_t) phdr->p_filesz);
+    }
+
+    uintptr_t start = UserMode_align_down((uintptr_t) phdr->p_vaddr, 0x1000U);
+    uintptr_t end = UserMode_align_up((uintptr_t) phdr->p_vaddr + (uintptr_t) phdr->p_memsz, 0x1000U);
+    bool writable = (phdr->p_flags & ELF_PF_W) != 0;
+    bool executable = (phdr->p_flags & ELF_PF_X) != 0;
+    if (writable && executable)
+        return false;
+    uintptr_t set_bits = writable ? WRITABLE : 0;
+    uintptr_t clear_bits = writable ? 0 : WRITABLE;
+    if (!executable)
+        set_bits |= NO_EXECUTE;
+    else
+        clear_bits |= NO_EXECUTE;
+
+    for (uintptr_t page = start; page < end; page += 0x1000U)
+    {
+        if (!VMM_update_page_flags(page, set_bits, clear_bits))
+            return false;
     }
 
     return true;
@@ -215,6 +362,17 @@ bool UserMode_run_elf(const char* file_name)
         return false;
     }
 
+    uintptr_t previous_cr3 = UserMode_read_cr3_phys();
+    uintptr_t user_cr3 = 0;
+    if (!UserMode_create_isolated_address_space(&user_cr3))
+    {
+        kfree(elf_image);
+        kdebug_printf("[USER] ELF '%s' failed to create isolated address space\n", file_name);
+        return false;
+    }
+
+    UserMode_write_cr3_phys(user_cr3);
+
     bool has_load_segment = false;
     for (uint16_t i = 0; i < ehdr->e_phnum; i++)
     {
@@ -227,6 +385,8 @@ bool UserMode_run_elf(const char* file_name)
         has_load_segment = true;
         if (!UserMode_load_segment(elf_image, elf_size, phdr))
         {
+            UserMode_write_cr3_phys(previous_cr3);
+            UserMode_free_address_space(user_cr3);
             kfree(elf_image);
             kdebug_printf("[USER] ELF '%s' failed to load segment index=%u\n",
                           file_name,
@@ -237,6 +397,8 @@ bool UserMode_run_elf(const char* file_name)
 
     if (!has_load_segment)
     {
+        UserMode_write_cr3_phys(previous_cr3);
+        UserMode_free_address_space(user_cr3);
         kfree(elf_image);
         kdebug_printf("[USER] ELF '%s' has no PT_LOAD segment\n", file_name);
         return false;
@@ -245,16 +407,19 @@ bool UserMode_run_elf(const char* file_name)
     uintptr_t stack_bottom = USERMODE_STACK_TOP - USERMODE_STACK_SIZE;
     if (!UserMode_map_user_range(stack_bottom, USERMODE_STACK_SIZE))
     {
+        UserMode_write_cr3_phys(previous_cr3);
+        UserMode_free_address_space(user_cr3);
         kfree(elf_image);
         kdebug_printf("[USER] ELF '%s' failed to map user stack\n", file_name);
         return false;
     }
 
     uintptr_t user_rsp = UserMode_align_down(USERMODE_STACK_TOP, 16U);
-    kdebug_printf("[USER] launching '%s' entry=0x%llX stack=0x%llX\n",
+    kdebug_printf("[USER] launching '%s' entry=0x%llX stack=0x%llX cr3=0x%llX\n",
                   file_name,
                   (unsigned long long) ehdr->e_entry,
-                  (unsigned long long) user_rsp);
+                  (unsigned long long) user_rsp,
+                  (unsigned long long) user_cr3);
 
     kfree(elf_image);
     switch_to_usermode((uintptr_t) ehdr->e_entry, user_rsp);

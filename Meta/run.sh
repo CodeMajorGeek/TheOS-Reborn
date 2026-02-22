@@ -7,6 +7,7 @@
 [ -z "$THEOS_DISK_NAME" ] && THEOS_DISK_NAME="disk.img"
 
 [ -z "$THEOS_QEMU_NUMA" ] && THEOS_QEMU_NUMA=0
+[ -z "$THEOS_BOOT_FROM_ISO_DISK" ] && THEOS_BOOT_FROM_ISO_DISK=1
 
 NUMA_ARGS=()
 if [ "$THEOS_QEMU_NUMA" = "1" ]; then
@@ -21,6 +22,22 @@ if [ "$THEOS_QEMU_NUMA" = "1" ]; then
 	)
 fi
 
+BOOT_MEDIA_ARGS=()
+if [ "$THEOS_BOOT_FROM_ISO_DISK" = "1" ]; then
+	BOOT_MEDIA_ARGS=(
+		-drive "id=osdisk,file=TheOS.iso,format=raw,if=none"
+		-device "ahci,id=ahci"
+		-device "driver=ide-hd,drive=osdisk,bus=ahci.0"
+	)
+else
+	BOOT_MEDIA_ARGS=(
+		-cdrom "TheOS.iso"
+		-drive "id=disk,file=$THEOS_DISK_NAME,format=raw,if=none"
+		-device "ahci,id=ahci"
+		-device "driver=ide-hd,drive=disk,bus=ahci.0"
+	)
+fi
+
 qemu-system-x86_64 \
 	-chardev stdio,id=char0,mux=on,logfile=serial.log,signal=off \
 	-monitor telnet::45454,server,nowait \
@@ -30,12 +47,9 @@ qemu-system-x86_64 \
 	-cpu $THEOS_QEMU_CPU \
 	-smp 4 \
 	-device VGA,vgamem_mb=64 \
-	-cdrom TheOS.iso \
 	-s \
 	-net none \
 	"${NUMA_ARGS[@]}" \
-	-drive id=disk,file=$THEOS_DISK_NAME,format=raw,if=none \
-	-device ahci,id=ahci \
-	-device driver=ide-hd,drive=disk,bus=ahci.0
+	"${BOOT_MEDIA_ARGS[@]}"
 	
 exit 0

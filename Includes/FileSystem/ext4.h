@@ -148,6 +148,7 @@ typedef struct ext4_dir_entry
 typedef struct ext4_fs
 {
     HBA_PORT_t* port;
+    uint64_t lba_base;
     ext4_superblock_t superblock;
     uint32_t block_size;
     uint32_t inode_size;
@@ -160,10 +161,14 @@ typedef struct ext4_fs
 
 bool ext4_check_format(HBA_PORT_t* port);
 bool ext4_mount(ext4_fs_t* fs, HBA_PORT_t* port);
+bool ext4_mount_lba(ext4_fs_t* fs, HBA_PORT_t* port, uint64_t lba_base);
 void ext4_set_active(ext4_fs_t* fs);
 ext4_fs_t* ext4_get_active(void);
 bool ext4_list_root(ext4_fs_t* fs);
+bool ext4_list_path(ext4_fs_t* fs, const char* path);
+bool ext4_path_is_dir(ext4_fs_t* fs, const char* path);
 bool ext4_read_file(ext4_fs_t* fs, const char* name, uint8_t** out_buf, size_t* out_size);
 bool ext4_create_file(ext4_fs_t* fs, const char* name, const uint8_t* data, size_t size);
+bool ext4_create_dir(ext4_fs_t* fs, const char* path);
 
 #endif

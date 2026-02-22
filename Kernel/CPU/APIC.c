@@ -3,6 +3,7 @@
 #include <CPU/ISR.h>
 #include <Device/HPET.h>
 #include <Device/PIT.h>
+#include <Device/TTY.h>
 #include <Memory/VMM.h>
 #include <CPU/IO.h>
 #include <Debug/KDebug.h>
@@ -26,6 +27,9 @@ static bool APIC_io_route_lapic_valid = false;
 
 static bool APIC_enabled = false;
 static bool APIC_supported = false;
+static bool APIC_x2apic_supported = false;
+static bool APIC_x2apic_enabled = false;
+static bool APIC_x2apic_smp_skip_reported = false;
 
 static uint32_t APIC_IRQ_overrides[256];
 static uint16_t APIC_GSI_flags[256];
@@ -40,6 +44,35 @@ static void APIC_timer_callback(interrupt_frame_t* frame);
 static bool APIC_wait_icr_idle(uint32_t spin_limit);
 static void APIC_delay_loops(uint32_t loops);
 
+#define IA32_X2APIC_MSR_BASE        0x800U
+#define IA32_X2APIC_MSR_ICR         0x830U
+
+static inline void APIC_cpuid_leaf1(uint32_t* eax,
+                                    uint32_t* ebx,
+                                    uint32_t* ecx,
+                                    uint32_t* edx)
+{
+    uint32_t a = 0, b = 0, c = 0, d = 0;
+    __asm__ __volatile__("cpuid"
+                         : "=a"(a), "=b"(b), "=c"(c), "=d"(d)
+                         : "a"(1U), "c"(0U));
+    if (eax)
+        *eax = a;
+    if (ebx)
+        *ebx = b;
+    if (ecx)
+        *ecx = c;
+    if (edx)
+        *edx = d;
+}
+
+static bool APIC_x2apic_write_icr(uint8_t apic_id, uint32_t icr_low)
+{
+    uint64_t icr = ((uint64_t) apic_id << 32) | (uint64_t) icr_low;
+    MSR_set(IA32_X2APIC_MSR_ICR, icr);
+    return APIC_wait_icr_idle(APIC_IPI_SPIN_TIMEOUT);
+}
+
 static uintptr_t APIC_mmio_virt(uintptr_t phys)
 {
     return VMM_MMIO_VIRT(phys);
@@ -53,10 +86,13 @@ static void APIC_map_mmio_page(uintptr_t phys)
 
 bool APIC_check(void)
 {
-    uint32_t eax, edx;
-    cpuid(1, &eax, &edx);
+    uint32_t eax = 0, ebx = 0, ecx = 0, edx = 0;
+    APIC_cpuid_leaf1(&eax, &ebx, &ecx, &edx);
+    (void) ebx;
 
     APIC_supported = (edx & CPUID_FEAT_EDX_APIC) != 0;
+    APIC_x2apic_supported = (ecx & CPUID_FEAT_ECX_X2APIC) != 0;
+    APIC_x2apic_enabled = false;
     APIC_enabled = false;
 
     return APIC_supported;
@@ -72,17 +108,40 @@ void APIC_enable(void)
     if (APIC_local_phys == 0)
         return;
 
-    APIC_map_mmio_page(APIC_local_phys);
-    APIC_local_ptr = APIC_mmio_virt(APIC_local_phys);
-
     APIC_disable_PIC_mode();
-    APIC_set_base(APIC_local_phys); // Hardware enable the local APIC if it wasn't enabled yet.
+    uint64_t apic_base = MSR_get(IA32_APIC_BASE_MSR);
+    apic_base &= ~0xFFFFFFFFFFFFF000ULL;
+    apic_base |= (APIC_local_phys & 0xFFFFFFFFFFFFF000ULL);
+    apic_base |= IA32_APIC_BASE_MSR_ENABLE;
 
-    APIC_local_write(APIC_DFR, 0xffffffff);
-    uint32_t ldrval = APIC_local_read(APIC_LDR);
-    ldrval &= 0x0ffffff;
-    ldrval |= 1;
-    APIC_local_write(APIC_LDR, ldrval);
+    bool want_x2apic = APIC_x2apic_supported;
+#if THEOS_ENABLE_X2APIC_SMP_EXPERIMENTAL == 0
+    if (APIC_num_core > 1)
+        want_x2apic = false;
+#endif
+
+    if (want_x2apic)
+        apic_base |= IA32_APIC_BASE_MSR_X2APIC;
+    else
+        apic_base &= ~((uint64_t) IA32_APIC_BASE_MSR_X2APIC);
+    MSR_set(IA32_APIC_BASE_MSR, apic_base);
+
+    APIC_x2apic_enabled = (MSR_get(IA32_APIC_BASE_MSR) & IA32_APIC_BASE_MSR_X2APIC) != 0;
+    if (!APIC_x2apic_enabled)
+    {
+        APIC_map_mmio_page(APIC_local_phys);
+        APIC_local_ptr = APIC_mmio_virt(APIC_local_phys);
+
+        APIC_local_write(APIC_DFR, 0xffffffff);
+        uint32_t ldrval = APIC_local_read(APIC_LDR);
+        ldrval &= 0x0ffffff;
+        ldrval |= 1;
+        APIC_local_write(APIC_LDR, ldrval);
+    }
+    else
+    {
+        APIC_local_ptr = 0;
+    }
     
     APIC_local_write(APIC_LVT_TMR, APIC_DISABLE);
     APIC_local_write(APIC_LVT_PERF, APIC_NMI);
@@ -96,7 +155,10 @@ void APIC_enable(void)
     spurious |= 0xFFU;
     spurious |= APIC_SW_ENABLE;
     APIC_local_write(APIC_SPURIOUS, spurious);
-    uint8_t current_lapic_id = (uint8_t) (APIC_local_read(APIC_APICID) >> 24);
+    uint32_t current_lapic_id_raw = APIC_local_read(APIC_APICID);
+    uint8_t current_lapic_id = APIC_x2apic_enabled
+                                 ? (uint8_t) current_lapic_id_raw
+                                 : (uint8_t) (current_lapic_id_raw >> 24);
     if (!APIC_io_route_lapic_valid)
     {
         APIC_bsp_lapic_id = current_lapic_id;
@@ -104,6 +166,15 @@ void APIC_enable(void)
         APIC_io_route_lapic_valid = true;
     }
     APIC_enabled = true;
+    kdebug_printf("[APIC] mode=%s\n", APIC_x2apic_enabled ? "x2APIC" : "xAPIC");
+    if (APIC_x2apic_supported && !APIC_x2apic_enabled && APIC_num_core > 1 && !APIC_x2apic_smp_skip_reported)
+    {
+        kdebug_puts("[APIC] x2APIC supported but disabled on SMP (set THEOS_ENABLE_X2APIC_SMP_EXPERIMENTAL=1 to force)\n");
+        APIC_x2apic_smp_skip_reported = true;
+    }
+    kdebug_printf("[APIC] current id raw=0x%X mapped=0x%X\n",
+                  current_lapic_id_raw,
+                  current_lapic_id);
 }
 
 void APIC_detect_cores(APIC_MADT_t* madt)
@@ -157,6 +228,25 @@ void APIC_detect_cores(APIC_MADT_t* madt)
                 if (length >= 8 && APIC_num_core < sizeof(APIC_lapic_IDs) &&
                     (*((uint32_t*) (current_ptr + 4)) & 1))
                     APIC_lapic_IDs[APIC_num_core++] = *(uint8_t*) (current_ptr + 3);
+                break;
+            case APIC_PROCESSOR_LOCAL2_TYPE:
+                if (length >= 16 && APIC_num_core < sizeof(APIC_lapic_IDs))
+                {
+                    uint32_t x2apic_id = *(uint32_t*) (current_ptr + 4);
+                    uint32_t flags = *(uint32_t*) (current_ptr + 8);
+                    if ((flags & APIC_PROCESSOR_ENABLED) != 0 || (flags & APIC_ONLINE_CAPABLE) != 0)
+                    {
+                        if (x2apic_id <= 0xFFU)
+                        {
+                            APIC_lapic_IDs[APIC_num_core++] = (uint8_t) x2apic_id;
+                        }
+                        else
+                        {
+                            kdebug_printf("[APIC] x2APIC id=%u not representable in legacy 8-bit map, skipping\n",
+                                          x2apic_id);
+                        }
+                    }
+                }
                 break;
             case APIC_IO_TYPE:
                 if (length < 12 || APIC_IO_num >= sizeof(APIC_IOs) / sizeof(APIC_IOs[0]))
@@ -280,6 +370,12 @@ void APIC_set_base(uintptr_t apic)
 
 uint32_t APIC_local_read(uint32_t offset)
 {
+    if (APIC_x2apic_enabled)
+    {
+        uint32_t msr = IA32_X2APIC_MSR_BASE + (offset >> 4);
+        return (uint32_t) MSR_get(msr);
+    }
+
     if (APIC_local_ptr == 0)
         return 0;
 
@@ -288,6 +384,14 @@ uint32_t APIC_local_read(uint32_t offset)
 
 void APIC_local_write(uint32_t offset, uint32_t value)
 {
+    if (APIC_x2apic_enabled)
+    {
+        uint32_t msr = IA32_X2APIC_MSR_BASE + (offset >> 4);
+        /* Some x2APIC registers are write-only (e.g. EOI). */
+        MSR_set(msr, (uint64_t) value);
+        return;
+    }
+
     if (APIC_local_ptr == 0)
         return;
 
@@ -321,10 +425,18 @@ bool APIC_is_enabled(void)
     return APIC_enabled;
 }
 
+bool APIC_is_x2apic_enabled(void)
+{
+    return APIC_x2apic_enabled;
+}
+
 uint8_t APIC_get_current_lapic_id(void)
 {
-    if (APIC_local_ptr == 0)
+    if (!APIC_x2apic_enabled && APIC_local_ptr == 0)
         return 0;
+
+    if (APIC_x2apic_enabled)
+        return (uint8_t) APIC_local_read(APIC_APICID);
 
     return (uint8_t) (APIC_local_read(APIC_APICID) >> 24);
 }
@@ -474,6 +586,27 @@ bool APIC_startup_ap(uint8_t apic_id, uint8_t startup_vector)
     if (!APIC_wait_icr_idle(APIC_IPI_SPIN_TIMEOUT))
         return false;
 
+    if (APIC_x2apic_enabled)
+    {
+        kdebug_printf("[APIC] x2APIC startup INIT apic_id=%u vec=0x%X\n", apic_id, startup_vector);
+        if (!APIC_x2apic_write_icr(apic_id, APIC_ICR_DELIVERY_INIT | APIC_ICR_TRIGGER_LEVEL | APIC_ICR_LEVEL_ASSERT))
+            return false;
+        APIC_delay_loops(APIC_IPI_DELAY_SHORT_LOOPS);
+
+        if (!APIC_x2apic_write_icr(apic_id, APIC_ICR_DELIVERY_INIT | APIC_ICR_TRIGGER_LEVEL))
+            return false;
+        APIC_delay_loops(APIC_IPI_DELAY_SHORT_LOOPS);
+
+        uint32_t sipi_icr = APIC_ICR_DELIVERY_STARTUP | (uint32_t) startup_vector;
+        kdebug_printf("[APIC] x2APIC startup SIPI#1 apic_id=%u vec=0x%X\n", apic_id, startup_vector);
+        if (!APIC_x2apic_write_icr(apic_id, sipi_icr))
+            return false;
+
+        APIC_delay_loops(APIC_IPI_DELAY_SHORT_LOOPS);
+        kdebug_printf("[APIC] x2APIC startup SIPI#2 apic_id=%u vec=0x%X\n", apic_id, startup_vector);
+        return APIC_x2apic_write_icr(apic_id, sipi_icr);
+    }
+
     APIC_local_write(APIC_ICRH, ((uint32_t) apic_id) << 24);
     APIC_local_write(APIC_ICRL, APIC_ICR_DELIVERY_INIT | APIC_ICR_TRIGGER_LEVEL | APIC_ICR_LEVEL_ASSERT);
     if (!APIC_wait_icr_idle(APIC_IPI_SPIN_TIMEOUT))
@@ -508,6 +641,9 @@ bool APIC_send_ipi(uint8_t apic_id, uint8_t vector)
 
     if (!APIC_wait_icr_idle(APIC_IPI_SPIN_TIMEOUT))
         return false;
+
+    if (APIC_x2apic_enabled)
+        return APIC_x2apic_write_icr(apic_id, (uint32_t) vector);
 
     APIC_local_write(APIC_ICRH, ((uint32_t) apic_id) << 24);
     APIC_local_write(APIC_ICRL, (uint32_t) vector);
@@ -649,6 +785,9 @@ bool APIC_timer_init_ap(uint32_t hz)
 static void APIC_timer_callback(interrupt_frame_t* frame)
 {
     (void) frame;
+    if (APIC_get_current_lapic_id() == APIC_get_bsp_lapic_id())
+        TTY_on_timer_tick();
+
     task_scheduler_on_tick();
     APIC_send_EOI();
     task_irq_exit();

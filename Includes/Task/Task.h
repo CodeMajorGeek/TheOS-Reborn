@@ -16,6 +16,7 @@
 #define TASK_CPU_LOCAL_SYSCALL_RSP0_OFF 0
 #define TASK_CPU_LOCAL_CPU_INDEX_OFF 8
 #define TASK_CPU_LOCAL_APIC_ID_OFF 12
+#define TASK_CPU_LOCAL_SYSCALL_USER_RSP_OFF 40
 #define TASK_CPU_LOCAL_MAGIC 0x4350554CUL
 #define TASK_WORK_CPU_ANY 0xFFFFFFFFU
 #define TASK_PUSH_TRIGGER_DEPTH 8U
@@ -68,6 +69,7 @@ typedef struct task_cpu_local
     uint32_t magic;
     volatile uint64_t syscall_count;
     uintptr_t current_task;
+    uintptr_t syscall_user_rsp;
 } task_cpu_local_t;
 
 typedef struct task_work_item

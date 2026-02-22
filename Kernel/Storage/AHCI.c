@@ -448,7 +448,11 @@ void AHCI_SATA_init(HBA_PORT_t* port, int num)
             if (dev_num == 0)
                 ROOT_DEV = TODEVNUM(DEV_SATA, 0);
 
-            printf("\tThis disk %s ext4 !\n", ext4_check_format(port) ? "is" : "isn\'t");
+            bool whole_disk_ext4 = ext4_check_format(port);
+            if (whole_disk_ext4)
+                printf("\tWhole disk is ext4.\n");
+            else
+                printf("\tWhole disk is not ext4 (root may be on a partition).\n");
         } else
             printf("\tInit failure !\n");
     }

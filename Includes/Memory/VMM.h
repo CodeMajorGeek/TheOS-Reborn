@@ -12,6 +12,7 @@
 #define USER_MODE       (1ULL << 2)
 #define WRITE_THROUGH   (1ULL << 3)
 #define CACHE_DISABLE   (1ULL << 4)
+#define NO_EXECUTE      (1ULL << 63)
 
 #define VMM_RECURSIVE_INDEX 510
 
@@ -31,6 +32,7 @@
 #define P2V(a)              ((uintptr_t) (a) + VMM_HHDM_BASE)
 
 #define VMM_MMIO_VIRT(phys) (VMM_MMIO_BASE + (uintptr_t) (phys))
+#define VMM_VGA_VIRT_BASE   (VMM_MMIO_BASE + 0x00000000000B8000ULL)
 #define VMM_AHCI_VIRT_BASE  (VMM_MMIO_BASE + 0x0000000000100000ULL)
 
 typedef struct PML4
@@ -54,6 +56,8 @@ typedef struct PT
 } PT_t;
 
 uintptr_t VMM_get_AHCI_virt(void);
+uintptr_t VMM_get_kernel_cr3_phys(void);
+void VMM_enable_nx_current_cpu(void);
 
 void VMM_map_kernel(void);
 void VMM_map_userland_stack(void);
@@ -68,6 +72,8 @@ void VMM_map_user_page(uintptr_t virt, uintptr_t phys);
 void VMM_map_user_pages(uintptr_t virt, uintptr_t phys, size_t len);
 void VMM_map_mmio_uc_page(uintptr_t virt, uintptr_t phys);
 void VMM_map_mmio_uc_pages(uintptr_t virt, uintptr_t phys, size_t len);
+bool VMM_unmap_page(uintptr_t virt, uintptr_t* old_phys_out);
+bool VMM_update_page_flags(uintptr_t virt, uintptr_t set_bits, uintptr_t clear_bits);
 
 void VMM_load_cr3(void);
 

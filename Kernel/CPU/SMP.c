@@ -1296,6 +1296,7 @@ bool SMP_init(void)
     SMP_bsp_apic_id = APIC_get_bsp_lapic_id();
     SMP_bsp_cpu = 0;
     SMP_mark_cpu_online(SMP_bsp_cpu, SMP_bsp_apic_id);
+    kdebug_printf("[SMP] init start bsp_apic_id=%u\n", (unsigned) SMP_bsp_apic_id);
 
     SMP_setup_ipi_handlers();
 
@@ -1306,6 +1307,7 @@ bool SMP_init(void)
     }
 
     uint8_t core_count = APIC_get_core_count();
+    kdebug_printf("[SMP] detected cores=%u\n", (unsigned) core_count);
     if (core_count <= 1)
     {
         SMP_initialized = true;
@@ -1323,6 +1325,7 @@ bool SMP_init(void)
         uint8_t apic_id = APIC_get_core_id(cpu_index);
         if (apic_id == 0xFF || apic_id == SMP_bsp_apic_id)
             continue;
+        kdebug_printf("[SMP] startup begin apic_id=%u cpu=%u\n", apic_id, cpu_index);
 
         uintptr_t stack_top = (uintptr_t) &SMP_ap_stacks[cpu_index][KERNEL_STACK_SIZE];
         stack_top &= ~(uintptr_t) 0xFULL;

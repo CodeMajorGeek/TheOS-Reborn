@@ -9,6 +9,7 @@
 #include <CPU/TSS.h>
 #include <Device/HPET.h>
 #include <Debug/KDebug.h>
+#include <Memory/VMM.h>
 #include <Task/RCU.h>
 
 #include <string.h>
@@ -881,6 +882,8 @@ bool task_init_cpu(uint32_t cpu_index, uintptr_t kernel_stack, uint8_t apic_id)
     if (cpu_index >= TASK_MAX_CPUS)
         return false;
 
+    VMM_enable_nx_current_cpu();
+
     TSS_t* tss = &tss_per_cpu[cpu_index];
     memset(tss, 0, sizeof (*tss));
 
@@ -919,6 +922,7 @@ bool task_init_cpu(uint32_t cpu_index, uintptr_t kernel_stack, uint8_t apic_id)
         cpu_local->magic = TASK_CPU_LOCAL_MAGIC;
         cpu_local->syscall_count = 0;
         cpu_local->current_task = (uintptr_t) current_task;
+        cpu_local->syscall_user_rsp = 0;
 
         // SYSCALL stub uses SWAPGS + GS:[TASK_CPU_LOCAL_SYSCALL_RSP0_OFF].
         MSR_set(IA32_GS_BASE, 0);
@@ -1163,6 +1167,7 @@ void task_switch(void)
     {
         cpu_local->syscall_rsp0 = cpu_tss->rsp0;
         cpu_local->current_task = (uintptr_t) current_task;
+        cpu_local->syscall_user_rsp = 0;
     }
     
     // IMPORTANT: After modifying TSS, we must reload it in TR

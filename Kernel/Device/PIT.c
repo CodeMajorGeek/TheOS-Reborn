@@ -2,6 +2,7 @@
 
 #include <CPU/IO.h>
 #include <CPU/APIC.h>
+#include <Device/TTY.h>
 #include <Debug/KDebug.h>
 #include <Task/Task.h>
 
@@ -78,6 +79,7 @@ static void PIT_callback(interrupt_frame_t* frame)
 {
     (void) frame;
     ++ticks;
+    TTY_on_timer_tick();
     task_scheduler_on_tick();
 
     if (APIC_is_enabled())

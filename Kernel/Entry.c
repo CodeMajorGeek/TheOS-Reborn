@@ -48,36 +48,265 @@ static const uint32_t BSP_TIMER_HZ = 100;
 static const uint32_t PIT_TIMER_HZ = 1000;
 static TTY_framebuffer_info_t boot_framebuffer = { 0 };
 static bool boot_framebuffer_available = false;
-static bool boot_font_preloaded = false;
+static bool bootdev_hint_present = false;
+static uint32_t bootdev_biosdev = UINT32_MAX;
+static uint32_t bootdev_slice = UINT32_MAX;
+static uint32_t bootdev_part = UINT32_MAX;
 
 #define THEOS_PSF2_FONT_PATH "/system/fonts/ter-powerline-v14n.psf"
 
-#ifdef THEOS_EARLY_PSF2_EMBEDDED
-extern const uint8_t _binary_builtin_console_psf_start[];
-extern const uint8_t _binary_builtin_console_psf_end[];
-#endif
+uintptr_t ROOT_DEV = 1;
 
-static void boot_load_early_psf2(void)
+static uint32_t boot_read_le32(const uint8_t* ptr)
 {
-#ifdef THEOS_EARLY_PSF2_EMBEDDED
-    size_t font_size = (size_t) (_binary_builtin_console_psf_end - _binary_builtin_console_psf_start);
-    if (font_size == 0)
-        return;
-
-    if (TTY_load_psf2(_binary_builtin_console_psf_start, font_size))
-    {
-        boot_font_preloaded = true;
-        kdebug_printf("[TTY] early embedded PSF2 loaded (%llu bytes)\n",
-                      (unsigned long long) font_size);
-    }
-    else
-    {
-        kdebug_puts("[TTY] early embedded PSF2 load failed\n");
-    }
-#endif
+    return ((uint32_t) ptr[0]) |
+           ((uint32_t) ptr[1] << 8) |
+           ((uint32_t) ptr[2] << 16) |
+           ((uint32_t) ptr[3] << 24);
 }
 
-uintptr_t ROOT_DEV = 1;
+static uint64_t boot_read_le64(const uint8_t* ptr)
+{
+    return ((uint64_t) ptr[0]) |
+           ((uint64_t) ptr[1] << 8) |
+           ((uint64_t) ptr[2] << 16) |
+           ((uint64_t) ptr[3] << 24) |
+           ((uint64_t) ptr[4] << 32) |
+           ((uint64_t) ptr[5] << 40) |
+           ((uint64_t) ptr[6] << 48) |
+           ((uint64_t) ptr[7] << 56);
+}
+
+static size_t boot_collect_mbr_partitions(HBA_PORT_t* port,
+                                          uint32_t* part_index_out,
+                                          uint32_t* lba_out,
+                                          uint8_t* type_out,
+                                          size_t cap)
+{
+    if (!port || !part_index_out || !lba_out || !type_out || cap == 0)
+        return 0;
+
+    uint8_t sector[AHCI_SECTOR_SIZE];
+    if (AHCI_sata_read(port, 0, 0, 1, sector) != 0)
+        return 0;
+
+    if (sector[510] != 0x55 || sector[511] != 0xAA)
+        return 0;
+
+    size_t count = 0;
+    for (uint32_t part = 0; part < 4 && count < cap; part++)
+    {
+        const uint8_t* entry = &sector[446 + part * 16];
+        uint8_t type = entry[4];
+        uint32_t first_lba = boot_read_le32(&entry[8]);
+        uint32_t sectors = boot_read_le32(&entry[12]);
+        if (type == 0 || type == 0xEE || first_lba == 0 || sectors == 0)
+            continue;
+
+        part_index_out[count] = part;
+        lba_out[count] = first_lba;
+        type_out[count] = type;
+        count++;
+    }
+
+    return count;
+}
+
+static size_t boot_collect_gpt_partitions(HBA_PORT_t* port,
+                                          uint32_t* part_index_out,
+                                          uint64_t* lba_out,
+                                          size_t cap)
+{
+    if (!port || !part_index_out || !lba_out || cap == 0)
+        return 0;
+
+    uint8_t header[AHCI_SECTOR_SIZE];
+    if (AHCI_sata_read(port, 1, 0, 1, header) != 0)
+        return 0;
+
+    if (memcmp(header, "EFI PART", 8) != 0)
+        return 0;
+
+    uint32_t entry_count = boot_read_le32(&header[80]);
+    uint32_t entry_size = boot_read_le32(&header[84]);
+    uint64_t entry_lba = boot_read_le64(&header[72]);
+    if (entry_count == 0 || entry_size < 128 || entry_size > 1024)
+        return 0;
+
+    if (entry_count > 128)
+        entry_count = 128;
+
+    uint64_t table_bytes_u64 = (uint64_t) entry_count * entry_size;
+    uint64_t table_sectors_u64 = (table_bytes_u64 + AHCI_SECTOR_SIZE - 1) / AHCI_SECTOR_SIZE;
+    if (table_sectors_u64 == 0 || table_sectors_u64 > 0xFFFFFFFFULL)
+        return 0;
+
+    size_t table_bytes = (size_t) (table_sectors_u64 * AHCI_SECTOR_SIZE);
+    uint8_t* table = (uint8_t*) kmalloc(table_bytes);
+    if (!table)
+        return 0;
+
+    if (AHCI_sata_read(port,
+                       (uint32_t) entry_lba,
+                       (uint32_t) (entry_lba >> 32),
+                       (uint32_t) table_sectors_u64,
+                       table) != 0)
+    {
+        kfree(table);
+        return 0;
+    }
+
+    size_t count = 0;
+    for (uint32_t i = 0; i < entry_count && count < cap; i++)
+    {
+        uint8_t* entry = table + (size_t) i * entry_size;
+        bool type_is_zero = true;
+        for (uint32_t j = 0; j < 16; j++)
+        {
+            if (entry[j] != 0)
+            {
+                type_is_zero = false;
+                break;
+            }
+        }
+        if (type_is_zero)
+            continue;
+
+        uint64_t first_lba = boot_read_le64(&entry[32]);
+        uint64_t last_lba = boot_read_le64(&entry[40]);
+        if (first_lba == 0 || last_lba < first_lba)
+            continue;
+
+        part_index_out[count] = i + 1;
+        lba_out[count] = first_lba;
+        count++;
+    }
+
+    kfree(table);
+    return count;
+}
+
+static bool boot_try_mount_ext4_on_port(ext4_fs_t* fs,
+                                        HBA_PORT_t* port,
+                                        int device_index,
+                                        int32_t slice_hint,
+                                        uint64_t* lba_base_out)
+{
+    if (!fs || !port || !lba_base_out)
+        return false;
+
+    if (ext4_mount(fs, port))
+    {
+        *lba_base_out = 0;
+        kdebug_printf("[BOOT] ext4 probe ok dev=%d lba=0x%llX (whole disk)\n",
+                      device_index,
+                      (unsigned long long) *lba_base_out);
+        return true;
+    }
+
+    uint32_t part_index[4];
+    uint32_t part_lba[4];
+    uint8_t part_type[4];
+    size_t part_count = boot_collect_mbr_partitions(port, part_index, part_lba, part_type, 4);
+    for (size_t i = 0; i < part_count; i++)
+    {
+        kdebug_printf("[BOOT] part found dev=%d scheme=MBR slice=%u type=0x%X lba=0x%X\n",
+                      device_index,
+                      part_index[i],
+                      part_type[i],
+                      part_lba[i]);
+    }
+    bool used[4] = { false, false, false, false };
+    if (part_count > 0 && slice_hint >= 0)
+    {
+        for (size_t i = 0; i < part_count; i++)
+        {
+            if ((int32_t) part_index[i] != slice_hint)
+                continue;
+
+            used[i] = true;
+            if (ext4_mount_lba(fs, port, part_lba[i]))
+            {
+                *lba_base_out = part_lba[i];
+                kdebug_printf("[BOOT] ext4 probe ok dev=%d lba=0x%llX (MBR slice=%u type=0x%X)\n",
+                              device_index,
+                              (unsigned long long) *lba_base_out,
+                              part_index[i],
+                              part_type[i]);
+                return true;
+            }
+        }
+    }
+
+    for (size_t i = 0; i < part_count; i++)
+    {
+        if (used[i])
+            continue;
+
+        if (!ext4_mount_lba(fs, port, part_lba[i]))
+            continue;
+
+        *lba_base_out = part_lba[i];
+        kdebug_printf("[BOOT] ext4 probe ok dev=%d lba=0x%llX (MBR slice=%u type=0x%X)\n",
+                      device_index,
+                      (unsigned long long) *lba_base_out,
+                      part_index[i],
+                      part_type[i]);
+        return true;
+    }
+
+    uint32_t gpt_part_index[16];
+    uint64_t gpt_part_lba[16];
+    size_t gpt_part_count = boot_collect_gpt_partitions(port, gpt_part_index, gpt_part_lba, 16);
+    for (size_t i = 0; i < gpt_part_count; i++)
+    {
+        kdebug_printf("[BOOT] part found dev=%d scheme=GPT part=%u lba=0x%llX\n",
+                      device_index,
+                      gpt_part_index[i],
+                      (unsigned long long) gpt_part_lba[i]);
+    }
+    bool gpt_used[16] = { false };
+
+    if (gpt_part_count > 0 && slice_hint >= 0)
+    {
+        for (size_t i = 0; i < gpt_part_count; i++)
+        {
+            bool matches_hint = ((int32_t) gpt_part_index[i] == slice_hint) ||
+                                ((int32_t) gpt_part_index[i] == (slice_hint + 1));
+            if (!matches_hint)
+                continue;
+
+            gpt_used[i] = true;
+            if (!ext4_mount_lba(fs, port, gpt_part_lba[i]))
+                continue;
+
+            *lba_base_out = gpt_part_lba[i];
+            kdebug_printf("[BOOT] ext4 probe ok dev=%d lba=0x%llX (GPT part=%u)\n",
+                          device_index,
+                          (unsigned long long) *lba_base_out,
+                          gpt_part_index[i]);
+            return true;
+        }
+    }
+
+    for (size_t i = 0; i < gpt_part_count; i++)
+    {
+        if (gpt_used[i])
+            continue;
+
+        if (!ext4_mount_lba(fs, port, gpt_part_lba[i]))
+            continue;
+
+        *lba_base_out = gpt_part_lba[i];
+        kdebug_printf("[BOOT] ext4 probe ok dev=%d lba=0x%llX (GPT part=%u)\n",
+                      device_index,
+                      (unsigned long long) *lba_base_out,
+                      gpt_part_index[i]);
+        return true;
+    }
+
+    return false;
+}
 
 __attribute__((__noreturn__)) void k_entry(const void* mbt2_info)
 {
@@ -99,7 +328,6 @@ __attribute__((__noreturn__)) void k_entry(const void* mbt2_info)
     
     read_multiboot2_info(mbt2_info);
     kdebug_puts("[BOOT] multiboot parsed\n");
-    boot_load_early_psf2();
 
     VMM_map_kernel();
     kdebug_puts("[BOOT] VMM kernel map done\n");
@@ -115,16 +343,9 @@ __attribute__((__noreturn__)) void k_entry(const void* mbt2_info)
     kdebug_puts("[BOOT] GDT reloaded\n");
 
     if (boot_framebuffer_available)
-    {
-        if (TTY_init_framebuffer(&boot_framebuffer))
-            kdebug_puts("[BOOT] framebuffer init done\n");
-        else
-            kdebug_puts("[BOOT] framebuffer init failed\n");
-    }
+        kdebug_puts("[BOOT] framebuffer detected, switch deferred until PSF2 load\n");
     else
-    {
         kdebug_puts("[BOOT] framebuffer unavailable\n");
-    }
 
     IDT_init();
     kdebug_puts("[BOOT] IDT loaded\n");
@@ -164,48 +385,105 @@ __attribute__((__noreturn__)) void k_entry(const void* mbt2_info)
     kdebug_puts("[BOOT] syscall init\n");
 
     static ext4_fs_t fs;
-    HBA_PORT_t* root_port = AHCI_get_device(0);
+    HBA_PORT_t* root_port = NULL;
+    uint64_t root_lba_base = 0;
+    int root_device_index = -1;
+    int device_count = AHCI_get_device_count();
+
+    if (device_count > 0)
+    {
+        int ordered_devices[AHCI_MAX_SLOT];
+        int ordered_count = 0;
+        int preferred_device = -1;
+
+        if (bootdev_hint_present && bootdev_biosdev >= 0x80)
+        {
+            uint32_t candidate = bootdev_biosdev - 0x80;
+            if (candidate < (uint32_t) device_count)
+                preferred_device = (int) candidate;
+        }
+
+        if (preferred_device >= 0)
+            ordered_devices[ordered_count++] = preferred_device;
+
+        for (int i = 0; i < device_count && ordered_count < AHCI_MAX_SLOT; i++)
+        {
+            if (i == preferred_device)
+                continue;
+            ordered_devices[ordered_count++] = i;
+        }
+
+        for (int i = 0; i < ordered_count; i++)
+        {
+            int dev_index = ordered_devices[i];
+            HBA_PORT_t* candidate = AHCI_get_device(dev_index);
+            if (!candidate)
+                continue;
+
+            int32_t slice_hint = -1;
+            if (bootdev_hint_present && dev_index == preferred_device && bootdev_slice != UINT32_MAX)
+                slice_hint = (int32_t) bootdev_slice;
+
+            if (!boot_try_mount_ext4_on_port(&fs, candidate, dev_index, slice_hint, &root_lba_base))
+                continue;
+
+            root_port = candidate;
+            root_device_index = dev_index;
+            break;
+        }
+    }
 
     if (root_port)
     {
-        if (ext4_mount(&fs, root_port))
-        {
-            ext4_set_active(&fs);
-            kdebug_puts("[BOOT] ext4 mounted\n");
+        ext4_set_active(&fs);
+        kdebug_printf("[BOOT] ext4 mounted dev=%d lba_base=0x%llX%s\n",
+                      root_device_index,
+                      (unsigned long long) root_lba_base,
+                      (bootdev_hint_present && root_device_index >= 0 &&
+                       bootdev_biosdev >= 0x80 &&
+                       (uint32_t) root_device_index == (bootdev_biosdev - 0x80))
+                          ? " source=bootdev"
+                          : "");
+        kdebug_file_sink_ready();
 
-            if (!boot_font_preloaded)
+        bool psf_loaded = false;
+        uint8_t* font_data = NULL;
+        size_t font_size = 0;
+        const char* font_path = THEOS_PSF2_FONT_PATH;
+        if (ext4_read_file(&fs, font_path, &font_data, &font_size))
+        {
+            if (TTY_load_psf2(font_data, font_size))
             {
-                uint8_t* font_data = NULL;
-                size_t font_size = 0;
-                const char* font_path = THEOS_PSF2_FONT_PATH;
-                if (ext4_read_file(&fs, font_path, &font_data, &font_size))
-                {
-                    if (TTY_load_psf2(font_data, font_size))
-                        kdebug_printf("[TTY] loaded PSF2 from %s (%llu bytes)\n",
-                                      font_path,
-                                      (unsigned long long) font_size);
-                    else
-                        kdebug_printf("[TTY] invalid PSF2 file at %s\n", font_path);
-                    kfree(font_data);
-                }
-                else
-                {
-                    kdebug_printf("[TTY] no PSF2 font found at %s\n", font_path);
-                }
+                psf_loaded = true;
+                kdebug_printf("[TTY] loaded PSF2 from %s (%llu bytes)\n",
+                              font_path,
+                              (unsigned long long) font_size);
             }
             else
             {
-                kdebug_puts("[TTY] using early embedded PSF2 (disk font load skipped)\n");
+                kdebug_printf("[TTY] invalid PSF2 file at %s\n", font_path);
             }
+            kfree(font_data);
         }
         else
         {
-            printf("Unable to mount ext4 filesystem\n");
+            kdebug_printf("[TTY] no PSF2 font found at %s\n", font_path);
+        }
+
+        if (boot_framebuffer_available && psf_loaded)
+        {
+            if (TTY_init_framebuffer(&boot_framebuffer))
+                kdebug_puts("[BOOT] framebuffer switch done\n");
+            else
+                kdebug_puts("[BOOT] framebuffer switch failed, staying in VGA mode\n");
         }
     }
     else
     {
-        printf("AHCI: no SATA device detected\n");
+        if (device_count <= 0)
+            printf("AHCI: no SATA device detected\n");
+        else
+            printf("Unable to mount ext4 filesystem on AHCI devices\n");
     }
 
     task_init((uintptr_t) &kernel_stack_top);
@@ -301,7 +579,14 @@ __attribute__((__noreturn__)) void k_entry(const void* mbt2_info)
 
     RTC_t rtc;
     RTC_read(&rtc);
-    printf("%d:%d:%d %s %d/%d/%d\n", rtc.hours, rtc.minutes, rtc.seconds, rtc.weekday, rtc.month_day, rtc.month, rtc.year);
+    printf("%02u/%02u/%04u %s %02u:%02u:%02u\n",
+           (unsigned) rtc.month_day,
+           (unsigned) rtc.month,
+           (unsigned) rtc.year,
+           rtc.weekday,
+           (unsigned) rtc.hours,
+           (unsigned) rtc.minutes,
+           (unsigned) rtc.seconds);
 
     if (!UserMode_run_elf("/bin/TheApp"))
         kdebug_puts("[USER] launch failed, staying in kernel idle loop\n");
@@ -338,6 +623,19 @@ void read_multiboot2_info(const void* mbt2_info)
                     }   
                 }
                 break;
+            case MULTIBOOT_TAG_TYPE_BOOTDEV:
+            {
+                struct multiboot_tag_bootdev* bootdev = (struct multiboot_tag_bootdev*) tag;
+                bootdev_hint_present = true;
+                bootdev_biosdev = bootdev->biosdev;
+                bootdev_slice = bootdev->slice;
+                bootdev_part = bootdev->part;
+                kdebug_printf("[BOOT] MB2 bootdev biosdev=0x%X slice=%u part=%u\n",
+                              bootdev_biosdev,
+                              bootdev_slice,
+                              bootdev_part);
+                break;
+            }
             case MULTIBOOT_TAG_TYPE_ACPI_OLD:
                 struct multiboot_tag_old_acpi* old_acpi = (struct multiboot_tag_old_acpi*) tag;
                 if (ACPI_RSDP_old_check(old_acpi->rsdp))

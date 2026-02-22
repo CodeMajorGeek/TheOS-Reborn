@@ -10,6 +10,9 @@ static ext4_fs_t* ext4_active_fs;
 
 #define EXT4_INODE_MODE_TYPE_MASK    0xF000U
 #define EXT4_INODE_MODE_DIRECTORY    0x4000U
+#define EXT4_INODE_MODE_REGULAR      0x8000U
+#define EXT4_PATH_MAX_COMPONENTS     32U
+#define EXT4_PATH_COMPONENT_MAX      255U
 
 static uint16_t ext4_dir_ideal_len(uint8_t name_len)
 {
@@ -36,8 +39,8 @@ static bool ext4_read_bytes(ext4_fs_t* fs, uint64_t offset, void* out, size_t si
     if (size == 0)
         return true;
 
-    uint64_t start_lba = offset / AHCI_SECTOR_SIZE;
-    uint64_t end_lba = (offset + size + AHCI_SECTOR_SIZE - 1) / AHCI_SECTOR_SIZE;
+    uint64_t start_lba = fs->lba_base + (offset / AHCI_SECTOR_SIZE);
+    uint64_t end_lba = fs->lba_base + ((offset + size + AHCI_SECTOR_SIZE - 1) / AHCI_SECTOR_SIZE);
     if (end_lba <= start_lba || (end_lba - start_lba) > 0xFFFFFFFFULL)
         return false;
 
@@ -66,8 +69,8 @@ static bool ext4_write_bytes(ext4_fs_t* fs, uint64_t offset, const void* data, s
     if (size == 0)
         return true;
 
-    uint64_t start_lba = offset / AHCI_SECTOR_SIZE;
-    uint64_t end_lba = (offset + size + AHCI_SECTOR_SIZE - 1) / AHCI_SECTOR_SIZE;
+    uint64_t start_lba = fs->lba_base + (offset / AHCI_SECTOR_SIZE);
+    uint64_t end_lba = fs->lba_base + ((offset + size + AHCI_SECTOR_SIZE - 1) / AHCI_SECTOR_SIZE);
     if (end_lba <= start_lba || (end_lba - start_lba) > 0xFFFFFFFFULL)
         return false;
 
@@ -296,13 +299,17 @@ static bool ext4_find_dir_entry(ext4_fs_t* fs, const ext4_inode_t* dir, const ch
     return false;
 }
 
-static bool ext4_resolve_path_inode(ext4_fs_t* fs, const char* path, ext4_inode_t* out_inode)
+static bool ext4_resolve_path_inode_impl(ext4_fs_t* fs,
+                                         const char* path,
+                                         ext4_inode_t* out_inode,
+                                         uint32_t* out_inode_num)
 {
     if (!fs || !path || !out_inode)
         return false;
 
+    uint32_t current_inode_num = EXT4_INODE_ROOT;
     ext4_inode_t current;
-    if (!ext4_read_inode(fs, EXT4_INODE_ROOT, &current))
+    if (!ext4_read_inode(fs, current_inode_num, &current))
         return false;
 
     const char* cursor = path;
@@ -312,6 +319,8 @@ static bool ext4_resolve_path_inode(ext4_fs_t* fs, const char* path, ext4_inode_
     if (*cursor == '\0')
     {
         *out_inode = current;
+        if (out_inode_num)
+            *out_inode_num = current_inode_num;
         return true;
     }
 
@@ -320,7 +329,7 @@ static bool ext4_resolve_path_inode(ext4_fs_t* fs, const char* path, ext4_inode_
         if ((current.i_mode & EXT4_INODE_MODE_TYPE_MASK) != EXT4_INODE_MODE_DIRECTORY)
             return false;
 
-        char component[256];
+        char component[EXT4_PATH_COMPONENT_MAX + 1U];
         size_t component_len = 0;
         while (*cursor != '\0' && *cursor != '/')
         {
@@ -339,12 +348,162 @@ static bool ext4_resolve_path_inode(ext4_fs_t* fs, const char* path, ext4_inode_
         ext4_dir_entry_t entry;
         if (!ext4_find_dir_entry(fs, &current, component, &entry, NULL))
             return false;
-        if (!ext4_read_inode(fs, entry.inode, &current))
+
+        current_inode_num = entry.inode;
+        if (!ext4_read_inode(fs, current_inode_num, &current))
             return false;
     }
 
     *out_inode = current;
+    if (out_inode_num)
+        *out_inode_num = current_inode_num;
     return true;
+}
+
+static bool ext4_resolve_path_inode(ext4_fs_t* fs, const char* path, ext4_inode_t* out_inode)
+{
+    return ext4_resolve_path_inode_impl(fs, path, out_inode, NULL);
+}
+
+static bool ext4_split_parent_leaf(const char* path,
+                                   char* out_parent,
+                                   size_t out_parent_size,
+                                   char* out_leaf,
+                                   size_t out_leaf_size)
+{
+    if (!path || !out_parent || !out_leaf || out_parent_size < 2U || out_leaf_size < 2U)
+        return false;
+
+    char components[EXT4_PATH_MAX_COMPONENTS][EXT4_PATH_COMPONENT_MAX + 1U];
+    size_t component_count = 0;
+    const char* cursor = path;
+    while (*cursor == '/')
+        cursor++;
+
+    while (*cursor != '\0')
+    {
+        char token[EXT4_PATH_COMPONENT_MAX + 1U];
+        size_t token_len = 0;
+        while (*cursor != '\0' && *cursor != '/')
+        {
+            if (token_len >= EXT4_PATH_COMPONENT_MAX)
+                return false;
+            token[token_len++] = *cursor++;
+        }
+        token[token_len] = '\0';
+
+        while (*cursor == '/')
+            cursor++;
+
+        if (token_len == 0)
+            continue;
+        if (strcmp(token, ".") == 0)
+            continue;
+        if (strcmp(token, "..") == 0)
+        {
+            if (component_count > 0U)
+                component_count--;
+            continue;
+        }
+
+        if (component_count >= EXT4_PATH_MAX_COMPONENTS)
+            return false;
+        memcpy(components[component_count], token, token_len + 1U);
+        component_count++;
+    }
+
+    if (component_count == 0)
+        return false;
+
+    size_t leaf_len = strlen(components[component_count - 1U]);
+    if (leaf_len >= out_leaf_size)
+        return false;
+    memcpy(out_leaf, components[component_count - 1U], leaf_len + 1U);
+
+    size_t len = 0;
+    out_parent[len++] = '/';
+    out_parent[len] = '\0';
+    for (size_t i = 0; i + 1U < component_count; i++)
+    {
+        size_t part_len = strlen(components[i]);
+        if (len > 1U)
+        {
+            if (len + 1U >= out_parent_size)
+                return false;
+            out_parent[len++] = '/';
+        }
+
+        if (len + part_len >= out_parent_size)
+            return false;
+        memcpy(out_parent + len, components[i], part_len);
+        len += part_len;
+        out_parent[len] = '\0';
+    }
+
+    return true;
+}
+
+static bool ext4_dir_insert_entry(ext4_fs_t* fs,
+                                  ext4_inode_t* dir,
+                                  const char* name,
+                                  uint32_t inode_num,
+                                  uint8_t file_type)
+{
+    if (!fs || !dir || !name || name[0] == '\0')
+        return false;
+    if ((dir->i_mode & EXT4_INODE_MODE_TYPE_MASK) != EXT4_INODE_MODE_DIRECTORY)
+        return false;
+
+    size_t name_len = strlen(name);
+    if (name_len > EXT4_PATH_COMPONENT_MAX)
+        return false;
+
+    uint32_t dir_block_num = 0;
+    if (!ext4_inode_get_block(fs, dir, 0, &dir_block_num))
+        return false;
+
+    uint8_t* dir_block = (uint8_t*) kmalloc(fs->block_size);
+    if (!dir_block)
+        return false;
+    if (!ext4_read_block(fs, dir_block_num, dir_block))
+    {
+        kfree(dir_block);
+        return false;
+    }
+
+    uint16_t needed_len = ext4_dir_ideal_len((uint8_t) name_len);
+    uint32_t offset = 0;
+    bool inserted = false;
+    while (offset < fs->block_size)
+    {
+        ext4_dir_entry_t* entry = (ext4_dir_entry_t*) (dir_block + offset);
+        if (!ext4_dir_entry_is_valid(fs, offset, entry))
+            break;
+
+        uint16_t ideal = ext4_dir_ideal_len(entry->name_len);
+        if (entry->rec_len >= ideal && (uint16_t) (entry->rec_len - ideal) >= needed_len)
+        {
+            uint16_t remaining = entry->rec_len - ideal;
+            entry->rec_len = ideal;
+
+            ext4_dir_entry_t* new_entry = (ext4_dir_entry_t*) (dir_block + offset + ideal);
+            new_entry->inode = inode_num;
+            new_entry->rec_len = remaining;
+            new_entry->name_len = (uint8_t) name_len;
+            new_entry->file_type = file_type;
+            memcpy(new_entry->name, name, name_len);
+            inserted = true;
+            break;
+        }
+
+        offset += entry->rec_len;
+    }
+
+    bool ok = false;
+    if (inserted)
+        ok = ext4_write_block(fs, dir_block_num, dir_block);
+    kfree(dir_block);
+    return ok;
 }
 
 static bool ext4_alloc_from_bitmap(ext4_fs_t* fs, uint32_t bitmap_block, uint32_t start_bit, uint32_t max_bits, uint32_t* out_index)
@@ -495,11 +654,17 @@ bool ext4_check_format(HBA_PORT_t* port)
 
 bool ext4_mount(ext4_fs_t* fs, HBA_PORT_t* port)
 {
+    return ext4_mount_lba(fs, port, 0);
+}
+
+bool ext4_mount_lba(ext4_fs_t* fs, HBA_PORT_t* port, uint64_t lba_base)
+{
     if (!fs || !port)
         return false;
 
     memset(fs, 0, sizeof(*fs));
     fs->port = port;
+    fs->lba_base = lba_base;
 
     if (!ext4_read_bytes(fs, EXT4_SUPERBLOCK_ADDR, &fs->superblock, sizeof(fs->superblock)))
         return false;
@@ -536,8 +701,18 @@ ext4_fs_t* ext4_get_active(void)
 
 bool ext4_list_root(ext4_fs_t* fs)
 {
+    return ext4_list_path(fs, "/");
+}
+
+bool ext4_list_path(ext4_fs_t* fs, const char* path)
+{
+    if (!fs || !path)
+        return false;
+
     ext4_inode_t root;
-    if (!ext4_read_inode(fs, EXT4_INODE_ROOT, &root))
+    if (!ext4_resolve_path_inode(fs, path, &root))
+        return false;
+    if ((root.i_mode & EXT4_INODE_MODE_TYPE_MASK) != EXT4_INODE_MODE_DIRECTORY)
         return false;
 
     uint32_t blocks = (root.i_size_lo + fs->block_size - 1) / fs->block_size;
@@ -545,7 +720,8 @@ bool ext4_list_root(ext4_fs_t* fs)
     if (!block)
         return false;
 
-    printf("ext4 /:\n");
+    const char* label = path[0] ? path : "/";
+    printf("ext4 %s:\n", label);
     for (uint32_t b = 0; b < blocks; ++b)
     {
         uint32_t phys = 0;
@@ -578,6 +754,18 @@ bool ext4_list_root(ext4_fs_t* fs)
 
     kfree(block);
     return true;
+}
+
+bool ext4_path_is_dir(ext4_fs_t* fs, const char* path)
+{
+    if (!fs || !path)
+        return false;
+
+    ext4_inode_t inode;
+    if (!ext4_resolve_path_inode(fs, path, &inode))
+        return false;
+
+    return (inode.i_mode & EXT4_INODE_MODE_TYPE_MASK) == EXT4_INODE_MODE_DIRECTORY;
 }
 
 bool ext4_read_file(ext4_fs_t* fs, const char* name, uint8_t** out_buf, size_t* out_size)
@@ -644,20 +832,30 @@ bool ext4_create_file(ext4_fs_t* fs, const char* name, const uint8_t* data, size
         return false;
     if (!data && size != 0)
         return false;
-
-    size_t name_len = strlen(name);
-    if (name_len > 255)
-        return false;
     if (size > fs->block_size)
         return false;
 
-    ext4_inode_t root;
-    if (!ext4_read_inode(fs, EXT4_INODE_ROOT, &root))
+    char parent_path[256];
+    char leaf[EXT4_PATH_COMPONENT_MAX + 1U];
+    if (!ext4_split_parent_leaf(name, parent_path, sizeof(parent_path), leaf, sizeof(leaf)))
+        return false;
+
+    ext4_inode_t parent;
+    if (!ext4_resolve_path_inode_impl(fs, parent_path, &parent, NULL))
+        return false;
+    if ((parent.i_mode & EXT4_INODE_MODE_TYPE_MASK) != EXT4_INODE_MODE_DIRECTORY)
         return false;
 
     ext4_dir_entry_t existing;
-    if (ext4_find_dir_entry(fs, &root, name, &existing, NULL))
+    if (ext4_find_dir_entry(fs, &parent, leaf, &existing, NULL))
+    {
+        ext4_inode_t existing_inode;
+        if (!ext4_read_inode(fs, existing.inode, &existing_inode))
+            return false;
+        if ((existing_inode.i_mode & EXT4_INODE_MODE_TYPE_MASK) == EXT4_INODE_MODE_DIRECTORY)
+            return false;
         return ext4_update_existing_file(fs, existing.inode, data, size);
+    }
 
     uint32_t new_inode = 0;
     if (!ext4_alloc_inode(fs, &new_inode))
@@ -683,7 +881,7 @@ bool ext4_create_file(ext4_fs_t* fs, const char* name, const uint8_t* data, size
 
     ext4_inode_t inode;
     memset(&inode, 0, sizeof(inode));
-    inode.i_mode = 0x8000 | 0644;
+    inode.i_mode = EXT4_INODE_MODE_REGULAR | 0644;
     inode.i_links_count = 1;
     inode.i_size_lo = (uint32_t) size;
     inode.i_blocks_lo = fs->block_size / AHCI_SECTOR_SIZE;
@@ -705,54 +903,91 @@ bool ext4_create_file(ext4_fs_t* fs, const char* name, const uint8_t* data, size
     if (!ext4_write_inode(fs, new_inode, &inode))
         return false;
 
-    uint32_t root_block = 0;
-    if (!ext4_inode_get_block(fs, &root, 0, &root_block))
+    return ext4_dir_insert_entry(fs, &parent, leaf, new_inode, EXT4_FT_REG_FILE);
+}
+
+bool ext4_create_dir(ext4_fs_t* fs, const char* path)
+{
+    if (!fs || !path || path[0] == '\0')
         return false;
 
-    uint8_t* dir_block = (uint8_t*) kmalloc(fs->block_size);
-    if (!dir_block)
+    char parent_path[256];
+    char leaf[EXT4_PATH_COMPONENT_MAX + 1U];
+    if (!ext4_split_parent_leaf(path, parent_path, sizeof(parent_path), leaf, sizeof(leaf)))
         return false;
-    if (!ext4_read_block(fs, root_block, dir_block))
-    {
-        kfree(dir_block);
+
+    ext4_inode_t parent;
+    uint32_t parent_inode_num = 0;
+    if (!ext4_resolve_path_inode_impl(fs, parent_path, &parent, &parent_inode_num))
         return false;
-    }
-
-    uint32_t offset = 0;
-    bool inserted = false;
-    uint16_t needed_len = ext4_dir_ideal_len((uint8_t) name_len);
-    while (offset < fs->block_size)
-    {
-        ext4_dir_entry_t* entry = (ext4_dir_entry_t*) (dir_block + offset);
-        if (!ext4_dir_entry_is_valid(fs, offset, entry))
-            break;
-
-        uint16_t ideal = ext4_dir_ideal_len(entry->name_len);
-        if (entry->rec_len >= ideal && (uint16_t) (entry->rec_len - ideal) >= needed_len)
-        {
-            uint16_t remaining = entry->rec_len - ideal;
-            entry->rec_len = ideal;
-
-            ext4_dir_entry_t* new_entry = (ext4_dir_entry_t*) (dir_block + offset + ideal);
-            new_entry->inode = new_inode;
-            new_entry->rec_len = remaining;
-            new_entry->name_len = (uint8_t) name_len;
-            new_entry->file_type = EXT4_FT_REG_FILE;
-            memcpy(new_entry->name, name, new_entry->name_len);
-            inserted = true;
-            break;
-        }
-
-        offset += entry->rec_len;
-    }
-
-    if (!inserted)
-    {
-        kfree(dir_block);
+    if ((parent.i_mode & EXT4_INODE_MODE_TYPE_MASK) != EXT4_INODE_MODE_DIRECTORY)
         return false;
-    }
 
-    bool ok = ext4_write_block(fs, root_block, dir_block);
-    kfree(dir_block);
-    return ok;
+    ext4_dir_entry_t existing;
+    if (ext4_find_dir_entry(fs, &parent, leaf, &existing, NULL))
+        return false;
+
+    uint32_t new_inode_num = 0;
+    if (!ext4_alloc_inode(fs, &new_inode_num))
+        return false;
+
+    uint32_t new_block_num = 0;
+    if (!ext4_alloc_block(fs, &new_block_num))
+        return false;
+
+    uint8_t* block = (uint8_t*) kmalloc(fs->block_size);
+    if (!block)
+        return false;
+    memset(block, 0, fs->block_size);
+
+    uint16_t dot_len = ext4_dir_ideal_len(1);
+    ext4_dir_entry_t* dot = (ext4_dir_entry_t*) block;
+    dot->inode = new_inode_num;
+    dot->rec_len = dot_len;
+    dot->name_len = 1;
+    dot->file_type = EXT4_FT_DIR;
+    dot->name[0] = '.';
+
+    ext4_dir_entry_t* dotdot = (ext4_dir_entry_t*) (block + dot_len);
+    dotdot->inode = parent_inode_num;
+    dotdot->rec_len = (uint16_t) (fs->block_size - dot_len);
+    dotdot->name_len = 2;
+    dotdot->file_type = EXT4_FT_DIR;
+    dotdot->name[0] = '.';
+    dotdot->name[1] = '.';
+
+    bool write_block_ok = ext4_write_block(fs, new_block_num, block);
+    kfree(block);
+    if (!write_block_ok)
+        return false;
+
+    ext4_inode_t inode;
+    memset(&inode, 0, sizeof(inode));
+    inode.i_mode = EXT4_INODE_MODE_DIRECTORY | 0755;
+    inode.i_links_count = 2;
+    inode.i_size_lo = fs->block_size;
+    inode.i_blocks_lo = fs->block_size / AHCI_SECTOR_SIZE;
+    inode.i_flags = EXT4_EXTENTS_FL;
+
+    ext4_extent_header_t* eh = (ext4_extent_header_t*) inode.i_block;
+    eh->eh_magic = EXT4_EXTENT_MAGIC;
+    eh->eh_entries = 1;
+    eh->eh_max = 4;
+    eh->eh_depth = 0;
+    eh->eh_generation = 0;
+
+    ext4_extent_t* ex = (ext4_extent_t*) (inode.i_block + sizeof(ext4_extent_header_t));
+    ex->ee_block = 0;
+    ex->ee_len = 1;
+    ex->ee_start_hi = (uint16_t) (((uint64_t) new_block_num) >> 32);
+    ex->ee_start_lo = new_block_num;
+
+    if (!ext4_write_inode(fs, new_inode_num, &inode))
+        return false;
+    if (!ext4_dir_insert_entry(fs, &parent, leaf, new_inode_num, EXT4_FT_DIR))
+        return false;
+
+    parent.i_links_count++;
+    (void) ext4_write_inode(fs, parent_inode_num, &parent);
+    return true;
 }

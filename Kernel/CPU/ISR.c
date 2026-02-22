@@ -108,6 +108,24 @@ void ISR_handler(interrupt_frame_t* frame)
 
     if (frame->int_no < MAX_KNOWN_EXCEPTIONS)
     {
+        if (frame->int_no == 14)
+        {
+            uintptr_t fault_addr = 0;
+            __asm__ __volatile__("mov %%cr2, %0" : "=r"(fault_addr));
+            kdebug_printf(
+                "[ISR] Exception %llu (%s)\n"
+                "      RIP=0x%llX  CS=0x%llX  RFLAGS=0x%llX  ERR=0x%llX  CR2=0x%llX\n",
+                frame->int_no,
+                exception_messages[frame->int_no],
+                frame->rip,
+                frame->cs,
+                frame->rflags,
+                frame->err_code,
+                (unsigned long long) fault_addr
+            );
+            abort();
+        }
+
         kdebug_printf(
             "[ISR] Exception %llu (%s)\n"
             "      RIP=0x%llX  CS=0x%llX  RFLAGS=0x%llX\n",

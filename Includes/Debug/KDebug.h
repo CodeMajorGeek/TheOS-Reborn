@@ -13,6 +13,7 @@ void kdebug_puts(const char* str);
 void kdebug_printf(const char* format, ...);
 void kdebug_hex(uint64_t value, int width);
 void kdebug_dec(uint64_t value);
+void kdebug_file_sink_ready(void);
+void kdebug_file_flush(void);
 
 #endif
-

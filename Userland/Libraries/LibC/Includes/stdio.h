@@ -12,6 +12,9 @@
 
 int putc(int c);
 int puts(const char* s);
+int getchar(void);
+char* fgets(char* str, int size);
+int keyboard_load_config(const char* config_path);
 
 int __printf(char*, size_t, const char* __restrict, va_list);
 int printf(const char* __restrict, ...);

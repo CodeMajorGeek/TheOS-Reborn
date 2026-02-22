@@ -24,8 +24,35 @@ enum
     SYS_AHCI_IRQ_INFO_GET = 8,
     SYS_RCU_SYNC = 9,
     SYS_RCU_INFO_GET = 10,
-    SYS_CONSOLE_WRITE = 11
+    SYS_CONSOLE_WRITE = 11,
+    SYS_EXIT = 12,
+    SYS_FORK = 13,
+    SYS_EXECVE = 14,
+    SYS_YIELD = 15,
+    SYS_MAP = 16,
+    SYS_UNMAP = 17,
+    SYS_MPROTECT = 18,
+    SYS_FS_WRITE = 19,
+    SYS_OPEN = 20,
+    SYS_CLOSE = 21,
+    SYS_FS_SEEK = 22,
+    SYS_KBD_GET_SCANCODE = 23,
+    SYS_FS_ISDIR = 24,
+    SYS_FS_MKDIR = 25
 };
+
+#define SYS_PROT_READ    (1ULL << 0)
+#define SYS_PROT_WRITE   (1ULL << 1)
+#define SYS_PROT_EXEC    (1ULL << 2)
+
+#define SYS_OPEN_READ    (1ULL << 0)
+#define SYS_OPEN_WRITE   (1ULL << 1)
+#define SYS_OPEN_CREATE  (1ULL << 2)
+#define SYS_OPEN_TRUNC   (1ULL << 3)
+
+#define SYS_SEEK_SET     0
+#define SYS_SEEK_CUR     1
+#define SYS_SEEK_END     2
 
 typedef struct syscall_cpu_info
 {
@@ -62,6 +89,12 @@ typedef struct syscall_rcu_info
 
 typedef struct syscall_frame
 {
+    uint64_t r15;
+    uint64_t r14;
+    uint64_t r13;
+    uint64_t r12;
+    uint64_t rbp;
+    uint64_t rbx;
     uint64_t rdi;
     uint64_t rsi;
     uint64_t rdx;
@@ -71,10 +104,12 @@ typedef struct syscall_frame
     uint64_t rip;
     uint64_t rflags;
     uint64_t rsp;
+    uint64_t reserved0;
 } syscall_frame_t;
 
 void Syscall_init(void);
 
 uint64_t Syscall_interupt_handler(uint64_t syscall_num, syscall_frame_t* frame, uint32_t cpu_index);
+uint64_t Syscall_post_handler(uint64_t syscall_ret, syscall_frame_t* frame, uint32_t cpu_index);
 
 #endif
