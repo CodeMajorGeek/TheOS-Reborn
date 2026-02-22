@@ -4,7 +4,6 @@
 #include <Device/HPET.h>
 #include <Device/PIT.h>
 #include <Memory/VMM.h>
-#include <Memory/PMM.h>
 #include <CPU/IO.h>
 #include <Debug/KDebug.h>
 #include <Task/Task.h>
@@ -19,7 +18,8 @@ static uint8_t APIC_num_core = 0;           // Number of cores detected.
 static APIC_IO_t APIC_IOs[256] = { 0 };     // IOAPIC descriptors.
 static uint8_t APIC_IO_num = 0;             // Number of IOAPICs detected. 
 
-static uint64_t APIC_local_ptr = 0;         // Pointer to the Local APIC MMIO registers.
+static uint64_t APIC_local_ptr = 0;         // Virtual pointer to the Local APIC MMIO registers.
+static uintptr_t APIC_local_phys = 0;       // Physical base of the Local APIC MMIO registers.
 static uint8_t APIC_bsp_lapic_id = 0;       // BSP LAPIC ID (route destination for IOAPIC IRQs).
 static uint8_t APIC_io_route_lapic_id = 0;  // Immutable IOAPIC destination LAPIC ID (set on BSP).
 static bool APIC_io_route_lapic_valid = false;
@@ -40,6 +40,17 @@ static void APIC_timer_callback(interrupt_frame_t* frame);
 static bool APIC_wait_icr_idle(uint32_t spin_limit);
 static void APIC_delay_loops(uint32_t loops);
 
+static uintptr_t APIC_mmio_virt(uintptr_t phys)
+{
+    return VMM_MMIO_VIRT(phys);
+}
+
+static void APIC_map_mmio_page(uintptr_t phys)
+{
+    uintptr_t page_phys = phys & ~(uintptr_t) 0xFFFULL;
+    VMM_map_mmio_uc_page(APIC_mmio_virt(page_phys), page_phys);
+}
+
 bool APIC_check(void)
 {
     uint32_t eax, edx;
@@ -56,13 +67,16 @@ void APIC_enable(void)
     if (!APIC_supported)
         return;
 
-    if (APIC_local_ptr == 0)
-        APIC_local_ptr = APIC_get_base();
-    if (APIC_local_ptr == 0)
+    if (APIC_local_phys == 0)
+        APIC_local_phys = APIC_get_base();
+    if (APIC_local_phys == 0)
         return;
 
+    APIC_map_mmio_page(APIC_local_phys);
+    APIC_local_ptr = APIC_mmio_virt(APIC_local_phys);
+
     APIC_disable_PIC_mode();
-    APIC_set_base(APIC_local_ptr); // Hardware enable the local APIC if it wasn't enabled yet.
+    APIC_set_base(APIC_local_phys); // Hardware enable the local APIC if it wasn't enabled yet.
 
     APIC_local_write(APIC_DFR, 0xffffffff);
     uint32_t ldrval = APIC_local_read(APIC_LDR);
@@ -112,17 +126,17 @@ void APIC_detect_cores(APIC_MADT_t* madt)
     APIC_IO_num = 0;
     APIC_io_route_lapic_valid = false;
 
-    APIC_local_ptr = madt->lapic_ptr;
-    if (APIC_local_ptr == 0)
-        APIC_local_ptr = APIC_get_base();
-    if (APIC_local_ptr != 0)
+    APIC_local_phys = madt->lapic_ptr;
+    if (APIC_local_phys == 0)
+        APIC_local_phys = APIC_get_base();
+    if (APIC_local_phys != 0)
     {
-        uintptr_t lapic_page = (uintptr_t) APIC_local_ptr & 0xFFFFFFFFFFFFF000ULL;
-        VMM_map_page(lapic_page, lapic_page);
+        APIC_map_mmio_page(APIC_local_phys);
+        APIC_local_ptr = APIC_mmio_virt(APIC_local_phys);
         APIC_bsp_lapic_id = (uint8_t) (APIC_local_read(APIC_APICID) >> 24);
         APIC_io_route_lapic_id = APIC_bsp_lapic_id;
         APIC_io_route_lapic_valid = true;
-        kdebug_printf("[APIC] LAPIC base=0x%llX\n", APIC_local_ptr);
+        kdebug_printf("[APIC] LAPIC base=0x%llX\n", (unsigned long long) APIC_local_phys);
     }
 
     size_t madt_size = madt->SDT_header.length;
@@ -156,7 +170,7 @@ void APIC_detect_cores(APIC_MADT_t* madt)
                 kdebug_printf("[APIC] io raw id=%u ptr=0x%X\n", io->id, io->ptr);
 
                 uintptr_t ioapic_page = (uintptr_t) io->ptr & 0xFFFFFFFFFFFFF000ULL;
-                VMM_map_page(ioapic_page, ioapic_page);
+                VMM_map_mmio_uc_page(APIC_mmio_virt(ioapic_page), ioapic_page);
                 kdebug_puts("[APIC] io mapped\n");
                 io->irq_base = *((uint32_t*) (current_ptr + 8));
                 kdebug_printf("[APIC] io base=%u\n", io->irq_base);
@@ -191,10 +205,10 @@ void APIC_detect_cores(APIC_MADT_t* madt)
             case APIC_LOCAL_ADDR_OVERRIDE_TYPE:
                 if (length >= 12)
                 {
-                    APIC_local_ptr = *(uint64_t*) (current_ptr + 4);
-                    uintptr_t lapic_page = (uintptr_t) APIC_local_ptr & 0xFFFFFFFFFFFFF000ULL;
-                    VMM_map_page(lapic_page, lapic_page);
-                    kdebug_printf("[APIC] LAPIC override=0x%llX\n", APIC_local_ptr);
+                    APIC_local_phys = *(uint64_t*) (current_ptr + 4);
+                    APIC_map_mmio_page(APIC_local_phys);
+                    APIC_local_ptr = APIC_mmio_virt(APIC_local_phys);
+                    kdebug_printf("[APIC] LAPIC override=0x%llX\n", (unsigned long long) APIC_local_phys);
                 }
                 break;
             default:
@@ -228,9 +242,12 @@ void APIC_init(APIC_MADT_t* madt)
         return;
 
     APIC_detect_cores(madt);
-    kdebug_printf("[APIC] detect done cores=%u ioapic=%u lapic=0x%llX\n", APIC_num_core, APIC_IO_num, APIC_local_ptr);
+    kdebug_printf("[APIC] detect done cores=%u ioapic=%u lapic=0x%llX\n",
+                  APIC_num_core,
+                  APIC_IO_num,
+                  (unsigned long long) APIC_local_phys);
 
-    printf("Found %d cores, LAPIC 0x%llX, Processor IDs:", APIC_num_core, (unsigned long long) APIC_local_ptr);
+    printf("Found %d cores, LAPIC 0x%llX, Processor IDs:", APIC_num_core, (unsigned long long) APIC_local_phys);
     for(int i = 0; i < APIC_num_core; i++)
         printf(" %d", APIC_lapic_IDs[i]);
     printf("\n");
@@ -282,7 +299,8 @@ uint32_t APIC_IO_read(uint8_t index, uint32_t reg)
    if (index >= APIC_IO_num || APIC_IOs[index].ptr == 0)
       return 0xFFFFFFFF;
 
-   uint32_t volatile* ioapic = (uint32_t volatile*) ((uintptr_t) APIC_IOs[index].ptr);
+   uintptr_t ioapic_virt = APIC_mmio_virt((uintptr_t) APIC_IOs[index].ptr);
+   uint32_t volatile* ioapic = (uint32_t volatile*) ioapic_virt;
    ioapic[0] = (reg & 0xff);
    return ioapic[4];
 }
@@ -292,7 +310,8 @@ void APIC_IO_write(uint8_t index, uint32_t reg, uint32_t value)
    if (index >= APIC_IO_num || APIC_IOs[index].ptr == 0)
       return;
 
-   uint32_t volatile* ioapic = (uint32_t volatile*) ((uintptr_t) APIC_IOs[index].ptr);
+   uintptr_t ioapic_virt = APIC_mmio_virt((uintptr_t) APIC_IOs[index].ptr);
+   uint32_t volatile* ioapic = (uint32_t volatile*) ioapic_virt;
    ioapic[0] = (reg & 0xff);
    ioapic[4] = value;
 }

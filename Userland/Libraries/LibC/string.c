@@ -68,17 +68,49 @@ size_t strlen(const char* str)
 
 char* strcpy(char* __restrict dest, const char* __restrict src)
 {
-    return memcpy(dest, (char*) src, strlen(src));
+    size_t i = 0;
+    while (src[i] != '\0')
+    {
+        dest[i] = src[i];
+        i++;
+    }
+
+    dest[i] = '\0';
+    return dest;
 }
 
 int strncmp(const char* first, const char* second, size_t length)
 {
-    return memcmp(first, second, length);
+    for (size_t i = 0; i < length; i++)
+    {
+        unsigned char a = (unsigned char) first[i];
+        unsigned char b = (unsigned char) second[i];
+
+        if (a != b)
+            return (a < b) ? -1 : 1;
+
+        if (a == '\0')
+            return 0;
+    }
+
+    return 0;
 }
 
 int strcmp(const char* first, const char* second)
 {
-    return memcmp(first, second, strlen(first));
+    while (*first != '\0' && *second != '\0')
+    {
+        if (*first != *second)
+            return ((unsigned char) *first < (unsigned char) *second) ? -1 : 1;
+
+        first++;
+        second++;
+    }
+
+    if (*first == *second)
+        return 0;
+
+    return ((unsigned char) *first < (unsigned char) *second) ? -1 : 1;
 }
 
 int memcmp(const void* aptr, const void* bptr, size_t size)

@@ -68,3 +68,8 @@ int sys_rcu_info_get(syscall_rcu_info_t* out_info)
 {
     return (int) syscall(SYS_RCU_INFO_GET, (long) out_info, 0, 0, 0, 0, 0);
 }
+
+int sys_console_write(const void* buf, size_t len)
+{
+    return (int) syscall(SYS_CONSOLE_WRITE, (long) buf, (long) len, 0, 0, 0, 0);
+}

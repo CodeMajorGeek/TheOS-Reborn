@@ -85,9 +85,14 @@ void get_caller_pcs(void* v, uintptr_t pcs[])
 void get_stack_pcs(uintptr_t* ebp, uintptr_t pcs[])
 {
     int i = 0;
+    uintptr_t kvirt_start = PMM_get_kernel_virt_start();
+    uintptr_t kvirt_end = PMM_get_kernel_virt_end();
     for (; i < 10; i++)
     {
-        if (ebp == 0 || ebp < (uintptr_t*) PMM_get_kernel_start() || ebp == (uintptr_t*) 0xFFFFFFFF)
+        if (ebp == 0 ||
+            (uintptr_t) ebp < kvirt_start ||
+            (uintptr_t) ebp >= kvirt_end ||
+            ebp == (uintptr_t*) 0xFFFFFFFFFFFFFFFFULL)
             break;
 
         pcs[i] = ebp[1];

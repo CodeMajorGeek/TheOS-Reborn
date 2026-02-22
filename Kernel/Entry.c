@@ -21,6 +21,7 @@
 #include <CPU/SMP.h>
 #include <CPU/NUMA.h>
 #include <CPU/IDT.h>
+#include <CPU/GDT.h>
 #include <CPU/ISR.h>
 #include <CPU/FPU.h>
 #include <CPU/PCI.h>
@@ -34,8 +35,10 @@
 
 void read_multiboot2_info(const void*);
 
-extern void* kernel_start;
-extern void* kernel_end;
+extern void* kernel_phys_start;
+extern void* kernel_phys_end;
+extern void* kernel_virt_start;
+extern void* kernel_virt_end;
 
 extern void* kernel_stack_top;
 extern void* kernel_stack_bottom;
@@ -53,8 +56,15 @@ __attribute__((__noreturn__)) void k_entry(const void* mbt2_info)
     kdebug_init();
     kdebug_puts("[BOOT] k_entry start\n");
 
-    PMM_init((uint64_t) &kernel_start, (uint64_t) &kernel_end);
-    printf("Kernel start at 0x%llX and end at 0x%llX\n", &kernel_start, &kernel_end);
+    PMM_init((uintptr_t) &kernel_phys_start,
+             (uintptr_t) &kernel_phys_end,
+             (uintptr_t) &kernel_virt_start,
+             (uintptr_t) &kernel_virt_end);
+    printf("Kernel phys [0x%llX..0x%llX) virt [0x%llX..0x%llX)\n",
+           (unsigned long long) (uintptr_t) &kernel_phys_start,
+           (unsigned long long) (uintptr_t) &kernel_phys_end,
+           (unsigned long long) (uintptr_t) &kernel_virt_start,
+           (unsigned long long) (uintptr_t) &kernel_virt_end);
     kdebug_puts("[BOOT] PMM base set\n");
     
     read_multiboot2_info(mbt2_info);
@@ -70,6 +80,8 @@ __attribute__((__noreturn__)) void k_entry(const void* mbt2_info)
     VMM_hardware_mapping();
     VMM_load_cr3();
     kdebug_puts("[BOOT] CR3 loaded\n");
+    GDT_load_kernel_segments();
+    kdebug_puts("[BOOT] GDT reloaded\n");
 
     IDT_init();
     kdebug_puts("[BOOT] IDT loaded\n");
@@ -161,6 +173,9 @@ __attribute__((__noreturn__)) void k_entry(const void* mbt2_info)
             kdebug_puts("[BOOT] SMP bring-up failed\n");
     }
 
+    VMM_drop_startup_identity_map();
+    kdebug_puts("[BOOT] startup identity map dropped\n");
+
     bool hpet_ready = false;
     bool pit_started = false;
 
@@ -242,10 +257,11 @@ __attribute__((__noreturn__)) void k_entry(const void* mbt2_info)
     RTC_read(&rtc);
     printf("%d:%d:%d %s %d/%d/%d\n", rtc.hours, rtc.minutes, rtc.seconds, rtc.weekday, rtc.month_day, rtc.month, rtc.year);
 
-    switch_to_usermode();
-    
+    if (!UserMode_run_elf("/bin/TheApp"))
+        kdebug_puts("[USER] launch failed, staying in kernel idle loop\n");
+
     while (TRUE)
-        __asm__ __volatile__("nop");
+        __asm__ __volatile__("sti\nhlt");
 
     __builtin_unreachable();
 }

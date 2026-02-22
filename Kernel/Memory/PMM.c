@@ -15,25 +15,42 @@ static PMM_region_t* PMM_regions = PMM_regions_store;
 
 static int PMM_num_regions = 0;
 
-static uintptr_t PMM_kernel_start;
-static uintptr_t PMM_kernel_end;
+static uintptr_t PMM_kernel_phys_start;
+static uintptr_t PMM_kernel_phys_end;
+static uintptr_t PMM_kernel_virt_start;
+static uintptr_t PMM_kernel_virt_end;
 
 static bool is_kmem_initialized = FALSE;
 
-void PMM_init(uintptr_t kernel_start, uintptr_t kernel_end)
+void PMM_init(uintptr_t kernel_phys_start,
+              uintptr_t kernel_phys_end,
+              uintptr_t kernel_virt_start,
+              uintptr_t kernel_virt_end)
 {
-    PMM_kernel_start = kernel_start;
-    PMM_kernel_end = kernel_end;
+    PMM_kernel_phys_start = kernel_phys_start;
+    PMM_kernel_phys_end = kernel_phys_end;
+    PMM_kernel_virt_start = kernel_virt_start;
+    PMM_kernel_virt_end = kernel_virt_end;
 }
 
 uintptr_t PMM_get_kernel_start(void)
 {
-    return PMM_kernel_start;
+    return PMM_kernel_phys_start;
 }
 
 uintptr_t PMM_get_kernel_end(void)
 {
-    return PMM_kernel_end;
+    return PMM_kernel_phys_end;
+}
+
+uintptr_t PMM_get_kernel_virt_start(void)
+{
+    return PMM_kernel_virt_start;
+}
+
+uintptr_t PMM_get_kernel_virt_end(void)
+{
+    return PMM_kernel_virt_end;
 }
 
 PMM_region_t* PMM_get_regions(void)
@@ -74,12 +91,12 @@ void PMM_init_region(uintptr_t addr, uintptr_t len)
 
     for (uint64_t i = region.addr_start; i < region.addr_end; i += PHYS_PAGE_SIZE)
     {
-        if (i >= PMM_kernel_start && i < PMM_kernel_end)
+        if (i >= PMM_kernel_phys_start && i < PMM_kernel_phys_end)
             continue; // Kernel pages !
         else if (region.addr_mmap_start == (uintptr_t) -1)
         {
             region.addr_mmap_start = i;
-            memset((void*) region.addr_mmap_start, PMM_MEM_NOTAVALIABLE, mmap_num_pages * PHYS_PAGE_SIZE);
+            memset((void*) P2V(region.addr_mmap_start), PMM_MEM_NOTAVALIABLE, mmap_num_pages * PHYS_PAGE_SIZE);
             i += mmap_num_pages * PHYS_PAGE_SIZE;
             if (!is_kmem_initialized)
             {
@@ -90,7 +107,7 @@ void PMM_init_region(uintptr_t addr, uintptr_t len)
 
                 if (heap_size > (sizeof (malloc_header_t) + sizeof (uintptr_t)))
                 {
-                    kmem_init(i, heap_size);
+                    kmem_init(P2V(i), heap_size);
                     kmem_reserved_start = i;
                     kmem_reserved_end = kmem_reserved_start + heap_size;
                     is_kmem_initialized = TRUE;
@@ -123,19 +140,21 @@ void PMM_init_region(uintptr_t addr, uintptr_t len)
 
 void PMM_mmap_unset(PMM_region_t* region, int bit)
 {
-    ((uint64_t*) region->addr_mmap_start)[bit / 64] &= ~(1ULL << (bit % 64));
+    uint64_t* bitmap = (uint64_t*) P2V(region->addr_mmap_start);
+    bitmap[bit / 64] &= ~(1ULL << (bit % 64));
 }
 
 void PMM_mmap_set(PMM_region_t* region, int bit)
 {
-    ((uint64_t*) region->addr_mmap_start)[bit / 64] |= (1ULL << (bit % 64));
+    uint64_t* bitmap = (uint64_t*) P2V(region->addr_mmap_start);
+    bitmap[bit / 64] |= (1ULL << (bit % 64));
 }
 
 uint32_t PMM_get_index_of_free_page(PMM_region_t region)
 {   
     uint32_t num_pages = (uint32_t) (region.len / PHYS_PAGE_SIZE);
     uint32_t num_words = (num_pages + 63) / 64;
-    uint64_t* bitmap = (uint64_t*) region.addr_mmap_start;
+    uint64_t* bitmap = (uint64_t*) P2V(region.addr_mmap_start);
 
     for (uint32_t word_index = 0; word_index < num_words; word_index++)
     {
@@ -174,7 +193,7 @@ void* PMM_alloc_page(void)
 
             // Hard guard: never return low-memory or kernel image pages.
             // TODO : maybe find a clever way instead of hard guard.
-            if (page < 0x100000 || (page >= PMM_kernel_start && page < PMM_kernel_end))
+            if (page < 0x100000 || (page >= PMM_kernel_phys_start && page < PMM_kernel_phys_end))
                 continue;
 
             return (void*) page;

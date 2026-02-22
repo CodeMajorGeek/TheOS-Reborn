@@ -1,5 +1,6 @@
 #define ASM_FILE
 #include <CPU/SMP.h>
+#include <Memory/VMMLayout.h>
 
 .set AP_GDT_CODE32_SEL,    0x08
 .set AP_GDT_CODE64_SEL,    0x10
@@ -11,6 +12,8 @@
 
 .set AP_IA32_EFER_MSR,     0xC0000080
 .set AP_EFER_LME,          0x00000100
+.set AP_HHDM_BASE,         VMM_HHDM_BASE
+.set AP_HANDOFF_VIRT,      AP_HHDM_BASE + SMP_HANDOFF_PHYS
 
 .section .ap_trampoline, "ax"
 .code16
@@ -109,7 +112,7 @@ ap64_entry:
     movw %ax, %fs
     movw %ax, %gs
 
-    movq $SMP_HANDOFF_PHYS, %rsi
+    movabsq $AP_HANDOFF_VIRT, %rsi
 
     movq SMP_HANDOFF_MAGIC_OFF(%rsi), %rax
     movq $SMP_HANDOFF_MAGIC_VALUE, %rdx
@@ -121,7 +124,9 @@ ap64_entry:
 
     movq SMP_HANDOFF_ARG_OFF(%rsi), %rdi
     movq SMP_HANDOFF_ENTRY64_OFF(%rsi), %rax
-    jmp *%rax
+    # Match the C ABI stack contract for SMP_ap_entry.
+    call *%rax
+    jmp .Lap_hang
 
 .Lap_hang:
     cli

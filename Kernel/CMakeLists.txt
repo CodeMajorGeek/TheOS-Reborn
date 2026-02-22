@@ -1,6 +1,8 @@
 set(KERNEL_ARCH x86_64)
 option(THEOS_ENABLE_KDEBUG "Enable serial KDEBUG output and printf mirroring" ON)
+option(THEOS_ENABLE_SCHED_TESTS "Enable SMP scheduler stress/balance/pathological tests" ON)
 message(STATUS "Kernel: THEOS_ENABLE_KDEBUG=${THEOS_ENABLE_KDEBUG}")
+message(STATUS "Kernel: THEOS_ENABLE_SCHED_TESTS=${THEOS_ENABLE_SCHED_TESTS}")
 
 set(KERNEL_BOOT_SOURCES
     Boot/Bootloader.S
@@ -14,6 +16,7 @@ set(KERNEL_CPU_SOURCES
     CPU/FPU.c
     CPU/ACPI.c
     CPU/NUMA.c
+    CPU/UserMode.c
     CPU/UserMode.S
     CPU/PCI.c
     CPU/Syscall.c
@@ -95,8 +98,15 @@ add_compile_definitions(__USE_QEMU)
 if(THEOS_ENABLE_KDEBUG)
     add_compile_definitions(THEOS_ENABLE_KDEBUG)
 endif()
+if(THEOS_ENABLE_SCHED_TESTS)
+    add_compile_definitions(THEOS_ENABLE_SCHED_TESTS=1)
+else()
+    add_compile_definitions(THEOS_ENABLE_SCHED_TESTS=0)
+endif()
 
 add_executable(Kernel ${SOURCES})
+target_compile_options(Kernel PRIVATE -mcmodel=kernel -fno-pic -fno-pie)
+target_link_options(Kernel PRIVATE -no-pie)
 set_target_properties(Kernel PROPERTIES LINK_DEPENDS ${CMAKE_CURRENT_SOURCE_DIR}/kernel.ld)
 
 theos_install_headers(Kernel)

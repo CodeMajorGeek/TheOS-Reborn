@@ -70,3 +70,4 @@ add_subdirectory(Kernel)
 
 # Keep run/iso artifacts in sync with current kernel sources/config.
 add_dependencies(iso Kernel)
+add_dependencies(create-disk TheApp)

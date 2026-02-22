@@ -41,10 +41,11 @@ bool HPET_init(void)
         return false;
     }
 
-    uintptr_t hpet_base = (uintptr_t) table->address.address;
-    uintptr_t hpet_page = hpet_base & ~(uintptr_t) 0xFFFULL;
-    VMM_map_mmio_uc_page(hpet_page, hpet_page);
-    HPET_regs = (volatile uint8_t*) hpet_base;
+    uintptr_t hpet_base_phys = (uintptr_t) table->address.address;
+    uintptr_t hpet_page_phys = hpet_base_phys & ~(uintptr_t) 0xFFFULL;
+    uintptr_t hpet_page_virt = VMM_MMIO_VIRT(hpet_page_phys);
+    VMM_map_mmio_uc_page(hpet_page_virt, hpet_page_phys);
+    HPET_regs = (volatile uint8_t*) (hpet_page_virt + (hpet_base_phys - hpet_page_phys));
 
     uint64_t cap = HPET_read64(HPET_GENERAL_CAP_REG);
     uint64_t period_fs = (cap >> HPET_COUNTER_CLK_PERIOD_SHIFT) & HPET_COUNTER_CLK_PERIOD_MASK;
@@ -66,7 +67,7 @@ bool HPET_init(void)
 
     HPET_ready = true;
     kdebug_printf("[HPET] enabled base=0x%llX period_fs=%llu freq=%lluHz counter=%s\n",
-                  (unsigned long long) hpet_base,
+                  (unsigned long long) hpet_base_phys,
                   (unsigned long long) HPET_period_fs,
                   (unsigned long long) HPET_frequency_hz,
                   HPET_counter_64bit ? "64-bit" : "32-bit");

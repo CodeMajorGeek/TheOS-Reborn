@@ -15,10 +15,15 @@ typedef struct PMM_region
     uint64_t len;
 } PMM_region_t;
 
-void PMM_init(uintptr_t kernel_start, uintptr_t kernel_end);
+void PMM_init(uintptr_t kernel_phys_start,
+              uintptr_t kernel_phys_end,
+              uintptr_t kernel_virt_start,
+              uintptr_t kernel_virt_end);
 
 uintptr_t PMM_get_kernel_start(void);
 uintptr_t PMM_get_kernel_end(void);
+uintptr_t PMM_get_kernel_virt_start(void);
+uintptr_t PMM_get_kernel_virt_end(void);
 
 PMM_region_t* PMM_get_regions(void);
 int PMM_get_num_regions(void);

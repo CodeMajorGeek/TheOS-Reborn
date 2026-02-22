@@ -3,9 +3,24 @@
 
 #include <string.h>
 
-const char* RTC_DAY_NAMES[7] = {
-    "Mon\x00", "Tue\x00", "Wed\x00", "Thu\x00", "Fri\x00", "Sat\x00", "Sun\x00"
+static const char* RTC_DAY_NAMES[7] = {
+    "Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"
 };
+
+static uint8_t RTC_from_bcd(uint8_t value)
+{
+    return (uint8_t) ((value & 0x0F) + ((value / 16) * 10));
+}
+
+static const char* RTC_weekday_to_name(uint8_t raw_weekday, bool is_bcd)
+{
+    uint8_t weekday = is_bcd ? RTC_from_bcd(raw_weekday) : raw_weekday;
+    if (weekday < 1 || weekday > 7)
+        return "Unk";
+
+    // CMOS weekday is 1..7, array index is 0..6.
+    return RTC_DAY_NAMES[weekday - 1];
+}
 
 
 bool RTC_update_in_progress(void)
@@ -72,24 +87,25 @@ uint8_t RTC_read_century(void)
 void RTC_read(RTC_t* rtc)
 {
     RTC_wait_ready();
+    bool is_bcd = RTC_is_BCD();
 
     rtc->hours = RTC_read_hours();
     rtc->minutes = RTC_read_minutes();
     rtc->seconds = RTC_read_seconds();
 
-    strcpy(rtc->weekday, RTC_DAY_NAMES[RTC_read_weekday()]);
+    strcpy(rtc->weekday, RTC_weekday_to_name(RTC_read_weekday(), is_bcd));
     rtc->month_day = RTC_read_month_day();
     rtc->month = RTC_read_month();
     rtc->year = RTC_read_year();
 
-    if (RTC_is_BCD())
+    if (is_bcd)
     {
-        rtc->hours = (rtc->hours & 0x0F) + ((rtc->hours / 16) * 10);
-        rtc->minutes = (rtc->minutes & 0x0F) + ((rtc->minutes / 16) * 10);
-        rtc->seconds = (rtc->seconds & 0x0F) + ((rtc->seconds / 16) * 10);
+        rtc->hours = RTC_from_bcd(rtc->hours);
+        rtc->minutes = RTC_from_bcd(rtc->minutes);
+        rtc->seconds = RTC_from_bcd(rtc->seconds);
 
-        rtc->month_day = (rtc->month_day & 0x0F) + ((rtc->month_day / 16) * 10);
-        rtc->month = (rtc->month & 0x0F) + ((rtc->month / 16) * 10);
-        rtc->year = (rtc->year & 0x0F) + ((rtc->year / 16) * 10) + 2000;
+        rtc->month_day = RTC_from_bcd(rtc->month_day);
+        rtc->month = RTC_from_bcd(rtc->month);
+        rtc->year = (uint16_t) RTC_from_bcd((uint8_t) rtc->year) + 2000;
     }
 }

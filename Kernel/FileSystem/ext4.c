@@ -8,6 +8,9 @@
 
 static ext4_fs_t* ext4_active_fs;
 
+#define EXT4_INODE_MODE_TYPE_MASK    0xF000U
+#define EXT4_INODE_MODE_DIRECTORY    0x4000U
+
 static uint16_t ext4_dir_ideal_len(uint8_t name_len)
 {
     return (uint16_t) ((8U + name_len + 3U) & ~3U);
@@ -293,6 +296,57 @@ static bool ext4_find_dir_entry(ext4_fs_t* fs, const ext4_inode_t* dir, const ch
     return false;
 }
 
+static bool ext4_resolve_path_inode(ext4_fs_t* fs, const char* path, ext4_inode_t* out_inode)
+{
+    if (!fs || !path || !out_inode)
+        return false;
+
+    ext4_inode_t current;
+    if (!ext4_read_inode(fs, EXT4_INODE_ROOT, &current))
+        return false;
+
+    const char* cursor = path;
+    while (*cursor == '/')
+        cursor++;
+
+    if (*cursor == '\0')
+    {
+        *out_inode = current;
+        return true;
+    }
+
+    while (*cursor != '\0')
+    {
+        if ((current.i_mode & EXT4_INODE_MODE_TYPE_MASK) != EXT4_INODE_MODE_DIRECTORY)
+            return false;
+
+        char component[256];
+        size_t component_len = 0;
+        while (*cursor != '\0' && *cursor != '/')
+        {
+            if (component_len >= sizeof(component) - 1U)
+                return false;
+            component[component_len++] = *cursor++;
+        }
+        component[component_len] = '\0';
+
+        while (*cursor == '/')
+            cursor++;
+
+        if (component_len == 0)
+            continue;
+
+        ext4_dir_entry_t entry;
+        if (!ext4_find_dir_entry(fs, &current, component, &entry, NULL))
+            return false;
+        if (!ext4_read_inode(fs, entry.inode, &current))
+            return false;
+    }
+
+    *out_inode = current;
+    return true;
+}
+
 static bool ext4_alloc_from_bitmap(ext4_fs_t* fs, uint32_t bitmap_block, uint32_t start_bit, uint32_t max_bits, uint32_t* out_index)
 {
     uint8_t* bitmap = (uint8_t*) kmalloc(fs->block_size);
@@ -534,16 +588,10 @@ bool ext4_read_file(ext4_fs_t* fs, const char* name, uint8_t** out_buf, size_t* 
     *out_buf = NULL;
     *out_size = 0;
 
-    ext4_inode_t root;
-    if (!ext4_read_inode(fs, EXT4_INODE_ROOT, &root))
-        return false;
-
-    ext4_dir_entry_t entry;
-    if (!ext4_find_dir_entry(fs, &root, name, &entry, NULL))
-        return false;
-
     ext4_inode_t inode;
-    if (!ext4_read_inode(fs, entry.inode, &inode))
+    if (!ext4_resolve_path_inode(fs, name, &inode))
+        return false;
+    if ((inode.i_mode & EXT4_INODE_MODE_TYPE_MASK) == EXT4_INODE_MODE_DIRECTORY)
         return false;
 
     size_t size = inode.i_size_lo;

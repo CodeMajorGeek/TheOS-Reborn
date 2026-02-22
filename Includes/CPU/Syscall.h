@@ -23,7 +23,8 @@ enum
     SYS_SCHED_INFO_GET = 7,
     SYS_AHCI_IRQ_INFO_GET = 8,
     SYS_RCU_SYNC = 9,
-    SYS_RCU_INFO_GET = 10
+    SYS_RCU_INFO_GET = 10,
+    SYS_CONSOLE_WRITE = 11
 };
 
 typedef struct syscall_cpu_info

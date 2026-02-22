@@ -1,49 +1,25 @@
 .section .text
 
 .globl switch_to_usermode
-.extern userland_stack_top
-.extern userland_stack_bottom
-
-# Requested Privilege Level (RPL)
-.set RPL_3,               0x3
 
 # Segment selectors with RPL
-.set USER_CODE_SEGMENT_RPL3,  0x23  # USER_CODE_SEGMENT (0x20) | RPL_3 (0x3)
-.set USER_DATA_SEGMENT_RPL3,  0x1B  # USER_DATA_SEGMENT (0x18) | RPL_3 (0x3)
+.set USER_CODE_SEGMENT_RPL3,  0x23
+.set USER_DATA_SEGMENT_RPL3,  0x1B
 
 # RFLAGS bits
-.set RFLAGS_IF,           1 << 9  # Interrupt Flag
+.set RFLAGS_IF,               1 << 9
 
-# For iretq, we need to build a stack frame on the stack:
-#   [RSP+24] = SS (USER_DATA_SEGMENT | RPL_3)
-#   [RSP+16] = RSP (user stack)
-#   [RSP+8]  = RFLAGS (with IF enabled)
-#   [RSP+0]  = CS:RIP (USER_CODE_SEGMENT | RPL_3 : in_user_mode)
-
+# switch_to_usermode(entry_rip, user_stack_top)
+#   rdi = user RIP
+#   rsi = user RSP top
 switch_to_usermode:
-    # Build stack frame for iretq on current kernel stack
-    # Format (top to bottom): SS, RSP, RFLAGS, CS, RIP
-    movabsq $userland_stack_top, %rax  # User stack address
-    
-    pushq $USER_DATA_SEGMENT_RPL3      # SS = USER_DATA_SEGMENT | RPL_3
-    pushq %rax                          # RSP = user stack address
-    pushfq                              # RFLAGS
-    orq $RFLAGS_IF, (%rsp)              # Enable IF (bit 9) in RFLAGS on stack
-    pushq $USER_CODE_SEGMENT_RPL3       # CS = USER_CODE_SEGMENT | RPL_3
-    pushq $in_user_mode                # RIP
-    
-    # Do NOT load DS/ES/FS/GS here: we're still in ring 0 (kernel)
-    # Loading user segments (0x1B) in ring 0 causes a #GP
-    # iretq will automatically load SS from stack
-    # In 64-bit, DS/ES/FS/GS are largely ignored, can be configured later
-    
-    # iretq will load CS, RIP, RFLAGS, SS, RSP from stack
-    # RSP will be changed to point to user stack
-    iretq
+    movq %rsi, %rax
+    andq $-16, %rax
 
-in_user_mode:
-    # We are now in user mode (ring 3).
-    # Keep CPU in a quiet userland loop (no filesystem syscall spam).
-1:
-    pause
-    jmp 1b
+    pushq $USER_DATA_SEGMENT_RPL3
+    pushq %rax
+    pushfq
+    orq $RFLAGS_IF, (%rsp)
+    pushq $USER_CODE_SEGMENT_RPL3
+    pushq %rdi
+    iretq

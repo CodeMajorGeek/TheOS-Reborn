@@ -17,9 +17,13 @@ TheOS-Reborn is a 64-bit rewrite of my previous TheOS attempt.
 - SSE/AVX init with lazy FPU switching (`CR0.TS` + `#NM`) and AVX-safe state save/restore (`xsave/xrstor`, CPUID leaf `0xD`, per-task aligned state).
 - Kernel heap allocator (`kmalloc`/`krealloc`/`kfree`) protected for SMP with an irq-safe spinlock.
 - NUMA detection via ACPI SRAT/SLIT (testable in QEMU with `-numa`).
+- ELF64 userland loader (ext4 root file -> mapped user segments + ring3 jump).
+- First userland app `TheApp` (`Hello World`) built and copied to disk image by `create-disk`.
+- Userland mappings are in a dedicated lower-half range with `U/S=User`, while kernel mappings are `Supervisor-only`.
 
 ## Known limitations
 - Scheduler is still a kernel bring-up scheduler, not a full user process scheduler yet.
+- Userland execution currently targets one loaded ELF app at boot (`TheApp`).
 - Some paths are still validated mostly through boot-time stress tests.
 - NUMA-aware allocation/scheduling policies are not implemented yet (detection/mapping is done).
 

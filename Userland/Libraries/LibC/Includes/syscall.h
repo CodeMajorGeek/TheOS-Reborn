@@ -15,7 +15,8 @@ enum
     SYS_SCHED_INFO_GET = 7,
     SYS_AHCI_IRQ_INFO_GET = 8,
     SYS_RCU_SYNC = 9,
-    SYS_RCU_INFO_GET = 10
+    SYS_RCU_INFO_GET = 10,
+    SYS_CONSOLE_WRITE = 11
 };
 
 typedef struct syscall_cpu_info
@@ -63,5 +64,6 @@ int sys_sched_info_get(syscall_sched_info_t* out_info);
 int sys_ahci_irq_info_get(syscall_ahci_irq_info_t* out_info);
 int sys_rcu_sync(void);
 int sys_rcu_info_get(syscall_rcu_info_t* out_info);
+int sys_console_write(const void* buf, size_t len);
 
 #endif

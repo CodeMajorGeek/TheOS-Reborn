@@ -465,17 +465,13 @@ bool AHCI_rebase_port(HBA_PORT_t* port, int num)
         return false;
     }
 
-    void* clb_virt = PMM_alloc_page();
-    void* fb_virt = PMM_alloc_page();
-    if (!clb_virt || !fb_virt)
+    uintptr_t clb_phys = (uintptr_t) PMM_alloc_page();
+    uintptr_t fb_phys = (uintptr_t) PMM_alloc_page();
+    if (clb_phys == 0 || fb_phys == 0)
         panic("SATA: failed to allocate CLB/FIS buffers !");
 
-    uintptr_t clb_phys = 0;
-    uintptr_t fb_phys = 0;
-    if (!VMM_virt_to_phys((uintptr_t) clb_virt, &clb_phys))
-        panic("SATA CLB is not mapped !");
-    if (!VMM_virt_to_phys((uintptr_t) fb_virt, &fb_phys))
-        panic("SATA FIS is not mapped !");
+    void* clb_virt = (void*) P2V(clb_phys);
+    void* fb_virt = (void*) P2V(fb_phys);
 
     port->clb = ADDRLO(clb_phys);
     port->clbu = ADDRHI(clb_phys);
@@ -492,13 +488,10 @@ bool AHCI_rebase_port(HBA_PORT_t* port, int num)
     HBA_CMD_HEADER_t* cmd_header = (HBA_CMD_HEADER_t*) clb_virt;
     for (uint8_t i = 0; i < 32; i++)
     {
-        void* ct_virt = PMM_alloc_page();
-        if (!ct_virt)
+        uintptr_t ct_phys = (uintptr_t) PMM_alloc_page();
+        if (ct_phys == 0)
             panic("SATA CTBA allocation failed !");
-
-        uintptr_t ct_phys = 0;
-        if (!VMM_virt_to_phys((uintptr_t) ct_virt, &ct_phys))
-            panic("SATA CTBA is not mapped !");
+        void* ct_virt = (void*) P2V(ct_phys);
 
         cmd_header[i].prdtl = 8; // 8 prdt entries per command table.
         cmd_header[i].ctba = ADDRLO(ct_phys);
@@ -576,8 +569,8 @@ int AHCI_sata_read(HBA_PORT_t* port, uint32_t startl, uint32_t starth, uint32_t 
 
     uintptr_t clb_phys = HILO2ADDR(port->clbu, port->clb);
     uintptr_t clb_virt = 0;
-    if (!VMM_phys_to_virt_identity(clb_phys, &clb_virt))
-        panic("SATA CLB is not identity-mapped !");
+    if (!VMM_phys_to_virt(clb_phys, &clb_virt))
+        panic("SATA CLB is not mapped !");
     HBA_CMD_HEADER_t* cmd_header = (HBA_CMD_HEADER_t*) clb_virt;
 
     cmd_header += slot;
@@ -587,8 +580,8 @@ int AHCI_sata_read(HBA_PORT_t* port, uint32_t startl, uint32_t starth, uint32_t 
 
     uintptr_t ctba_phys = HILO2ADDR(cmd_header->ctbau, cmd_header->ctba);
     uintptr_t ctba_virt = 0;
-    if (!VMM_phys_to_virt_identity(ctba_phys, &ctba_virt))
-        panic("SATA CTBA is not identity-mapped !");
+    if (!VMM_phys_to_virt(ctba_phys, &ctba_virt))
+        panic("SATA CTBA is not mapped !");
     HBA_CMD_TBL_t* cmd_tbl = (HBA_CMD_TBL_t*) ctba_virt;
     memset(cmd_tbl, 0, PHYS_PAGE_SIZE);
 
@@ -660,7 +653,7 @@ int AHCI_SATA_write(HBA_PORT_t* port, uint32_t startl, uint32_t starth, uint32_t
 
     uintptr_t clb_phys = HILO2ADDR(port->clbu, port->clb);
     uintptr_t clb_virt = 0;
-    if (!VMM_phys_to_virt_identity(clb_phys, &clb_virt))
+    if (!VMM_phys_to_virt(clb_phys, &clb_virt))
         panic("SATA CLB is not mapped !");
     HBA_CMD_HEADER_t* cmd_header = (HBA_CMD_HEADER_t*) clb_virt;
     cmd_header += slot;
@@ -672,7 +665,7 @@ int AHCI_SATA_write(HBA_PORT_t* port, uint32_t startl, uint32_t starth, uint32_t
 
     uintptr_t ctba_phys = HILO2ADDR(cmd_header->ctbau, cmd_header->ctba);
     uintptr_t ctba_virt = 0;
-    if (!VMM_phys_to_virt_identity(ctba_phys, &ctba_virt))
+    if (!VMM_phys_to_virt(ctba_phys, &ctba_virt))
         panic("SATA CTBA is not mapped !");
     HBA_CMD_TBL_t* cmd_tbl = (HBA_CMD_TBL_t*) ctba_virt;
     memset(cmd_tbl, 0, PHYS_PAGE_SIZE);

@@ -288,7 +288,13 @@ static void SMP_ipi_timer_init_handler(interrupt_frame_t* frame)
 
 static bool SMP_prepare_trampoline(void)
 {
-    VMM_map_page(SMP_TRAMPOLINE_PHYS, SMP_TRAMPOLINE_PHYS);
+    uintptr_t trampoline_page_phys = SMP_TRAMPOLINE_PHYS & ~(uintptr_t) 0xFFFULL;
+    uintptr_t trampoline_page_virt = P2V(trampoline_page_phys);
+    uintptr_t trampoline_virt = P2V(SMP_TRAMPOLINE_PHYS);
+
+    // AP startup trampoline executes at low linear addresses right after SIPI.
+    VMM_map_page(trampoline_page_phys, trampoline_page_phys);
+    VMM_map_page(trampoline_page_virt, trampoline_page_phys);
 
     size_t trampoline_size = (size_t) (SMP_ap_trampoline_end - SMP_ap_trampoline_start);
     size_t handoff_offset = (size_t) (SMP_HANDOFF_PHYS - SMP_TRAMPOLINE_PHYS);
@@ -298,8 +304,8 @@ static bool SMP_prepare_trampoline(void)
         return false;
     }
 
-    memset((void*) (uintptr_t) SMP_TRAMPOLINE_PHYS, 0, 0x1000);
-    memcpy((void*) (uintptr_t) SMP_TRAMPOLINE_PHYS, SMP_ap_trampoline_start, trampoline_size);
+    memset((void*) trampoline_virt, 0, 0x1000);
+    memcpy((void*) trampoline_virt, SMP_ap_trampoline_start, trampoline_size);
     return true;
 }
 
@@ -1309,7 +1315,7 @@ bool SMP_init(void)
     if (!SMP_prepare_trampoline())
         return false;
 
-    volatile SMP_handoff_t* handoff = (volatile SMP_handoff_t*) (uintptr_t) SMP_HANDOFF_PHYS;
+    volatile SMP_handoff_t* handoff = (volatile SMP_handoff_t*) P2V(SMP_HANDOFF_PHYS);
     uintptr_t cr3 = SMP_read_cr3();
 
     for (uint8_t cpu_index = 0; cpu_index < core_count; cpu_index++)

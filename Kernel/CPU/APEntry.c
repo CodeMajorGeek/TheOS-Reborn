@@ -7,11 +7,12 @@
 #include <CPU/Syscall.h>
 #include <CPU/x86.h>
 #include <Debug/KDebug.h>
+#include <Memory/VMM.h>
 #include <Task/Task.h>
 
 void SMP_ap_entry(uintptr_t handoff_phys)
 {
-    volatile SMP_handoff_t* handoff = (volatile SMP_handoff_t*) handoff_phys;
+    volatile SMP_handoff_t* handoff = (volatile SMP_handoff_t*) P2V(handoff_phys);
 
     cli();
 

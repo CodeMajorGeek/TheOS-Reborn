@@ -1,26 +1,49 @@
 #include <stdio.h>
 
+#if defined(__THEOS_KERNEL)
 #include <Device/TTY.h>
 #if defined(__THEOS_KERNEL) && defined(THEOS_ENABLE_KDEBUG)
 #include <Debug/KDebug.h>
+#endif
+#else
+#include <syscall.h>
 #endif
 
 #include <stdbool.h>
 #include <stdint.h>
 #include <limits.h>
+#include <string.h>
 
 /* We are building stdio as kernel (not for long, we will use syscall later on). */
 
 int putc(int c)
 {
+#if defined(__THEOS_KERNEL)
     TTY_putc(c);
     return (char) c;
+#else
+    char ch = (char) c;
+    if (sys_console_write(&ch, 1) < 0)
+        return EOF;
+    return (unsigned char) ch;
+#endif
 }
 
 int puts(const char *s)
 {
+#if defined(__THEOS_KERNEL)
     TTY_puts(s);
     return 1;
+#else
+    if (!s)
+        return EOF;
+
+    size_t len = strlen(s);
+    if (len == 0)
+        return 1;
+
+    return sys_console_write(s, len) < 0 ? EOF : 1;
+#endif
 }
 
 int __printf(char* buff, size_t buff_len, const char* __restrict format, va_list parameters)
@@ -124,7 +147,7 @@ int __printf(char* buff, size_t buff_len, const char* __restrict format, va_list
             
             for (size_t i = 0; i < len; i++)
                 buff[written + i] = 
-                    uppercase ? str[i] - 32 : format[i];
+                    uppercase ? str[i] - 32 : str[i];
 
             written += len;
         }

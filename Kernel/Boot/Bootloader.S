@@ -1,5 +1,6 @@
 #define ASM_FILE
 #include <Multiboot2/multiboot2.h>
+#include <Memory/VMMLayout.h>
 
 #ifdef HAVE_ASM_USCORE
 # define EXT_C(sym) _ ## sym
@@ -15,6 +16,11 @@
 
 /* The size of our early kernel stack (16KiB). */
 #define STACK_SIZE  0x4000
+
+.set KERNEL_VIRT_BASE,   VMM_KERNEL_VIRT_BASE
+.set HHDM_PML4_INDEX,    VMM_HHDM_PML4_INDEX
+.set KERNEL_PML4_INDEX,  VMM_KERNEL_PML4_INDEX
+.set KERNEL_PDPT_INDEX,  VMM_KERNEL_PDPT_INDEX
 
 .set HEADER_LEN,        mb2_hdr_end - mb2_hdr
 .set CHECKSUM,          -(MULTIBOOT2_HEADER_MAGIC + MULTIBOOT_ARCHITECTURE_I386 + HEADER_LEN)
@@ -93,7 +99,7 @@ mb2_hdr_end:
 
 # Execute our first loader code segment starting at multiboot_entry.
 multiboot_entry:   
-    movl $kernel_stack_top, %esp        # Use the dedicated early kernel stack.
+    movl $(kernel_stack_top - KERNEL_VIRT_BASE), %esp        # Use the dedicated early kernel stack.
     movl $0, %ebp
 
     movl %ebx, %edi                 # Keep the Multiboot2 info ptr for the k_entry function.
@@ -106,9 +112,9 @@ multiboot_entry:
     calll setup_page_tables         # It's an x86_64 CPU architecture so let's setup the 4 tables for paging.
     calll enable_paging             # Let's enable the paging on the CPU.
 
-    lgdtl (gdt64.pointer)           # Now setup the GDTs to load our different segment of memory.
+    lgdtl (gdt64.pointer32 - KERNEL_VIRT_BASE)         # Load a 32-bit GDTR (low physical alias).
 
-    jmpl $gdt64.kernel_code, $long_mode_entry   # Let's do a far jump to long mode (64 bits) at the kernel code segment.
+    jmpl $gdt64.kernel_code, $(long_mode_entry - KERNEL_VIRT_BASE)   # Enter long mode via low alias, then jump to higher-half.
 
     jmp end                                     # Should not be reached !
 
@@ -176,21 +182,27 @@ check_long_mode.no_long_mode:
     jmp error
 
 setup_page_tables:
-    movl $pdp, %eax                 # Let's store the pdp table offset into eax.
-    orl $0b111, %eax                # Make this entry present, user and writable.
-    movl %eax, (pml4)               # Now move the pdp offset into the first pml4 table entry.
+    movl $(pdp_low - KERNEL_VIRT_BASE), %eax
+    orl $0b011, %eax
+    movl %eax, (pml4 - KERNEL_VIRT_BASE)
+    movl %eax, (pml4 - KERNEL_VIRT_BASE + (HHDM_PML4_INDEX * 8))
 
-    movl $pd, %eax                  # Let's store the pd table offset into eax.
-    orl $0b111, %eax                # Make this entry present, user and writable.
-    movl %eax, (pdp)                # Now move the pd offset into the first pdp table entry.
+    movl $(pdp_high - KERNEL_VIRT_BASE), %eax
+    orl $0b011, %eax
+    movl %eax, (pml4 - KERNEL_VIRT_BASE + (KERNEL_PML4_INDEX * 8))
+
+    movl $(pd - KERNEL_VIRT_BASE), %eax
+    orl $0b011, %eax
+    movl %eax, (pdp_low - KERNEL_VIRT_BASE)
+    movl %eax, (pdp_high - KERNEL_VIRT_BASE + (KERNEL_PDPT_INDEX * 8))
 
     movl $0, %ecx                   # Let's define a counter start at 0 to loop 512 times.
 setup_page_tables.map_pd_table:
     # Let's map pd entry to a huge page that starts at address 2MiB * ecx (counter).
     movl $0x200000, %eax            # 2 MiB page.
     mull %ecx                       # The start address of the ecx-th page.  
-    orl $0b10000111, %eax           # Make it present, writable, user and huge.
-    movl %eax, pd(,%ecx,8)          # Map this entry.
+    orl $0b10000011, %eax           # Make it present, writable and huge.
+    movl %eax, (pd - KERNEL_VIRT_BASE)(,%ecx,8)          # Map this entry.
 
     incl %ecx                       # Increment the counter
     cmpl $512, %ecx                 # Countinue while ecx < 512.
@@ -199,7 +211,7 @@ setup_page_tables.map_pd_table:
     retl
 
 enable_paging:
-    movl $pml4, %eax                # Store the pml4 table offset into eax.
+    movl $(pml4 - KERNEL_VIRT_BASE), %eax                # Store the pml4 table offset into eax.
     movl %eax, %cr3                 # Transfer it into the cr3 special register (So the CPU know where we store our pages data).
 
     movl %cr4, %eax                 # Store the cr4 special register into eax.
@@ -233,6 +245,11 @@ error:
 long_mode_entry:    # Finally, we can do some stuff into long mode !
     cli
 
+    movabsq $long_mode_entry_high, %rax
+    jmp *%rax
+
+long_mode_entry_high:
+
     # Let's set all the segments registers (ax, ss, ds, es, fs and gs) to the data descritor.
     movw $gdt64.kernel_data, %ax 
     movw %ax, %ss
@@ -241,8 +258,12 @@ long_mode_entry:    # Finally, we can do some stuff into long mode !
     movw %ax, %fs
     movw %ax, %gs
 
-    pushq %rdi              # Let's push the MULTIBOOT2 multiboot_info offset onto the stack to parse it in the C as argument.
-    callq EXT_C(k_entry)    # Now we can call our k_entry C function.
+    movabsq $kernel_stack_top, %rsp
+    xorq %rbp, %rbp
+
+    # SysV ABI: keep RSP 16-byte aligned before the call so k_entry sees
+    # RSP%16==8 on entry (return address already pushed by call).
+    callq EXT_C(k_entry)    # First argument (multiboot info) is already in RDI.
     
 end:                # This part should be never be reached !
     cli
@@ -252,10 +273,12 @@ end:                # This part should be never be reached !
 .section .bss
 .align 4096
 
-# We store our pages into the bss section (3 page of 4KiB with an 4KiB alignement).
+# We store our pages into the bss section (4 pages of 4KiB with a 4KiB alignment).
 pml4:
     .zero 4096
-pdp:
+pdp_low:
+    .zero 4096
+pdp_high:
     .zero 4096
 pd:
     .zero 4096
@@ -312,6 +335,11 @@ TSS_GDT_segment:
     .quad 0
 
 .globl kernel_gdt64_pointer
+gdt64.pointer32:
+    .word . - gdt64 - 1
+    .long (gdt64 - KERNEL_VIRT_BASE)
+
+/* 64-bit GDTR used later by the kernel proper (BSP/AP paths). */
 kernel_gdt64_pointer:
 gdt64.pointer:
     .word . - gdt64 - 1
