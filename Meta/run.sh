@@ -9,6 +9,16 @@
 [ -z "$THEOS_QEMU_NUMA" ] && THEOS_QEMU_NUMA=0
 [ -z "$THEOS_BOOT_FROM_ISO_DISK" ] && THEOS_BOOT_FROM_ISO_DISK=1
 
+if [ ! -f "TheOS.iso" ]; then
+	echo "[run] missing TheOS.iso (build it first with: ninja -C Build iso)" >&2
+	exit 1
+fi
+
+if [ "$THEOS_BOOT_FROM_ISO_DISK" = "0" ] && [ ! -f "$THEOS_DISK_NAME" ]; then
+	echo "[run] missing disk image '$THEOS_DISK_NAME' (create it with: ninja -C Build create-disk)" >&2
+	exit 1
+fi
+
 NUMA_ARGS=()
 if [ "$THEOS_QEMU_NUMA" = "1" ]; then
 	[ -z "$THEOS_NUMA_NODE0_MEM" ] && THEOS_NUMA_NODE0_MEM="64M"
@@ -24,12 +34,14 @@ fi
 
 BOOT_MEDIA_ARGS=()
 if [ "$THEOS_BOOT_FROM_ISO_DISK" = "1" ]; then
+	echo "[run] root fs source: embedded disk in TheOS.iso"
 	BOOT_MEDIA_ARGS=(
 		-drive "id=osdisk,file=TheOS.iso,format=raw,if=none"
 		-device "ahci,id=ahci"
 		-device "driver=ide-hd,drive=osdisk,bus=ahci.0"
 	)
 else
+	echo "[run] root fs source: external disk image '$THEOS_DISK_NAME'"
 	BOOT_MEDIA_ARGS=(
 		-cdrom "TheOS.iso"
 		-drive "id=disk,file=$THEOS_DISK_NAME,format=raw,if=none"

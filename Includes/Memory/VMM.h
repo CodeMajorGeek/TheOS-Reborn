@@ -21,7 +21,7 @@
 #define PDT_INDEX(x)    (((x) >> 21) & 0x1FF)
 #define PT_INDEX(x)     (((x) >> 12) & 0x1FF)
 
-#define FRAME           0xFFFFFFFFFFFFF000ULL
+#define FRAME           0x000FFFFFFFFFF000ULL
 
 #define HILO2ADDR(hi, lo)   ((((uint64_t) hi) << 32) + lo)
 

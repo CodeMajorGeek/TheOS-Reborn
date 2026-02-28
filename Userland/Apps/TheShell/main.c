@@ -155,6 +155,92 @@ static bool shell_resolve_path(const char* cwd, const char* input, char* out, si
     return shell_normalize_absolute(joined, out, out_size);
 }
 
+static bool shell_command_is_path(const char* command)
+{
+    if (!command)
+        return false;
+
+    while (*command != '\0')
+    {
+        if (*command == '/')
+            return true;
+        command++;
+    }
+
+    return false;
+}
+
+static const char* shell_signal_name(int signal)
+{
+    switch (signal)
+    {
+        case SYS_SIGFPE:
+            return "SIGFPE";
+        case SYS_SIGTRAP:
+            return "SIGTRAP";
+        case SYS_SIGILL:
+            return "SIGILL";
+        case SYS_SIGSEGV:
+            return "SIGSEGV";
+        case SYS_SIGFAULT:
+            return "SIGFAULT";
+        default:
+            return "SIGUNKNOWN";
+    }
+}
+
+static void shell_cmd_exec_path(const char* cwd, const char* command)
+{
+    if (!cwd || !command || command[0] == '\0')
+        return;
+
+    char resolved[SHELL_PATH_MAX];
+    if (!shell_resolve_path(cwd, command, resolved, sizeof(resolved)))
+    {
+        printf("exec: invalid path\n");
+        return;
+    }
+
+    int fork_rc = sys_fork();
+    if (fork_rc < 0)
+    {
+        printf("exec: fork failed (rc=%d)\n", fork_rc);
+        return;
+    }
+
+    if (fork_rc == 0)
+    {
+        const char* const argv[] = { resolved, NULL };
+        const char* const envp[] = { NULL };
+        int rc = sys_execve(resolved, argv, envp);
+        printf("exec: cannot run '%s' (rc=%d)\n", resolved, rc);
+        sys_exit(127);
+    }
+
+    for (;;)
+    {
+        int status = 0;
+        int signal = 0;
+        int wait_rc = sys_waitpid(fork_rc, &status, &signal);
+        if (wait_rc == fork_rc)
+        {
+            if (signal != 0)
+                printf("exec: pid=%d killed by %s\n", fork_rc, shell_signal_name(signal));
+            else if (status != 0)
+                printf("exec: pid=%d exited status=%d\n", fork_rc, status);
+            return;
+        }
+
+        if (wait_rc < 0)
+        {
+            printf("exec: waitpid failed for pid=%d\n", fork_rc);
+            return;
+        }
+
+        (void) sys_sleep_ms(10);
+    }
+}
+
 static void shell_cmd_pwd(const char* cwd)
 {
     printf("%s\n", cwd);
@@ -349,6 +435,7 @@ static void shell_print_help(void)
     printf("  touch <path>\n");
     printf("  mkdir <path>\n");
     printf("  echo <text> | <path>\n");
+    printf("  <path/to/binary> (ex: ./bin/TheTest)\n");
     printf("  help\n");
     printf("  exit\n");
 }
@@ -410,6 +497,8 @@ int main(void)
             printf("Bye !\n");
             sys_exit(0);
         }
+        else if (shell_command_is_path(command))
+            shell_cmd_exec_path(cwd, command);
         else
             printf("unknown command: %s\n", command);
     }

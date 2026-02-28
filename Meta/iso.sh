@@ -16,6 +16,8 @@ cp Kernel/Kernel iso/boot/TheOS
 if [ "$THEOS_EMBED_DISK_IN_ISO" = "1" ]; then
 	echo "[iso] preparing embedded root disk '$THEOS_DISK_NAME'"
 	"$SCRIPT_DIR/disk.sh"
+else
+	echo "[iso] embedded root disk disabled (THEOS_EMBED_DISK_IN_ISO=0)"
 fi
 
 if [ "$THEOS_EMBED_DISK_IN_ISO" = "1" ] && [ -f "$THEOS_DISK_NAME" ]; then

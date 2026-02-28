@@ -11,6 +11,7 @@ set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 
 set(THEOS_ARCH "x86_64" CACHE STRING "Target architecture for TheOS.")
 option(THEOS_QEMU_NUMA_DEFAULT "Enable QEMU NUMA by default for the run target." ON)
+option(THEOS_KERNEL_FS_DISK_IMG "Use disk.img as kernel filesystem in run target. OFF uses filesystem embedded in TheOS.iso." OFF)
 
 set(CMAKE_C_STANDARD 11)
 set(CMAKE_C_STANDARD_REQUIRED OFF)
@@ -31,16 +32,29 @@ set(CMAKE_AR ${TOOLCHAIN_PREFIX}ar)
 
 set(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} -msoft-float -O -fno-stack-protector -ffreestanding -nostdlib -nostdinc -static")
 
+set(THEOS_BOOT_FROM_ISO_DISK_ARG "1")
+set(THEOS_EMBED_DISK_IN_ISO_ARG "1")
+if(THEOS_KERNEL_FS_DISK_IMG)
+	set(THEOS_BOOT_FROM_ISO_DISK_ARG "0")
+	set(THEOS_EMBED_DISK_IN_ISO_ARG "0")
+	message(STATUS "Run root filesystem source: disk.img (THEOS_KERNEL_FS_DISK_IMG=ON)")
+else()
+	message(STATUS "Run root filesystem source: embedded ext4 in TheOS.iso (THEOS_KERNEL_FS_DISK_IMG=OFF)")
+endif()
+
 add_custom_target(iso
 	COMMAND chmod +x ${CMAKE_SOURCE_DIR}/Meta/iso.sh
-	COMMAND ${CMAKE_SOURCE_DIR}/Meta/iso.sh
+	COMMAND ${CMAKE_COMMAND} -E env THEOS_EMBED_DISK_IN_ISO=${THEOS_EMBED_DISK_IN_ISO_ARG} ${CMAKE_SOURCE_DIR}/Meta/iso.sh
 	USES_TERMINAL
 )
 
 add_custom_target(run
 	DEPENDS iso
 	COMMAND chmod +x ${CMAKE_SOURCE_DIR}/Meta/run.sh
-	COMMAND ${CMAKE_COMMAND} -E env THEOS_QEMU_NUMA=$<IF:$<BOOL:${THEOS_QEMU_NUMA_DEFAULT}>,1,0> ${CMAKE_SOURCE_DIR}/Meta/run.sh
+	COMMAND ${CMAKE_COMMAND} -E env
+		THEOS_QEMU_NUMA=$<IF:$<BOOL:${THEOS_QEMU_NUMA_DEFAULT}>,1,0>
+		THEOS_BOOT_FROM_ISO_DISK=${THEOS_BOOT_FROM_ISO_DISK_ARG}
+		${CMAKE_SOURCE_DIR}/Meta/run.sh
 	USES_TERMINAL
 )
 
@@ -72,5 +86,7 @@ add_subdirectory(Kernel)
 add_dependencies(iso Kernel)
 add_dependencies(iso TheApp)
 add_dependencies(iso TheShell)
+add_dependencies(iso TheTest)
 add_dependencies(create-disk TheApp)
 add_dependencies(create-disk TheShell)
+add_dependencies(create-disk TheTest)

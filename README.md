@@ -68,11 +68,33 @@ ninja -C Build iso
 ninja -C Build run
 ```
 
+## Kernel filesystem source (CMake ON/OFF)
+Choose which filesystem the kernel mounts in QEMU via CMake:
+
+```bash
+# OFF (default): filesystem embedded inside TheOS.iso
+cmake -S . -B Build -G Ninja -DTHEOS_KERNEL_FS_DISK_IMG=OFF
+
+# ON: filesystem comes from external disk.img
+cmake -S . -B Build -G Ninja -DTHEOS_KERNEL_FS_DISK_IMG=ON
+```
+
+Behavior:
+- `OFF`: `iso` embeds ext4 root disk into `TheOS.iso`, and `run` boots from this embedded disk.
+- `ON`: `iso` does not embed ext4 root disk, and `run` mounts `disk.img` as kernel root FS.
+
+When using `ON`, build/update the disk image explicitly:
+
+```bash
+ninja -C Build create-disk
+```
+
 ## QEMU runtime options (`Meta/run.sh`)
 Supported environment variables:
 - `THEOS_RAM_SIZE` (default: `128M`)
 - `THEOS_QEMU_CPU` (default: `max`)
 - `THEOS_DISK_NAME` (default: `disk.img`)
+- `THEOS_BOOT_FROM_ISO_DISK` (default: `1`, set `0` to use `disk.img`)
 - `THEOS_QEMU_NUMA` (default: `0`, set `1` to enable two NUMA nodes)
 - `THEOS_NUMA_NODE0_MEM` (default: `64M` when NUMA is enabled)
 - `THEOS_NUMA_NODE1_MEM` (default: `64M` when NUMA is enabled)

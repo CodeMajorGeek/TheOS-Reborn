@@ -771,6 +771,7 @@ int __printf(char* buff, size_t buff_len, const char* __restrict format, va_list
         bool zero_pad = false;
         size_t width = 0;
         int precision = -1;
+        bool is_long = false;
         bool is_long_long = false;
 
         if (*format == '0')
@@ -800,6 +801,11 @@ int __printf(char* buff, size_t buff_len, const char* __restrict format, va_list
         {
             is_long_long = true;
             format += 2;
+        }
+        else if (*format == 'l')
+        {
+            is_long = true;
+            format++;
         }
 
         char spec = *format;
@@ -843,9 +849,15 @@ int __printf(char* buff, size_t buff_len, const char* __restrict format, va_list
             if (printf_append_string(buff, write_limit, &written, str, len, uppercase) == EOF)
                 return EOF;
         }
-        else if (spec == 'd')
+        else if (spec == 'd' || spec == 'i')
         {
-            long long value = is_long_long ? va_arg(parameters, long long) : (long long) va_arg(parameters, int);
+            long long value = 0;
+            if (is_long_long)
+                value = va_arg(parameters, long long);
+            else if (is_long)
+                value = (long long) va_arg(parameters, long);
+            else
+                value = (long long) va_arg(parameters, int);
             bool negative = value < 0;
             unsigned long long magnitude;
             if (negative)
@@ -874,7 +886,13 @@ int __printf(char* buff, size_t buff_len, const char* __restrict format, va_list
         }
         else if (spec == 'u')
         {
-            unsigned long long value = is_long_long ? va_arg(parameters, unsigned long long) : (unsigned long long) va_arg(parameters, unsigned int);
+            unsigned long long value = 0;
+            if (is_long_long)
+                value = va_arg(parameters, unsigned long long);
+            else if (is_long)
+                value = (unsigned long long) va_arg(parameters, unsigned long);
+            else
+                value = (unsigned long long) va_arg(parameters, unsigned int);
             char digits[32];
             lltoa(value, digits, sizeof(digits), DECIMAL);
             size_t len = strlen(digits);
@@ -889,7 +907,13 @@ int __printf(char* buff, size_t buff_len, const char* __restrict format, va_list
         else if (spec == 'x' || spec == 'X')
         {
             bool uppercase = spec == 'X';
-            unsigned long long value = is_long_long ? va_arg(parameters, unsigned long long) : (unsigned long long) va_arg(parameters, unsigned int);
+            unsigned long long value = 0;
+            if (is_long_long)
+                value = va_arg(parameters, unsigned long long);
+            else if (is_long)
+                value = (unsigned long long) va_arg(parameters, unsigned long);
+            else
+                value = (unsigned long long) va_arg(parameters, unsigned int);
             char digits[32];
             lltoa(value, digits, sizeof(digits), HEXADECIMAL);
             size_t len = strlen(digits);
@@ -897,6 +921,27 @@ int __printf(char* buff, size_t buff_len, const char* __restrict format, va_list
 
             char pad_char = zero_pad ? '0' : ' ';
             if (printf_append_repeat(buff, write_limit, &written, pad_char, pad) == EOF)
+                return EOF;
+            if (printf_append_string(buff, write_limit, &written, digits, len, uppercase) == EOF)
+                return EOF;
+        }
+        else if (spec == 'p' || spec == 'P')
+        {
+            bool uppercase = spec == 'P';
+            uintptr_t value = (uintptr_t) va_arg(parameters, void*);
+            char digits[32];
+            lltoa((unsigned long long) value, digits, sizeof(digits), HEXADECIMAL);
+            size_t len = strlen(digits);
+            size_t total = 2U + len;
+            size_t pad = (width > total) ? (width - total) : 0U;
+
+            if (!zero_pad && printf_append_repeat(buff, write_limit, &written, ' ', pad) == EOF)
+                return EOF;
+            if (printf_append_char(buff, write_limit, &written, '0') == EOF)
+                return EOF;
+            if (printf_append_char(buff, write_limit, &written, uppercase ? 'X' : 'x') == EOF)
+                return EOF;
+            if (zero_pad && printf_append_repeat(buff, write_limit, &written, '0', pad) == EOF)
                 return EOF;
             if (printf_append_string(buff, write_limit, &written, digits, len, uppercase) == EOF)
                 return EOF;

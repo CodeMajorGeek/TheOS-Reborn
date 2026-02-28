@@ -8,6 +8,7 @@ set -euo pipefail
 [ -z "${THEOS_BASE_FOLDER:-}" ] && THEOS_BASE_FOLDER="../Base"
 [ -z "${THEOS_USERLAND_APP:-}" ] && THEOS_USERLAND_APP="Userland/Apps/TheApp/TheApp"
 [ -z "${THEOS_USERLAND_SHELL:-}" ] && THEOS_USERLAND_SHELL="Userland/Apps/TheShell/TheShell"
+[ -z "${THEOS_USERLAND_TEST:-}" ] && THEOS_USERLAND_TEST="Userland/Apps/TheTest/TheTest"
 
 
 if [ ! -f "$THEOS_USERLAND_APP" ] && [ -f "Build/Userland/Apps/TheApp/TheApp" ]; then
@@ -15,6 +16,9 @@ if [ ! -f "$THEOS_USERLAND_APP" ] && [ -f "Build/Userland/Apps/TheApp/TheApp" ];
 fi
 if [ ! -f "$THEOS_USERLAND_SHELL" ] && [ -f "Build/Userland/Apps/TheShell/TheShell" ]; then
 	THEOS_USERLAND_SHELL="Build/Userland/Apps/TheShell/TheShell"
+fi
+if [ ! -f "$THEOS_USERLAND_TEST" ] && [ -f "Build/Userland/Apps/TheTest/TheTest" ]; then
+	THEOS_USERLAND_TEST="Build/Userland/Apps/TheTest/TheTest"
 fi
 
 STAGE_DIR="$(mktemp -d)"
@@ -42,6 +46,13 @@ if [ -f "$THEOS_USERLAND_SHELL" ]; then
 	cp "$THEOS_USERLAND_SHELL" "$STAGE_DIR/bin/TheShell"
 else
 	echo "[disk] warning: TheShell binary not found at '$THEOS_USERLAND_SHELL'"
+fi
+
+if [ -f "$THEOS_USERLAND_TEST" ]; then
+	echo "[disk] install TheTest -> /bin/TheTest from '$THEOS_USERLAND_TEST'"
+	cp "$THEOS_USERLAND_TEST" "$STAGE_DIR/bin/TheTest"
+else
+	echo "[disk] warning: TheTest binary not found at '$THEOS_USERLAND_TEST'"
 fi
 
 echo "[disk] create image '$THEOS_DISK_NAME' size=$THEOS_DISK_SIZE"

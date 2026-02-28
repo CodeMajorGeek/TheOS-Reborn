@@ -2,6 +2,7 @@
 #define _SYSCALL_H
 
 #include <CPU/ISR.h>
+#include <stdbool.h>
 #include <stdint.h>
 
 #define SYSCALL_INT 0x80
@@ -38,7 +39,8 @@ enum
     SYS_FS_SEEK = 22,
     SYS_KBD_GET_SCANCODE = 23,
     SYS_FS_ISDIR = 24,
-    SYS_FS_MKDIR = 25
+    SYS_FS_MKDIR = 25,
+    SYS_WAITPID = 26
 };
 
 #define SYS_PROT_READ    (1ULL << 0)
@@ -53,6 +55,12 @@ enum
 #define SYS_SEEK_SET     0
 #define SYS_SEEK_CUR     1
 #define SYS_SEEK_END     2
+
+#define SYS_SIGILL       4
+#define SYS_SIGTRAP      5
+#define SYS_SIGFPE       8
+#define SYS_SIGSEGV      11
+#define SYS_SIGFAULT     128
 
 typedef struct syscall_cpu_info
 {
@@ -111,5 +119,6 @@ void Syscall_init(void);
 
 uint64_t Syscall_interupt_handler(uint64_t syscall_num, syscall_frame_t* frame, uint32_t cpu_index);
 uint64_t Syscall_post_handler(uint64_t syscall_ret, syscall_frame_t* frame, uint32_t cpu_index);
+bool Syscall_handle_user_exception(interrupt_frame_t* frame, uintptr_t fault_addr);
 
 #endif

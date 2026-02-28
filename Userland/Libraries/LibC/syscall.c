@@ -155,3 +155,8 @@ int sys_kbd_get_scancode(void)
 {
     return (int) syscall(SYS_KBD_GET_SCANCODE, 0, 0, 0, 0, 0, 0);
 }
+
+int sys_waitpid(int pid, int* out_status, int* out_signal)
+{
+    return (int) syscall(SYS_WAITPID, (long) pid, (long) out_status, (long) out_signal, 0, 0, 0);
+}
