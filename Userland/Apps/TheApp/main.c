@@ -1,8 +1,12 @@
 #include <stdio.h>
 #include <syscall.h>
 
-int main(void)
+int main(int argc, char** argv, char** envp)
 {
+    (void) argc;
+    (void) argv;
+    (void) envp;
+
     printf("Hello World from TheApp (ring3)\n");
 
     const char* const shell_argv[] = { "TheShell", NULL };

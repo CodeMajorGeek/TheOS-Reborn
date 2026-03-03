@@ -160,3 +160,8 @@ int sys_waitpid(int pid, int* out_status, int* out_signal)
 {
     return (int) syscall(SYS_WAITPID, (long) pid, (long) out_status, (long) out_signal, 0, 0, 0);
 }
+
+int sys_kill(int pid, int signal)
+{
+    return (int) syscall(SYS_KILL, (long) pid, (long) signal, 0, 0, 0, 0);
+}

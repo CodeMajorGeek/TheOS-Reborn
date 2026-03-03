@@ -268,8 +268,12 @@ static void thetest_race_probe(void)
         printf("[TheTest] race not observed this run\n");
 }
 
-int main(void)
+int main(int argc, char** argv, char** envp)
 {
+    (void) argc;
+    (void) argv;
+    (void) envp;
+
 #ifdef TEST_UNDEFINED_SYSCALL
     long rc = syscall(SYS_UNDEFINED_TEST, 0, 0, 0, 0, 0, 0);
     printf("[TheTest] undefined syscall(%ld) rc=%ld\n", SYS_UNDEFINED_TEST, rc);

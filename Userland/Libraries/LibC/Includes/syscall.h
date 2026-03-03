@@ -31,7 +31,8 @@ enum
     SYS_KBD_GET_SCANCODE = 23,
     SYS_FS_ISDIR = 24,
     SYS_FS_MKDIR = 25,
-    SYS_WAITPID = 26
+    SYS_WAITPID = 26,
+    SYS_KILL = 27
 };
 
 #define SYS_PROT_READ    (1ULL << 0)
@@ -50,6 +51,7 @@ enum
 #define SYS_SIGILL       4
 #define SYS_SIGTRAP      5
 #define SYS_SIGFPE       8
+#define SYS_SIGKILL      9
 #define SYS_SIGSEGV      11
 #define SYS_SIGFAULT     128
 
@@ -115,5 +117,6 @@ int fs_write(int fd, const void* buf, size_t len);
 int64_t fs_seek(int fd, int64_t offset, int whence);
 int sys_kbd_get_scancode(void);
 int sys_waitpid(int pid, int* out_status, int* out_signal);
+int sys_kill(int pid, int signal);
 
 #endif

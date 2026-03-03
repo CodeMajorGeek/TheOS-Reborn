@@ -9,6 +9,7 @@ void* memsetw(void* ptr, uint16_t value, size_t count);
 void* memsetq(void* ptr, uint64_t value, size_t count);
 
 void* memcpy(void* dest, const void* src, size_t count);
+void* memmove(void* dest, const void* src, size_t count);
 void* memcpyw(void* dest, const void* src, size_t count);
 void* memcpyq(void* dest, const void* src, size_t count);
 
@@ -18,6 +19,7 @@ char* strcpy(char* __restrict, const char* __restrict);
 
 int strncmp(const char* first, const char* second, size_t length);
 int strcmp(const char* first, const char* second);
+char* strchr(const char* str, int ch);
 
 int memcmp(const void* aptr, const void* bptr, size_t size);
 

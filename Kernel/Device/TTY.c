@@ -12,6 +12,105 @@ static bool TTY_use_framebuffer = false;
 static uint32_t TTY_cols = VGA_WIDTH;
 static uint32_t TTY_rows = VGA_HEIGHT;
 
+typedef enum TTY_ansi_state
+{
+    TTY_ANSI_IDLE = 0,
+    TTY_ANSI_ESC,
+    TTY_ANSI_CSI
+} TTY_ansi_state_t;
+
+static TTY_ansi_state_t TTY_ansi_state = TTY_ANSI_IDLE;
+static uint32_t TTY_ansi_param = 0;
+static bool TTY_ansi_has_param = false;
+
+static void TTY_ansi_reset(void)
+{
+    TTY_ansi_state = TTY_ANSI_IDLE;
+    TTY_ansi_param = 0;
+    TTY_ansi_has_param = false;
+}
+
+static void TTY_move_cursor_left(uint32_t count)
+{
+    while (count > 0)
+    {
+        if (TTY_col > 0)
+            TTY_col--;
+        else if (TTY_row > 0)
+        {
+            TTY_row--;
+            TTY_col = TTY_cols - 1;
+        }
+        else
+            break;
+
+        count--;
+    }
+
+    TTY_update_cursor((uint8_t) TTY_col, (uint8_t) TTY_row);
+}
+
+static void TTY_erase_line_from_cursor(void)
+{
+    uint32_t saved_col = TTY_col;
+    uint32_t saved_row = TTY_row;
+
+    for (uint32_t x = saved_col; x < TTY_cols; x++)
+        TTY_put_entry_at(' ', TTY_color, x, saved_row);
+
+    TTY_update_cursor((uint8_t) saved_col, (uint8_t) saved_row);
+}
+
+static bool TTY_try_handle_ansi(char c)
+{
+    uint8_t uc = (uint8_t) c;
+
+    if (TTY_ansi_state == TTY_ANSI_IDLE)
+    {
+        if (uc == 0x1BU)
+        {
+            TTY_ansi_state = TTY_ANSI_ESC;
+            return true;
+        }
+        return false;
+    }
+
+    if (TTY_ansi_state == TTY_ANSI_ESC)
+    {
+        if (c == '[')
+        {
+            TTY_ansi_state = TTY_ANSI_CSI;
+            TTY_ansi_param = 0;
+            TTY_ansi_has_param = false;
+            return true;
+        }
+
+        TTY_ansi_reset();
+        return true;
+    }
+
+    if (uc >= '0' && uc <= '9')
+    {
+        TTY_ansi_has_param = true;
+        uint32_t digit = (uint32_t) (uc - '0');
+        if (TTY_ansi_param <= 10000U)
+            TTY_ansi_param = (TTY_ansi_param * 10U) + digit;
+        return true;
+    }
+
+    if (c == ';')
+        return true;
+
+    uint32_t param = TTY_ansi_has_param ? TTY_ansi_param : 1U;
+    if (c == 'D')
+        TTY_move_cursor_left(param);
+    else if (c == 'K')
+        TTY_erase_line_from_cursor();
+
+    TTY_ansi_reset();
+    return true;
+}
+
 static void TTY_refresh_grid(void)
 {
     if (TTY_use_framebuffer && TTYFB_is_ready())
@@ -48,6 +147,7 @@ void TTY_init(void)
     TTY_color = vga_entry_color(VGA_LIGHT_GREEN, VGA_BLACK);
     TTY_cursor_enabled = false;
     TTY_use_framebuffer = false;
+    TTY_ansi_reset();
 
     TTYVGA_init(TTY_color);
     TTY_refresh_grid();
@@ -63,6 +163,7 @@ bool TTY_init_framebuffer(const TTY_framebuffer_info_t* info)
     TTY_use_framebuffer = true;
     TTY_row = 0;
     TTY_col = 0;
+    TTY_ansi_reset();
     TTY_refresh_grid();
     TTY_clear();
     TTY_enable_cursor(true);
@@ -93,6 +194,7 @@ void TTY_clear(void)
 {
     TTY_row = 0;
     TTY_col = 0;
+    TTY_ansi_reset();
 
     if (TTY_use_framebuffer)
         TTYFB_clear(TTY_color);
@@ -123,6 +225,9 @@ void TTY_putc(char c)
 
     if (TTY_cols == 0 || TTY_rows == 0)
         TTY_refresh_grid();
+
+    if (TTY_try_handle_ansi(c))
+        return;
 
     switch (c)
     {

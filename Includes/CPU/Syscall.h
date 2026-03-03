@@ -40,7 +40,8 @@ enum
     SYS_KBD_GET_SCANCODE = 23,
     SYS_FS_ISDIR = 24,
     SYS_FS_MKDIR = 25,
-    SYS_WAITPID = 26
+    SYS_WAITPID = 26,
+    SYS_KILL = 27
 };
 
 #define SYS_PROT_READ    (1ULL << 0)
@@ -59,6 +60,7 @@ enum
 #define SYS_SIGILL       4
 #define SYS_SIGTRAP      5
 #define SYS_SIGFPE       8
+#define SYS_SIGKILL      9
 #define SYS_SIGSEGV      11
 #define SYS_SIGFAULT     128
 

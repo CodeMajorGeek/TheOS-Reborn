@@ -9,6 +9,7 @@ set -euo pipefail
 [ -z "${THEOS_USERLAND_APP:-}" ] && THEOS_USERLAND_APP="Userland/Apps/TheApp/TheApp"
 [ -z "${THEOS_USERLAND_SHELL:-}" ] && THEOS_USERLAND_SHELL="Userland/Apps/TheShell/TheShell"
 [ -z "${THEOS_USERLAND_TEST:-}" ] && THEOS_USERLAND_TEST="Userland/Apps/TheTest/TheTest"
+[ -z "${THEOS_USERLAND_MICROPY:-}" ] && THEOS_USERLAND_MICROPY="Userland/Apps/TheMicroPython/TheMicroPython"
 
 
 if [ ! -f "$THEOS_USERLAND_APP" ] && [ -f "Build/Userland/Apps/TheApp/TheApp" ]; then
@@ -19,6 +20,9 @@ if [ ! -f "$THEOS_USERLAND_SHELL" ] && [ -f "Build/Userland/Apps/TheShell/TheShe
 fi
 if [ ! -f "$THEOS_USERLAND_TEST" ] && [ -f "Build/Userland/Apps/TheTest/TheTest" ]; then
 	THEOS_USERLAND_TEST="Build/Userland/Apps/TheTest/TheTest"
+fi
+if [ ! -f "$THEOS_USERLAND_MICROPY" ] && [ -f "Build/Userland/Apps/TheMicroPython/TheMicroPython" ]; then
+	THEOS_USERLAND_MICROPY="Build/Userland/Apps/TheMicroPython/TheMicroPython"
 fi
 
 STAGE_DIR="$(mktemp -d)"
@@ -53,6 +57,14 @@ if [ -f "$THEOS_USERLAND_TEST" ]; then
 	cp "$THEOS_USERLAND_TEST" "$STAGE_DIR/bin/TheTest"
 else
 	echo "[disk] warning: TheTest binary not found at '$THEOS_USERLAND_TEST'"
+fi
+
+if [ -f "$THEOS_USERLAND_MICROPY" ]; then
+	echo "[disk] install TheMicroPython -> /bin/TheMicroPython and /bin/MicroPython from '$THEOS_USERLAND_MICROPY'"
+	cp "$THEOS_USERLAND_MICROPY" "$STAGE_DIR/bin/TheMicroPython"
+	cp "$THEOS_USERLAND_MICROPY" "$STAGE_DIR/bin/MicroPython"
+else
+	echo "[disk] warning: TheMicroPython binary not found at '$THEOS_USERLAND_MICROPY'"
 fi
 
 echo "[disk] create image '$THEOS_DISK_NAME' size=$THEOS_DISK_SIZE"

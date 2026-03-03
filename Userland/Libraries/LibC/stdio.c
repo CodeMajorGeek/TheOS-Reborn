@@ -50,6 +50,7 @@ int puts(const char *s)
 static bool stdio_input_shift = false;
 static bool stdio_input_capslock = false;
 static bool stdio_input_altgr = false;
+static bool stdio_input_ctrl = false;
 #define STDIO_KEYMAP_SIZE         128U
 #define STDIO_KBD_CONF_DEFAULT    "/system/keyboard.conf"
 #define STDIO_KBD_PATH_MAX        256U
@@ -483,6 +484,15 @@ static bool stdio_is_ascii_upper(char c)
     return c >= 'A' && c <= 'Z';
 }
 
+static char stdio_apply_ctrl_modifier(char c)
+{
+    if (c >= 'a' && c <= 'z')
+        return (char) ((c - 'a') + 1);
+    if (c >= 'A' && c <= 'Z')
+        return (char) ((c - 'A') + 1);
+    return c;
+}
+
 static char stdio_scancode_to_ascii(uint8_t scancode)
 {
     if (scancode >= STDIO_KEYMAP_SIZE)
@@ -533,6 +543,18 @@ static int stdio_read_key(void)
 
         if (extended_prefix)
         {
+            if (scancode == 0x1DU)
+            {
+                stdio_input_ctrl = true;
+                extended_prefix = false;
+                continue;
+            }
+            if (scancode == 0x9DU)
+            {
+                stdio_input_ctrl = false;
+                extended_prefix = false;
+                continue;
+            }
             if (scancode == 0x38U)
             {
                 stdio_input_altgr = true;
@@ -559,6 +581,14 @@ static int stdio_read_key(void)
                 stdio_input_shift = false;
                 extended_prefix = false;
                 continue;
+            case 0x1D:
+                stdio_input_ctrl = true;
+                extended_prefix = false;
+                continue;
+            case 0x9D:
+                stdio_input_ctrl = false;
+                extended_prefix = false;
+                continue;
             case 0x3A:
                 stdio_input_capslock = !stdio_input_capslock;
                 extended_prefix = false;
@@ -575,6 +605,9 @@ static int stdio_read_key(void)
         if (c == 0)
             continue;
 
+        if (stdio_input_ctrl)
+            c = stdio_apply_ctrl_modifier(c);
+
         return (unsigned char) c;
     }
 }
@@ -590,6 +623,7 @@ int keyboard_load_config(const char* config_path)
     stdio_input_shift = false;
     stdio_input_capslock = false;
     stdio_input_altgr = false;
+    stdio_input_ctrl = false;
 
     const char* conf_path = config_path;
     if (!conf_path || conf_path[0] == '\0')

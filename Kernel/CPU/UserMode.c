@@ -292,6 +292,45 @@ static bool UserMode_load_segment(const uint8_t* elf_image,
     return true;
 }
 
+static bool UserMode_build_initial_stack(uintptr_t* inout_rsp, const char* argv0)
+{
+    if (!inout_rsp || !argv0 || argv0[0] == '\0')
+        return false;
+
+    uintptr_t sp = *inout_rsp;
+    uintptr_t stack_bottom = USERMODE_STACK_TOP - USERMODE_STACK_SIZE;
+
+    size_t argv0_len = strlen(argv0) + 1U;
+    if (sp < stack_bottom + argv0_len)
+        return false;
+
+    sp -= argv0_len;
+    memcpy((void*) sp, argv0, argv0_len);
+    uintptr_t argv0_ptr = sp;
+
+    sp &= ~(uintptr_t) 0xFULL;
+
+    // Stack layout at user entry:
+    // argc, argv[0], NULL, envp[0]=NULL
+    if (sp < stack_bottom + (4U * sizeof(uint64_t)))
+        return false;
+
+    sp -= sizeof(uint64_t);
+    *((uint64_t*) sp) = 0;
+
+    sp -= sizeof(uint64_t);
+    *((uint64_t*) sp) = 0;
+
+    sp -= sizeof(uint64_t);
+    *((uint64_t*) sp) = argv0_ptr;
+
+    sp -= sizeof(uint64_t);
+    *((uint64_t*) sp) = 1;
+
+    *inout_rsp = sp;
+    return true;
+}
+
 bool UserMode_run_elf(const char* file_name)
 {
     if (!file_name || file_name[0] == '\0')
@@ -415,6 +454,15 @@ bool UserMode_run_elf(const char* file_name)
     }
 
     uintptr_t user_rsp = UserMode_align_down(USERMODE_STACK_TOP, 16U);
+    if (!UserMode_build_initial_stack(&user_rsp, file_name))
+    {
+        UserMode_write_cr3_phys(previous_cr3);
+        UserMode_free_address_space(user_cr3);
+        kfree(elf_image);
+        kdebug_printf("[USER] ELF '%s' failed to build argc/argv/envp stack\n", file_name);
+        return false;
+    }
+
     kdebug_printf("[USER] launching '%s' entry=0x%llX stack=0x%llX cr3=0x%llX\n",
                   file_name,
                   (unsigned long long) ehdr->e_entry,

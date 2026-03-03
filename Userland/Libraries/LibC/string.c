@@ -1,4 +1,6 @@
+#include <ctype.h>
 #include <string.h>
+#include <strings.h>
 
 void* memset(void* ptr, uint8_t value, size_t count)
 {
@@ -33,6 +35,30 @@ void* memcpy(void* dest, const void* src, size_t count)
     const uint8_t* s = src;
     while (count--)
         *d++ = *s++;
+
+    return dest;
+}
+
+void* memmove(void* dest, const void* src, size_t count)
+{
+    uint8_t* d = (uint8_t*) dest;
+    const uint8_t* s = (const uint8_t*) src;
+
+    if (d == s || count == 0)
+        return dest;
+
+    if (d < s || d >= (s + count))
+    {
+        while (count--)
+            *d++ = *s++;
+    }
+    else
+    {
+        d += count;
+        s += count;
+        while (count--)
+            *--d = *--s;
+    }
 
     return dest;
 }
@@ -113,6 +139,22 @@ int strcmp(const char* first, const char* second)
     return ((unsigned char) *first < (unsigned char) *second) ? -1 : 1;
 }
 
+char* strchr(const char* str, int ch)
+{
+    if (!str)
+        return NULL;
+
+    char c = (char) ch;
+    while (*str)
+    {
+        if (*str == c)
+            return (char*) str;
+        str++;
+    }
+
+    return (c == '\0') ? (char*) str : NULL;
+}
+
 int memcmp(const void* aptr, const void* bptr, size_t size)
 {
     const unsigned char* a = (const unsigned char*) aptr;
@@ -124,6 +166,66 @@ int memcmp(const void* aptr, const void* bptr, size_t size)
             return -1;
         else if (a[i] > b[i])
             return 1;
+    }
+
+    return 0;
+}
+
+int tolower(int c)
+{
+    if (c >= 'A' && c <= 'Z')
+        return c + ('a' - 'A');
+
+    return c;
+}
+
+int toupper(int c)
+{
+    if (c >= 'a' && c <= 'z')
+        return c - ('a' - 'A');
+
+    return c;
+}
+
+int strcasecmp(const char* first, const char* second)
+{
+    if (!first || !second)
+        return (first == second) ? 0 : (first ? 1 : -1);
+
+    while (*first != '\0' && *second != '\0')
+    {
+        unsigned char a = (unsigned char) tolower((unsigned char) *first);
+        unsigned char b = (unsigned char) tolower((unsigned char) *second);
+        if (a != b)
+            return (a < b) ? -1 : 1;
+
+        first++;
+        second++;
+    }
+
+    unsigned char a = (unsigned char) tolower((unsigned char) *first);
+    unsigned char b = (unsigned char) tolower((unsigned char) *second);
+    if (a == b)
+        return 0;
+
+    return (a < b) ? -1 : 1;
+}
+
+int strncasecmp(const char* first, const char* second, size_t length)
+{
+    if (length == 0U)
+        return 0;
+    if (!first || !second)
+        return (first == second) ? 0 : (first ? 1 : -1);
+
+    for (size_t i = 0; i < length; i++)
+    {
+        unsigned char a = (unsigned char) tolower((unsigned char) first[i]);
+        unsigned char b = (unsigned char) tolower((unsigned char) second[i]);
+        if (a != b)
+            return (a < b) ? -1 : 1;
+        if (first[i] == '\0')
+            return 0;
     }
 
     return 0;

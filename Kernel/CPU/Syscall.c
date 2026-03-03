@@ -40,6 +40,8 @@
 #define SYSCALL_ELF_MAX_PHDRS          64U
 #define SYSCALL_ELF_STACK_TOP          0x0000000070000000ULL
 #define SYSCALL_ELF_STACK_SIZE         (64ULL * 1024ULL)
+#define SYSCALL_EXEC_MAX_ARGS          64U
+#define SYSCALL_EXEC_MAX_ENVP          64U
 #define SYSCALL_ELF_CANONICAL_LOW_MAX  0x0000800000000000ULL
 #define SYSCALL_PTE_PS                 (1ULL << 7)
 #define SYSCALL_ELF_PF_X               (1U << 0)
@@ -140,6 +142,9 @@ static uint8_t Syscall_cpu_need_resched[256];
 static uint32_t Syscall_next_pid = 1U;
 static spinlock_t Syscall_proc_lock;
 static bool Syscall_proc_lock_ready = false;
+
+static inline uintptr_t Syscall_read_cr3_phys(void);
+static inline void Syscall_write_cr3_phys(uintptr_t cr3_phys);
 
 static inline uintptr_t Syscall_align_up_page(uintptr_t value)
 {
@@ -291,6 +296,199 @@ static bool Syscall_read_user_cstr(char* kernel_dst, size_t kernel_dst_size, con
         spin_unlock(&Syscall_vm_lock);
     kernel_dst[kernel_dst_size - 1] = '\0';
     return false;
+}
+
+static void Syscall_exec_free_vec(char** vec, size_t count)
+{
+    if (!vec)
+        return;
+
+    for (size_t i = 0; i < count; i++)
+    {
+        if (vec[i])
+        {
+            kfree(vec[i]);
+            vec[i] = NULL;
+        }
+    }
+}
+
+static bool Syscall_exec_read_user_vec(const char* const* user_vec,
+                                       char** out_vec,
+                                       size_t max_items,
+                                       size_t* out_count)
+{
+    if (!out_vec || !out_count || max_items == 0)
+        return false;
+
+    for (size_t i = 0; i < max_items; i++)
+        out_vec[i] = NULL;
+    *out_count = 0;
+
+    if (!user_vec)
+        return true;
+
+    for (size_t i = 0; i < max_items; i++)
+    {
+        uintptr_t user_item_ptr = 0;
+        if (!Syscall_copy_from_user(&user_item_ptr, user_vec + i, sizeof(user_item_ptr)))
+            return false;
+
+        if (user_item_ptr == 0)
+        {
+            *out_count = i;
+            return true;
+        }
+
+        char temp[SYSCALL_USER_CSTR_MAX];
+        if (!Syscall_read_user_cstr(temp, sizeof(temp), (const char*) user_item_ptr))
+            return false;
+
+        size_t len = strlen(temp) + 1U;
+        char* copy = (char*) kmalloc(len);
+        if (!copy)
+            return false;
+
+        memcpy(copy, temp, len);
+        out_vec[i] = copy;
+        *out_count = i + 1U;
+    }
+
+    // Require a NULL terminator in user-provided argv/envp vectors.
+    return false;
+}
+
+static bool Syscall_exec_build_initial_stack(uintptr_t* inout_rsp,
+                                             const char* default_argv0,
+                                             char* const* argv,
+                                             size_t argc,
+                                             char* const* envp,
+                                             size_t envc)
+{
+    if (!inout_rsp || argc > SYSCALL_EXEC_MAX_ARGS || envc > SYSCALL_EXEC_MAX_ENVP)
+        return false;
+
+    const char* argv_items[SYSCALL_EXEC_MAX_ARGS];
+    uintptr_t argv_ptrs[SYSCALL_EXEC_MAX_ARGS];
+    uintptr_t env_ptrs[SYSCALL_EXEC_MAX_ENVP];
+
+    size_t argc_effective = argc;
+    for (size_t i = 0; i < argc; i++)
+    {
+        if (!argv || !argv[i] || argv[i][0] == '\0')
+            return false;
+        argv_items[i] = argv[i];
+    }
+
+    if (argc_effective == 0)
+    {
+        if (!default_argv0 || default_argv0[0] == '\0')
+            return false;
+        argv_items[0] = default_argv0;
+        argc_effective = 1;
+    }
+
+    uintptr_t stack_bottom = SYSCALL_ELF_STACK_TOP - SYSCALL_ELF_STACK_SIZE;
+    uintptr_t sp = *inout_rsp;
+
+    for (size_t i = envc; i > 0; i--)
+    {
+        const char* value = envp[i - 1U];
+        if (!value)
+            return false;
+
+        size_t len = strlen(value) + 1U;
+        if (sp < stack_bottom + len)
+            return false;
+
+        sp -= len;
+        memcpy((void*) sp, value, len);
+        env_ptrs[i - 1U] = sp;
+    }
+
+    for (size_t i = argc_effective; i > 0; i--)
+    {
+        const char* value = argv_items[i - 1U];
+        size_t len = strlen(value) + 1U;
+        if (sp < stack_bottom + len)
+            return false;
+
+        sp -= len;
+        memcpy((void*) sp, value, len);
+        argv_ptrs[i - 1U] = sp;
+    }
+
+    sp &= ~(uintptr_t) 0xFULL;
+
+    size_t words = argc_effective + envc + 3U;
+    if ((words & 1U) != 0)
+    {
+        if (sp < stack_bottom + sizeof(uint64_t))
+            return false;
+        sp -= sizeof(uint64_t);
+        *((uint64_t*) sp) = 0;
+    }
+
+    if (sp < stack_bottom + sizeof(uint64_t))
+        return false;
+    sp -= sizeof(uint64_t);
+    *((uint64_t*) sp) = 0;
+
+    for (size_t i = envc; i > 0; i--)
+    {
+        if (sp < stack_bottom + sizeof(uint64_t))
+            return false;
+        sp -= sizeof(uint64_t);
+        *((uint64_t*) sp) = env_ptrs[i - 1U];
+    }
+
+    if (sp < stack_bottom + sizeof(uint64_t))
+        return false;
+    sp -= sizeof(uint64_t);
+    *((uint64_t*) sp) = 0;
+
+    for (size_t i = argc_effective; i > 0; i--)
+    {
+        if (sp < stack_bottom + sizeof(uint64_t))
+            return false;
+        sp -= sizeof(uint64_t);
+        *((uint64_t*) sp) = argv_ptrs[i - 1U];
+    }
+
+    if (sp < stack_bottom + sizeof(uint64_t))
+        return false;
+    sp -= sizeof(uint64_t);
+    *((uint64_t*) sp) = (uint64_t) argc_effective;
+
+    *inout_rsp = sp;
+    return true;
+}
+
+static bool Syscall_exec_install_initial_stack(uintptr_t new_cr3,
+                                               uintptr_t* inout_rsp,
+                                               const char* default_argv0,
+                                               char* const* argv,
+                                               size_t argc,
+                                               char* const* envp,
+                                               size_t envc)
+{
+    if (!inout_rsp || new_cr3 == 0)
+        return false;
+
+    uintptr_t previous_cr3 = Syscall_read_cr3_phys();
+    if (previous_cr3 != new_cr3)
+        Syscall_write_cr3_phys(new_cr3);
+
+    bool ok = Syscall_exec_build_initial_stack(inout_rsp,
+                                               default_argv0,
+                                               argv,
+                                               argc,
+                                               envp,
+                                               envc);
+
+    if (previous_cr3 != new_cr3)
+        Syscall_write_cr3_phys(previous_cr3);
+    return ok;
 }
 
 static bool Syscall_user_range_unmapped(uintptr_t base, size_t size)
@@ -1083,6 +1281,8 @@ static const char* Syscall_signal_name(int32_t signal)
     {
         case SYS_SIGFPE:
             return "SIGFPE";
+        case SYS_SIGKILL:
+            return "SIGKILL";
         case SYS_SIGTRAP:
             return "SIGTRAP";
         case SYS_SIGILL:
@@ -1522,14 +1722,55 @@ uint64_t Syscall_interupt_handler(uint64_t syscall_num, syscall_frame_t* frame, 
             if (!Syscall_read_user_cstr(path, sizeof(path), (const char*) frame->rdi))
                 return (uint64_t) -1;
 
-            (void) frame->rsi; // argv (not implemented yet)
-            (void) frame->rdx; // envp (not implemented yet)
+            char* argv_copy[SYSCALL_EXEC_MAX_ARGS];
+            char* envp_copy[SYSCALL_EXEC_MAX_ENVP];
+            size_t argc_copy = 0;
+            size_t envc_copy = 0;
+            bool argv_ok = Syscall_exec_read_user_vec((const char* const*) frame->rsi,
+                                                      argv_copy,
+                                                      SYSCALL_EXEC_MAX_ARGS,
+                                                      &argc_copy);
+            if (!argv_ok)
+            {
+                Syscall_exec_free_vec(argv_copy, argc_copy);
+                return (uint64_t) -1;
+            }
+
+            bool envp_ok = Syscall_exec_read_user_vec((const char* const*) frame->rdx,
+                                                      envp_copy,
+                                                      SYSCALL_EXEC_MAX_ENVP,
+                                                      &envc_copy);
+            if (!envp_ok)
+            {
+                Syscall_exec_free_vec(envp_copy, envc_copy);
+                Syscall_exec_free_vec(argv_copy, argc_copy);
+                return (uint64_t) -1;
+            }
 
             uintptr_t new_cr3 = 0;
             uintptr_t new_entry = 0;
             uintptr_t new_rsp = 0;
             if (!Syscall_execve_build_address_space(path, &new_cr3, &new_entry, &new_rsp))
+            {
+                Syscall_exec_free_vec(envp_copy, envc_copy);
+                Syscall_exec_free_vec(argv_copy, argc_copy);
                 return (uint64_t) -1;
+            }
+
+            bool stack_ok = Syscall_exec_install_initial_stack(new_cr3,
+                                                               &new_rsp,
+                                                               path,
+                                                               argv_copy,
+                                                               argc_copy,
+                                                               envp_copy,
+                                                               envc_copy);
+            Syscall_exec_free_vec(envp_copy, envc_copy);
+            Syscall_exec_free_vec(argv_copy, argc_copy);
+            if (!stack_ok)
+            {
+                Syscall_free_address_space(new_cr3);
+                return (uint64_t) -1;
+            }
 
             uintptr_t old_cr3 = 0;
             bool free_old = false;
@@ -2109,6 +2350,60 @@ mprotect_out:
                 return (uint64_t) -1;
 
             return (uint64_t) reaped_pid;
+        }
+
+        case SYS_KILL:
+        {
+            if (!Syscall_proc_lock_ready)
+                return (uint64_t) -1;
+
+            int32_t target_pid = (int32_t) frame->rdi;
+            int32_t signal = (int32_t) frame->rsi;
+            if (target_pid <= 0 || signal != SYS_SIGKILL)
+                return (uint64_t) -1;
+
+            uint32_t sender_pid = 0;
+            bool killed = false;
+
+            uint64_t lock_flags = spin_lock_irqsave(&Syscall_proc_lock);
+            int32_t sender_slot = Syscall_proc_ensure_current_locked(cpu_index, frame);
+            if (sender_slot >= 0)
+                sender_pid = Syscall_procs[sender_slot].pid;
+
+            int32_t target_slot = -1;
+            for (uint32_t i = 0; i < SYSCALL_MAX_PROCS; i++)
+            {
+                if (!Syscall_procs[i].used || Syscall_procs[i].pid != (uint32_t) target_pid)
+                    continue;
+                target_slot = (int32_t) i;
+                break;
+            }
+
+            if (target_slot >= 0)
+            {
+                syscall_process_t* proc = &Syscall_procs[(uint32_t) target_slot];
+                proc->exiting = true;
+                proc->terminated_by_signal = true;
+                proc->term_signal = SYS_SIGKILL;
+                proc->exit_status = 128 + SYS_SIGKILL;
+
+                for (uint32_t i = 0; i < 256; i++)
+                {
+                    if (Syscall_cpu_current_proc[i] == (uint32_t) target_slot)
+                        __atomic_store_n(&Syscall_cpu_need_resched[i], 1, __ATOMIC_RELEASE);
+                }
+                killed = true;
+            }
+
+            spin_unlock_irqrestore(&Syscall_proc_lock, lock_flags);
+
+            if (!killed)
+                return (uint64_t) -1;
+
+            kdebug_printf("[USER] pid=%u sent SIGKILL to pid=%d\n",
+                          (unsigned int) sender_pid,
+                          (int) target_pid);
+            return 0;
         }
 
         default:

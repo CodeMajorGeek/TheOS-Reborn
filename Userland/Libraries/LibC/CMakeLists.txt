@@ -1,4 +1,5 @@
 set(LIBC_SOURCES
+    errno.c
     string.c
     stdlib.c
     stdio.c
@@ -8,6 +9,7 @@ set(LIBC_SOURCES
 set(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} -DTHEOS_LIBC_BUILD")
 
 add_library(UserLibC STATIC
+    errno.c
     string.c
     stdio.c
     syscall.c

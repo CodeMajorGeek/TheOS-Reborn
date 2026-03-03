@@ -3,6 +3,7 @@
 [ -z "$THEOS_RAM_SIZE" ] && THEOS_RAM_SIZE=128M
 
 [ -z "$THEOS_QEMU_CPU" ] && THEOS_QEMU_CPU="max"
+[ -z "$THEOS_QEMU_GPU" ] && THEOS_QEMU_GPU="vga"
 
 [ -z "$THEOS_DISK_NAME" ] && THEOS_DISK_NAME="disk.img"
 
@@ -18,6 +19,26 @@ if [ "$THEOS_BOOT_FROM_ISO_DISK" = "0" ] && [ ! -f "$THEOS_DISK_NAME" ]; then
 	echo "[run] missing disk image '$THEOS_DISK_NAME' (create it with: ninja -C Build create-disk)" >&2
 	exit 1
 fi
+
+GPU_ARGS=()
+case "$THEOS_QEMU_GPU" in
+	vga|VGA|std|STD|legacy|LEGACY)
+		THEOS_QEMU_GPU="vga"
+		GPU_ARGS=(
+			-device "VGA,vgamem_mb=64"
+		)
+		;;
+	virtio|VIRTIO|virtio-vga|VIRTIO-VGA)
+		THEOS_QEMU_GPU="virtio"
+		GPU_ARGS=(
+			-device "virtio-vga"
+		)
+		;;
+	*)
+		echo "[run] invalid THEOS_QEMU_GPU='$THEOS_QEMU_GPU' (expected: vga|virtio)" >&2
+		exit 1
+		;;
+esac
 
 NUMA_ARGS=()
 if [ "$THEOS_QEMU_NUMA" = "1" ]; then
@@ -50,6 +71,8 @@ else
 	)
 fi
 
+echo "[run] gpu device: $THEOS_QEMU_GPU"
+
 qemu-system-x86_64 \
 	-chardev stdio,id=char0,mux=on,logfile=serial.log,signal=off \
 	-monitor telnet::45454,server,nowait \
@@ -58,9 +81,9 @@ qemu-system-x86_64 \
 	-m $THEOS_RAM_SIZE \
 	-cpu $THEOS_QEMU_CPU \
 	-smp 4 \
-	-device VGA,vgamem_mb=64 \
 	-s \
 	-net none \
+	"${GPU_ARGS[@]}" \
 	"${NUMA_ARGS[@]}" \
 	"${BOOT_MEDIA_ARGS[@]}"
 	

@@ -1,8 +1,10 @@
+#include <ctype.h>
 #include <stdbool.h>
 #include <stddef.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <string.h>
+#include <strings.h>
 #include <syscall.h>
 
 #define SHELL_LINE_MAX           256U
@@ -10,6 +12,7 @@
 #define SHELL_CAT_MAX            4096U
 #define SHELL_MAX_COMPONENTS     32U
 #define SHELL_MAX_COMPONENT_LEN  255U
+#define SHELL_EXEC_MAX_ARGS      32U
 
 static char* shell_trim(char* str)
 {
@@ -170,6 +173,84 @@ static bool shell_command_is_path(const char* command)
     return false;
 }
 
+static bool shell_path_exists(const char* path)
+{
+    if (!path || path[0] == '\0')
+        return false;
+
+    int fd = sys_open(path, SYS_OPEN_READ);
+    if (fd < 0)
+        return false;
+
+    (void) sys_close(fd);
+    return true;
+}
+
+static bool shell_build_the_alias_path(const char* command, char* out, size_t out_size)
+{
+    if (!command || !out || out_size < 7U)
+        return false;
+
+    const char* base = command;
+    if (strncasecmp(command, "the", 3U) == 0 && command[3] != '\0')
+    {
+        base = command + 3U;
+    }
+
+    if (base[0] == '\0')
+        return false;
+
+    size_t pos = 0;
+    const char prefix[] = "/bin/The";
+    const size_t prefix_len = sizeof(prefix) - 1U;
+    if (prefix_len + 2U > out_size)
+        return false;
+
+    memcpy(out + pos, prefix, prefix_len);
+    pos += prefix_len;
+
+    for (size_t i = 0; base[i] != '\0'; i++)
+    {
+        char c = (char) tolower((unsigned char) base[i]);
+        if (i == 0U)
+            c = (char) toupper((unsigned char) c);
+
+        if (pos + 1U >= out_size)
+            return false;
+
+        out[pos++] = c;
+    }
+
+    out[pos] = '\0';
+    return true;
+}
+
+static bool shell_resolve_exec_command(const char* cwd, const char* command, char* out, size_t out_size)
+{
+    if (!cwd || !command || !out || out_size == 0U || command[0] == '\0')
+        return false;
+
+    if (shell_command_is_path(command))
+        return shell_resolve_path(cwd, command, out, out_size);
+
+    int direct_len = snprintf(out, out_size, "/bin/%s", command);
+    if (direct_len > 0 && (size_t) direct_len < out_size && shell_path_exists(out))
+        return true;
+
+    char alias_path[SHELL_PATH_MAX];
+    if (!shell_build_the_alias_path(command, alias_path, sizeof(alias_path)))
+        return false;
+    if (!shell_path_exists(alias_path))
+        return false;
+
+    size_t alias_len = strlen(alias_path);
+    if (alias_len + 1U > out_size)
+        return false;
+
+    memcpy(out, alias_path, alias_len + 1U);
+    return true;
+}
+
 static const char* shell_signal_name(int signal)
 {
     switch (signal)
@@ -189,7 +270,34 @@ static const char* shell_signal_name(int signal)
     }
 }
 
-static void shell_cmd_exec_path(const char* cwd, const char* command)
+static size_t shell_split_words(char* text, char* out_words[], size_t max_words)
+{
+    if (!text || !out_words || max_words == 0U)
+        return 0U;
+
+    size_t count = 0U;
+    char* cursor = text;
+    while (*cursor != '\0' && count < max_words)
+    {
+        while (*cursor == ' ' || *cursor == '\t')
+            cursor++;
+        if (*cursor == '\0')
+            break;
+
+        out_words[count++] = cursor;
+        while (*cursor != '\0' && *cursor != ' ' && *cursor != '\t')
+            cursor++;
+        if (*cursor == '\0')
+            break;
+
+        *cursor = '\0';
+        cursor++;
+    }
+
+    return count;
+}
+
+static void shell_cmd_exec_path(const char* cwd, const char* command, char* arg_line)
 {
     if (!cwd || !command || command[0] == '\0')
         return;
@@ -201,6 +309,19 @@ static void shell_cmd_exec_path(const char* cwd, const char* command)
         return;
     }
 
+    const char* argv_exec[SHELL_EXEC_MAX_ARGS + 1U];
+    size_t argc_exec = 0U;
+    argv_exec[argc_exec++] = resolved;
+
+    if (arg_line && arg_line[0] != '\0')
+    {
+        char* parsed_args[SHELL_EXEC_MAX_ARGS];
+        size_t parsed_count = shell_split_words(arg_line, parsed_args, SHELL_EXEC_MAX_ARGS - 1U);
+        for (size_t i = 0; i < parsed_count && argc_exec < SHELL_EXEC_MAX_ARGS; i++)
+            argv_exec[argc_exec++] = parsed_args[i];
+    }
+    argv_exec[argc_exec] = NULL;
+
     int fork_rc = sys_fork();
     if (fork_rc < 0)
     {
@@ -210,9 +331,8 @@ static void shell_cmd_exec_path(const char* cwd, const char* command)
 
     if (fork_rc == 0)
     {
-        const char* const argv[] = { resolved, NULL };
         const char* const envp[] = { NULL };
-        int rc = sys_execve(resolved, argv, envp);
+        int rc = sys_execve(resolved, argv_exec, envp);
         printf("exec: cannot run '%s' (rc=%d)\n", resolved, rc);
         sys_exit(127);
     }
@@ -435,13 +555,18 @@ static void shell_print_help(void)
     printf("  touch <path>\n");
     printf("  mkdir <path>\n");
     printf("  echo <text> | <path>\n");
-    printf("  <path/to/binary> (ex: ./bin/TheTest)\n");
+    printf("  <binary> (ex: TheTest ou test)\n");
+    printf("  <path/to/binary> (ex: /bin/TheTest)\n");
     printf("  help\n");
     printf("  exit\n");
 }
 
-int main(void)
+int main(int argc, char** argv, char** envp)
 {
+    (void) argc;
+    (void) argv;
+    (void) envp;
+
     if (keyboard_load_config("/system/keyboard.conf") != 0)
         printf("[TheShell] keyboard config unavailable, fallback=qwerty\n");
 
@@ -497,9 +622,13 @@ int main(void)
             printf("Bye !\n");
             sys_exit(0);
         }
-        else if (shell_command_is_path(command))
-            shell_cmd_exec_path(cwd, command);
         else
-            printf("unknown command: %s\n", command);
+        {
+            char exec_command[SHELL_PATH_MAX];
+            if (shell_resolve_exec_command(cwd, command, exec_command, sizeof(exec_command)))
+                shell_cmd_exec_path(cwd, exec_command, arg);
+            else
+                printf("unknown command: %s\n", command);
+        }
     }
 }
