@@ -42,7 +42,7 @@ This README reflects the repository state as of **March 3, 2026**.
 - libc is partial (enough for current apps/porting work, not full POSIX libc).
 - No userland threading API/runtime yet.
 - Signals are minimal: fault-to-signal translation + `SIGKILL` through `SYS_KILL`; no full signal handlers.
-- MicroPython port is usable for REPL/bootstrap work, but script execution still has unresolved limitations (example seen in logs: `OSError: 12`).
+- MicroPython port is usable for REPL/bootstrap work, but script execution still has unresolved limitations.
 
 ## Architecture Notes
 ### Virtual Memory Layout
@@ -64,7 +64,7 @@ This README reflects the repository state as of **March 3, 2026**.
 Ubuntu/Debian packages:
 
 ```bash
-sudo apt install gcc binutils make cmake ninja-build libmpc-dev qemu-system-x86 grub-pc-bin xorriso
+sudo apt install gcc binutils make cmake ninja-build libmpc-dev qemu-system-x86 grub-pc-bin xorriso mtools
 ```
 
 ## Cross Toolchain
@@ -79,17 +79,20 @@ cd Toolchain
 From repository root:
 
 ```bash
-cmake -S . -B Build -G Ninja
-ninja -C Build -j"$(nproc)"
+mkdir Build
+cd Build
+cmake .. -GNinja
+ninja create-disk install-run"
 ```
 
 Useful targets:
 
 ```bash
-ninja -C Build create-disk   # build/populate ext4 disk image
-ninja -C Build iso           # build bootable ISO
-ninja -C Build run           # run QEMU
-ninja -C Build install-run   # install + iso + run
+cd Build
+ninja create-disk   # build/populate ext4 disk image
+ninja iso           # build bootable ISO
+ninja run           # run QEMU
+ninja install-run   # install + iso + run
 ```
 
 ## Main CMake Options
@@ -111,11 +114,12 @@ Kernel:
 Examples:
 
 ```bash
+cd Build
 # Use external disk.img as root fs source (instead of embedded ext4 partition in ISO)
-cmake -S . -B Build -G Ninja -DTHEOS_KERNEL_FS_DISK_IMG=ON
+cmake -GNinja -DTHEOS_KERNEL_FS_DISK_IMG=ON
 
 # Re-enable scheduler stress tests at boot
-cmake -S . -B Build -G Ninja -DTHEOS_ENABLE_SCHED_TESTS=ON
+cmake -GNinja -DTHEOS_ENABLE_SCHED_TESTS=ON
 ```
 
 ## Runtime Options (`Meta/run.sh`)
