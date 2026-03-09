@@ -9,6 +9,7 @@
 
 [ -z "$THEOS_QEMU_NUMA" ] && THEOS_QEMU_NUMA=0
 [ -z "$THEOS_BOOT_FROM_ISO_DISK" ] && THEOS_BOOT_FROM_ISO_DISK=1
+[ -z "$THEOS_QEMU_KVM" ] && THEOS_QEMU_KVM=1
 
 if [ ! -f "TheOS.iso" ]; then
 	echo "[run] missing TheOS.iso (build it first with: ninja -C Build iso)" >&2
@@ -72,6 +73,12 @@ else
 fi
 
 echo "[run] gpu device: $THEOS_QEMU_GPU"
+echo "[run] kvm: $THEOS_QEMU_KVM"
+
+KVM_ARGS=()
+if [ "$THEOS_QEMU_KVM" = "1" ]; then
+	KVM_ARGS=(-enable-kvm)
+fi
 
 qemu-system-x86_64 \
 	-chardev stdio,id=char0,mux=on,logfile=serial.log,signal=off \
@@ -85,7 +92,7 @@ qemu-system-x86_64 \
 	-net none \
 	"${GPU_ARGS[@]}" \
 	"${NUMA_ARGS[@]}" \
-	"-enable-kvm" \
+	"${KVM_ARGS[@]}" \
 	"${BOOT_MEDIA_ARGS[@]}"
 	
 exit 0

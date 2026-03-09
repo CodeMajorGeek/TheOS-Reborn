@@ -12,6 +12,7 @@ set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 set(THEOS_ARCH "x86_64" CACHE STRING "Target architecture for TheOS.")
 option(THEOS_QEMU_NUMA_DEFAULT "Enable QEMU NUMA by default for the run target." ON)
 option(THEOS_KERNEL_FS_DISK_IMG "Use disk.img as kernel filesystem in run target. OFF uses filesystem embedded in TheOS.iso." OFF)
+option(THEOS_ENABLE_KVM "Enable KVM acceleration for the run target." ON)
 
 set(CMAKE_C_STANDARD 11)
 set(CMAKE_C_STANDARD_REQUIRED OFF)
@@ -54,6 +55,7 @@ add_custom_target(run
 	COMMAND ${CMAKE_COMMAND} -E env
 		THEOS_QEMU_NUMA=$<IF:$<BOOL:${THEOS_QEMU_NUMA_DEFAULT}>,1,0>
 		THEOS_BOOT_FROM_ISO_DISK=${THEOS_BOOT_FROM_ISO_DISK_ARG}
+		THEOS_QEMU_KVM=$<IF:$<BOOL:${THEOS_ENABLE_KVM}>,1,0>
 		${CMAKE_SOURCE_DIR}/Meta/run.sh
 	USES_TERMINAL
 )
@@ -68,6 +70,12 @@ add_custom_target(install-run
 add_custom_target(create-disk
 	COMMAND chmod +x ${CMAKE_SOURCE_DIR}/Meta/disk.sh
 	COMMAND ${CMAKE_SOURCE_DIR}/Meta/disk.sh
+	USES_TERMINAL
+)
+
+add_custom_target(graphs
+	COMMAND chmod +x ${CMAKE_SOURCE_DIR}/Meta/gen-graphs.sh
+	COMMAND ${CMAKE_SOURCE_DIR}/Meta/gen-graphs.sh
 	USES_TERMINAL
 )
 

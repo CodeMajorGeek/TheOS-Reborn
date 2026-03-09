@@ -1,5 +1,11 @@
 # TheOS-Reborn
 
+![Arch](https://img.shields.io/badge/arch-x86__64-informational)
+![Boot](https://img.shields.io/badge/boot-multiboot2-blue)
+![Build tool](https://img.shields.io/badge/build%20tool-ninja-informational)
+![Build](https://img.shields.io/badge/build-passing-brightgreen)
+![Status](https://img.shields.io/badge/status-experimental-orange)
+
 TheOS-Reborn is a freestanding x86_64 OS project with a Multiboot2 kernel, custom VMM/PMM, SMP, ext4, ring3 userland, a minimal libc and a MicroPython port.
 
 > This README reflects the repository state as of **March 2026**.
@@ -39,6 +45,14 @@ TheOS-Reborn is a “from-scratch” 64‑bit OS kernel and userland for x86_64:
 - SMP bring-up, APIC/IOAPIC, HPET-timed LAPIC scheduling.
 - ext4-based root filesystem and ring3 ELF processes.
 - A small but practical libc plus several userland apps, including a MicroPython port.
+
+![Rough component split](Docs/components.png)
+
+> The donut above is generated from the current repository LOC counts via `Meta/gen-graphs.sh`.
+> You can regenerate it with:
+> ```bash
+> ninja -C Build graphs
+> ```
 
 It is meant as a **learning and experimentation playground** more than a production OS.
 
@@ -212,6 +226,7 @@ Kernel options:
 - `KERNEL_DEBUG_LOG_FILE` (default `ON`)
 - `THEOS_ENABLE_SCHED_TESTS` (default `OFF`)
 - `THEOS_ENABLE_X2APIC_SMP_EXPERIMENTAL` (default `OFF`)
+- `THEOS_ENABLE_KVM` (default `ON`) – controls whether `ninja run` passes `-enable-kvm` to QEMU.
 
 Examples:
 
@@ -238,6 +253,7 @@ Environment variables (most useful):
   - `0`: root from external `disk.img`
 - `THEOS_QEMU_NUMA` (`0` or `1`)
   - with `THEOS_NUMA_NODE0_MEM`, `THEOS_NUMA_NODE1_MEM` when enabled.
+- `THEOS_QEMU_KVM` (`1` default, `0` to run without KVM acceleration)
 
 Notes:
 
