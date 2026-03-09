@@ -6,6 +6,15 @@
 #include <stdbool.h>
 #include <stdio.h>
 
+#ifdef __THEOS_KERNEL
+#include <CPU/SMP.h>
+#include <Debug/KDebug.h>
+#include <Device/TTY.h>
+#else
+#include <syscall.h>
+#include <signal.h>
+#endif
+
 void panic(char* s)
 {
     uintptr_t pcs[10];
@@ -29,10 +38,30 @@ void panic(char* s)
 
 void abort(void)
 {
+#ifdef __THEOS_KERNEL
+    static spinlock_t abort_lock = { 0 };
+    static volatile bool abort_broadcast_done = false;
+
     cli();
 
-    printf("Kernel Abort !");
+    spin_lock(&abort_lock);
+    bool first = !abort_broadcast_done;
+    if (first)
+    {
+        abort_broadcast_done = true;
+        /* Log to framebuffer/TTY and serial before stopping everything. */
+        TTY_puts("Kernel Abort !\n");
+        kdebug_puts("[ABORT] Kernel Abort ! Halting all CPUs.\n");
+        /* Stop all other CPUs as quickly as possible. */
+        (void) SMP_send_ipi_to_others(SMP_IPI_VECTOR_PANIC);
+    }
+    spin_unlock(&abort_lock);
 
-    halt();
-    __builtin_unreachable();
+    for (;;)
+        halt();
+#else
+    printf("abort() called, terminating process.\n");
+    sys_exit(128 + SIGABRT);
+#endif
+    __buitin_unrecheable();
 }

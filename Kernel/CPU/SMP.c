@@ -190,6 +190,16 @@ static void SMP_ipi_ping_handler(interrupt_frame_t* frame)
     APIC_send_EOI();
 }
 
+static void SMP_ipi_panic_handler(interrupt_frame_t* frame)
+{
+    (void) frame;
+
+    /* Hard stop for all CPUs on kernel abort. */
+    __asm__ __volatile__("cli");
+    for (;;)
+        __asm__ __volatile__("hlt");
+}
+
 static void SMP_ipi_pong_handler(interrupt_frame_t* frame)
 {
     (void) frame;
@@ -205,6 +215,7 @@ static void SMP_setup_ipi_handlers(void)
     ISR_register_vector(SMP_IPI_VECTOR_SCHED, SMP_ipi_sched_handler);
     ISR_register_vector(SMP_IPI_VECTOR_TLB, SMP_ipi_tlb_handler);
     ISR_register_vector(SMP_IPI_VECTOR_TIMER_INIT, SMP_ipi_timer_init_handler);
+    ISR_register_vector(SMP_IPI_VECTOR_PANIC, SMP_ipi_panic_handler);
 }
 
 static void SMP_ipi_counter_handler(interrupt_frame_t* frame)

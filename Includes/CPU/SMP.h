@@ -24,6 +24,8 @@
 #define SMP_IPI_VECTOR_SCHED        0xF4
 #define SMP_IPI_VECTOR_TLB          0xF5
 #define SMP_IPI_VECTOR_TIMER_INIT   0xF6
+/* Broadcast panic/halt IPI: used by kernel abort to stop all CPUs. */
+#define SMP_IPI_VECTOR_PANIC        0xF7
 
 #ifndef ASM_FILE
 

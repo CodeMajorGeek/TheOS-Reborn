@@ -85,6 +85,7 @@ qemu-system-x86_64 \
 	-net none \
 	"${GPU_ARGS[@]}" \
 	"${NUMA_ARGS[@]}" \
+	"-enable-kvm" \
 	"${BOOT_MEDIA_ARGS[@]}"
 	
 exit 0

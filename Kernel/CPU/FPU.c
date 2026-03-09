@@ -173,7 +173,14 @@ bool FPU_init_cpu(uint32_t cpu_index)
 
     bool has_xsave = (ecx & CPUID_FEAT_ECX_XSAVE) != 0;
     bool has_avx = (ecx & CPUID_FEAT_ECX_AVX) != 0;
-    bool enable_avx = has_xsave && has_avx && (max_basic_leaf >= FPU_XSAVE_CPUID_LEAF);
+
+    /* On some hypervisors (e.g. KVM), XRSTOR with full AVX state can trigger
+     * #GP even when CPUID advertises AVX+XSAVE. To keep the kernel portable,
+     * only enable AVX context management on bare metal. */
+    bool is_hypervisor = (ecx & CPUID_FEAT_ECX_HYPERVISOR) != 0;
+    bool enable_avx = has_xsave && has_avx &&
+                      (max_basic_leaf >= FPU_XSAVE_CPUID_LEAF) &&
+                      !is_hypervisor;
 
     uint64_t cr0 = x86_read_cr0();
     cr0 |= FPU_CR0_MP | FPU_CR0_NE;
