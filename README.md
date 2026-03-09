@@ -1,12 +1,12 @@
 # TheOS-Reborn
 
 ![Arch](https://img.shields.io/badge/arch-x86__64-informational)
-![Boot](https://img.shields.io/badge/boot-multiboot2-blue)
+![Boot](https://img.shields.io/badge/boot-limine-blue)
 ![Build tool](https://img.shields.io/badge/build%20tool-ninja-informational)
 ![Build](https://img.shields.io/badge/build-passing-brightgreen)
 ![Status](https://img.shields.io/badge/status-experimental-orange)
 
-TheOS-Reborn is a freestanding x86_64 OS project with a Multiboot2 kernel, custom VMM/PMM, SMP, ext4, ring3 userland, a minimal libc and a MicroPython port.
+TheOS-Reborn is a freestanding x86_64 OS project with a Limine kernel boot path, custom VMM/PMM, SMP, ext4, ring3 userland, a minimal libc and a MicroPython port.
 
 > This README reflects the repository state as of **March 2026**.
 
@@ -40,7 +40,7 @@ TheOS-Reborn is a freestanding x86_64 OS project with a Multiboot2 kernel, custo
 
 TheOS-Reborn is a “from-scratch” 64‑bit OS kernel and userland for x86_64:
 
-- Multiboot2 bootloader entry, higher-half kernel at `0xFFFFFFFF80000000`.
+- Limine bootloader entry, higher-half kernel at `0xFFFFFFFF80000000`.
 - Custom physical and virtual memory managers with strict kernel/user split.
 - SMP bring-up, APIC/IOAPIC, HPET-timed LAPIC scheduling.
 - ext4-based root filesystem and ring3 ELF processes.
@@ -63,7 +63,7 @@ It is meant as a **learning and experimentation playground** more than a product
 ### Stable / Working
 
 - **Boot & CPU**
-  - Multiboot2 boot + long mode + higher-half kernel.
+  - Limine boot + long mode + higher-half kernel.
   - Startup identity map kept during bring-up, dropped after SMP is online.
   - NX detection and enable path.
 - **Virtual memory**
@@ -87,7 +87,7 @@ It is meant as a **learning and experimentation playground** more than a product
   - AVX/XSAVE context on bare metal when CPUID/XCR0 allow it, with optional fallback to SSE-only under hypervisors when XRSTOR is unreliable.
 - **Storage & FS**
   - AHCI storage with MSI-X/MSI and fallback paths.
-  - ext4 mount from AHCI, with Multiboot2 `bootdev` preference.
+  - ext4 mount from AHCI, with Limine executable-file disk/partition hint and partition probing fallback.
 - **Userland**
   - Ring3 ELF launch at boot (`/bin/TheApp`), then process syscalls (`fork/execve/waitpid/kill`).
   - Shell (`TheShell`), regression test app (`TheTest`), and MicroPython (`TheMicroPython`).
@@ -125,7 +125,7 @@ It is meant as a **learning and experimentation playground** more than a product
 
 ```mermaid
 flowchart TD
-    A["GRUB / Multiboot2"] --> B["Bootloader.S / multiboot_entry"]
+    A["Limine"] --> B["Bootloader.S + limine_entry"]
     B --> C["k_entry (Entry.c)"]
     C --> D["PMM / VMM init"]
     D --> E["ACPI / APIC / IOAPIC / HPET"]
@@ -174,7 +174,7 @@ sudo apt update
 sudo apt full-upgrade
 sudo apt install -y \
   gcc binutils make cmake ninja-build libmpc-dev \
-  qemu-system-x86 grub-pc-bin xorriso mtools
+  qemu-system-x86 xorriso mtools
 ```
 
 ### Cross Toolchain
@@ -221,7 +221,7 @@ Top-level:
 Kernel options:
 
 - `THEOS_ENABLE_KDEBUG` (default `ON`)
-- `KERNEL_DEBUG_LOG_SERIAL` (default `ON`)
+- `KERNEL_DEBUG_LOG_SERIAL` (default `OFF`)
 - `KERNEL_DEBUG_LOG_FILE` (default `ON`)
 - `THEOS_ENABLE_SCHED_TESTS` (default `OFF`)
 - `THEOS_ENABLE_X2APIC_SMP_EXPERIMENTAL` (default `OFF`)
@@ -257,7 +257,7 @@ Environment variables (most useful):
 Notes:
 
 - `ninja -C Build run` sets `THEOS_QEMU_NUMA` based on `THEOS_QEMU_NUMA_DEFAULT`.
-- GRUB is configured for a single, hidden, zero-timeout framebuffer entry.
+- Limine is configured with a single default entry and zero timeout.
 
 ---
 
@@ -347,7 +347,7 @@ Current syscall enum range: `1..28`.
 
 ## Logging & Debugging
 
-- Serial run logs are written to **`Build/serial.log`** when using `ninja -C Build run`.
+- Serial run logs are written to **`Build/serial.log`** when `THEOS_QEMU_SERIAL=1`.
 - Kernel debug file sink:
   - logs to RAM first;
   - flushes to ext4 once the filesystem is mounted.

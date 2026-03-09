@@ -1,17 +1,10 @@
 #define ASM_FILE
-#include <Multiboot2/multiboot2.h>
 #include <Memory/VMMLayout.h>
 
 #ifdef HAVE_ASM_USCORE
 # define EXT_C(sym) _ ## sym
 #else
 # define EXT_C(sym) sym
-#endif
-
-#ifdef __ELF__
-# define AOUT_KLUDGE 0
-#else
-# define AOUT_KLUDGE MULTIBOOT_AOUT_KLUDGE
 #endif
 
 /* The size of our early kernel stack (16KiB). */
@@ -21,9 +14,6 @@
 .set HHDM_PML4_INDEX,    VMM_HHDM_PML4_INDEX
 .set KERNEL_PML4_INDEX,  VMM_KERNEL_PML4_INDEX
 .set KERNEL_PDPT_INDEX,  VMM_KERNEL_PDPT_INDEX
-
-.set HEADER_LEN,        mb2_hdr_end - mb2_hdr
-.set CHECKSUM,          -(MULTIBOOT2_HEADER_MAGIC + MULTIBOOT_ARCHITECTURE_I386 + HEADER_LEN)
 
 .set ID_FLAG,           1 << 21
 .set LM_BIT,            1 << 29
@@ -46,50 +36,9 @@
 .set GRAN_4K,           1 << 7
 .set LONG_MODE,         1 << 5
 
-.section .multiboot
-
-# Start our kernel with the MULTIBOOT2 header.
-mb2_hdr:
-    .align MULTIBOOT_HEADER_ALIGN
-    .long MULTIBOOT2_HEADER_MAGIC
-    .long MULTIBOOT_ARCHITECTURE_I386
-    .long HEADER_LEN
-    .long CHECKSUM
-#ifndef __ELF__
-address_tag_start:
-    .short MULTIBOOT_HEADER_TAG_ADDRESS
-    .short MULTIBOOT_HEADER_TAG_OPTIONAL
-    .long address_tag_end - address_tag_start
-    .long mb2_hdr
-    .long _start
-    .long _edata
-    .long _end
-address_tag_end:
-entry_address_tag_start:
-    .short MULTIBOOT_HEADER_TAG_ENTRY_ADDRESS
-    .short MULTIBOOT_HEADER_TAG_OPTIONAL
-    .long entry_address_tag_end - entry_address_tag_start
-    .long multiboot_entry
-entry_address_tag_end:
-#endif /*  __ELF__ */
-framebuffer_tag_start:
-    .align MULTIBOOT_HEADER_ALIGN
-    .short MULTIBOOT_HEADER_TAG_FRAMEBUFFER
-    .short MULTIBOOT_HEADER_TAG_OPTIONAL
-    .long framebuffer_tag_end - framebuffer_tag_start
-    .long 0
-    .long 0
-    .long 32
-framebuffer_tag_end:
-    .align MULTIBOOT_HEADER_ALIGN
-    .short MULTIBOOT_HEADER_TAG_END
-    .short 0
-    .long 8
-mb2_hdr_end:
-
 .code32
 .section .text
-.globl multiboot_entry
+.globl boot32_entry
 
 .globl TSS_GDT_segment
 .globl kernel_stack_top
@@ -97,14 +46,11 @@ mb2_hdr_end:
 ; .globl userland_stack_top
 ; .globl userland_stack_bottom
 
-# Execute our first loader code segment starting at multiboot_entry.
-multiboot_entry:   
+# Execute our first loader code segment in 32-bit mode.
+boot32_entry:
     movl $(kernel_stack_top - KERNEL_VIRT_BASE), %esp        # Use the dedicated early kernel stack.
     movl $0, %ebp
 
-    movl %ebx, %edi                 # Keep the Multiboot2 info ptr for the k_entry function.
-
-    calll check_multiboot           # Check if this code was loaded using a MULTIBOOT2 compliant bootloader ("ERR: 0" show up if not).
     calll check_cpuid               # Check if the CPUID operand is avaliable on this CPU ("ERR: 1" show up if not).
     calll check_msr                 # Check if the MSR is avaliable on this CPU ("ERR: 2" show up if not).
     calll check_long_mode           # Check if the long mode is supported on this CPU to determine if it's a 64 bits on ("ERR: 3" show up if not).
@@ -117,14 +63,6 @@ multiboot_entry:
     jmpl $gdt64.kernel_code, $(long_mode_entry - KERNEL_VIRT_BASE)   # Enter long mode via low alias, then jump to higher-half.
 
     jmp end                                     # Should not be reached !
-
-check_multiboot:
-    cmpl $MULTIBOOT2_BOOTLOADER_MAGIC, %eax # Just have to compare eax with the MULTIBOOT2 bootloader magic number.
-    jne check_multiboot.no_multiboot        # If not equal, this code was loaded by a not MULTIBOOT2 compliant bootloader, then print show "ERR: 0".
-    retl
-check_multiboot.no_multiboot:
-    movb $'0', %al
-    jmp error
 
 check_cpuid:
     # Let's put the actual EFLAGS into eax.
@@ -263,7 +201,7 @@ long_mode_entry_high:
 
     # SysV ABI: keep RSP 16-byte aligned before the call so k_entry sees
     # RSP%16==8 on entry (return address already pushed by call).
-    callq EXT_C(k_entry)    # First argument (multiboot info) is already in RDI.
+    callq EXT_C(k_entry)
     
 end:                # This part should be never be reached !
     cli

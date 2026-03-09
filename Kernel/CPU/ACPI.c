@@ -59,7 +59,10 @@ static ACPI_SDT_header_t* ACPI_map_sdt(uintptr_t phys)
     if (header->length < sizeof(ACPI_SDT_header_t))
         return NULL;
 
-    VMM_map_pages(P2V(phys), phys, header->length);
+    uintptr_t map_phys_start = phys & FRAME;
+    uintptr_t map_phys_end = (phys + (uintptr_t) header->length + 0x1000U - 1U) & FRAME;
+    uintptr_t map_len = map_phys_end - map_phys_start;
+    VMM_map_pages(P2V(map_phys_start), map_phys_start, map_len);
     return (ACPI_SDT_header_t*) P2V(phys);
 }
 
@@ -435,7 +438,7 @@ static bool ACPI_try_enable_legacy_mode(void)
     return false;
 }
 
-bool ACPI_RSDP_old_check(multiboot_uint8_t* rsdp)
+bool ACPI_RSDP_old_check(uint8_t* rsdp)
 {
     ACPI_RSDP_descriptor10_t* rsdp_desc10 = (ACPI_RSDP_descriptor10_t*) rsdp;
 
@@ -446,7 +449,7 @@ bool ACPI_RSDP_old_check(multiboot_uint8_t* rsdp)
     return ((uint8_t) sum10) == 0;
 }
 
-bool ACPI_RSDP_new_check(multiboot_uint8_t* rsdp)
+bool ACPI_RSDP_new_check(uint8_t* rsdp)
 {
     ACPI_RSDP_descriptor20_t* rsdp_desc20 = (ACPI_RSDP_descriptor20_t*) rsdp;
     uint32_t len = rsdp_desc20->length;

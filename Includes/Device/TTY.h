@@ -7,6 +7,7 @@
 #include <stdint.h>
 
 #define USE_COM2_OUTPUT
+#define TTY_FRAMEBUFFER_TYPE_RGB 1U
 
 #ifdef USE_COM2_OUTPUT
 #include <Device/COM.h>

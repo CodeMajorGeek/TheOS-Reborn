@@ -63,12 +63,15 @@ endif()
 
 add_custom_target(iso
 	COMMAND chmod +x ${CMAKE_SOURCE_DIR}/Meta/iso.sh
-	COMMAND ${CMAKE_COMMAND} -E env THEOS_EMBED_DISK_IN_ISO=${THEOS_EMBED_DISK_IN_ISO_ARG} ${CMAKE_SOURCE_DIR}/Meta/iso.sh
+	COMMAND ${CMAKE_COMMAND} -E env
+		THEOS_EMBED_DISK_IN_ISO=${THEOS_EMBED_DISK_IN_ISO_ARG}
+		THEOS_ISO_NAME=TheOS.iso
+		${CMAKE_SOURCE_DIR}/Meta/iso.sh
 	USES_TERMINAL
 )
 
 add_custom_target(run
-	DEPENDS iso
+	DEPENDS iso create-disk
 	COMMAND chmod +x ${CMAKE_SOURCE_DIR}/Meta/run.sh
 	COMMAND ${CMAKE_COMMAND} -E env
 		THEOS_QEMU_NUMA=$<IF:$<BOOL:${THEOS_QEMU_NUMA_DEFAULT}>,1,0>

@@ -1,6 +1,5 @@
 #include "TTYBackend.h"
 
-#include <Multiboot2/multiboot2.h>
 #include <Memory/KMem.h>
 #include <Memory/PMM.h>
 #include <Memory/VMM.h>
@@ -582,7 +581,7 @@ bool TTYFB_init(const TTY_framebuffer_info_t* info, uint8_t color)
         kdebug_puts("[TTY] framebuffer deferred: PSF2 font not loaded\n");
         return false;
     }
-    if (info->type != MULTIBOOT_FRAMEBUFFER_TYPE_RGB)
+    if (info->type != TTY_FRAMEBUFFER_TYPE_RGB)
     {
         kdebug_printf("[TTY] framebuffer type=%u unsupported (need RGB)\n", (unsigned int) info->type);
         return false;

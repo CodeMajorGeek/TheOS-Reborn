@@ -1,4 +1,4 @@
-ENTRY(multiboot_entry)
+ENTRY(limine_entry)
 
 KERNEL_PHYS_BASE = 0x00100000;
 KERNEL_VIRT_BASE = 0xFFFFFFFF80000000;
@@ -21,7 +21,6 @@ SECTIONS
 
     .text ALIGN(4K) : AT (ADDR(.text) - KERNEL_VIRT_BASE)
     {
-        KEEP(*(.multiboot))
         *(.text)
         *(.ap_trampoline)
     } :text
@@ -29,6 +28,13 @@ SECTIONS
     .rodata ALIGN(4K) : AT(ADDR(.rodata) - KERNEL_VIRT_BASE)
     {
         *(.rodata*)
+    } :data
+
+    .limine_requests ALIGN(8) : AT(ADDR(.limine_requests) - KERNEL_VIRT_BASE)
+    {
+        KEEP(*(.limine_requests_start_marker))
+        KEEP(*(.limine_requests))
+        KEEP(*(.limine_requests_end_marker))
     } :data
 
     .data ALIGN(4K) : AT(ADDR(.data) - KERNEL_VIRT_BASE)

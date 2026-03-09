@@ -4,6 +4,7 @@
 
 [ -z "$THEOS_QEMU_CPU" ] && THEOS_QEMU_CPU="max"
 [ -z "$THEOS_QEMU_GPU" ] && THEOS_QEMU_GPU="vga"
+[ -z "$THEOS_ISO_NAME" ] && THEOS_ISO_NAME="TheOS.iso"
 
 [ -z "$THEOS_DISK_NAME" ] && THEOS_DISK_NAME="disk.img"
 
@@ -14,8 +15,8 @@
 [ -z "$THEOS_QEMU_GDB_STUB" ] && THEOS_QEMU_GDB_STUB=0
 [ -z "$THEOS_QEMU_TELNET_MONITOR" ] && THEOS_QEMU_TELNET_MONITOR=0
 
-if [ ! -f "TheOS.iso" ]; then
-	echo "[run] missing TheOS.iso (build it first with: ninja -C Build iso)" >&2
+if [ ! -f "$THEOS_ISO_NAME" ]; then
+	echo "[run] missing '$THEOS_ISO_NAME' (build it first with: ninja -C Build iso)" >&2
 	exit 1
 fi
 
@@ -59,16 +60,16 @@ fi
 
 BOOT_MEDIA_ARGS=()
 if [ "$THEOS_BOOT_FROM_ISO_DISK" = "1" ]; then
-	echo "[run] root fs source: embedded disk in TheOS.iso"
+	echo "[run] root fs source: embedded disk in $THEOS_ISO_NAME"
 	BOOT_MEDIA_ARGS=(
-		-drive "id=osdisk,file=TheOS.iso,format=raw,if=none"
+		-drive "id=osdisk,file=$THEOS_ISO_NAME,format=raw,if=none"
 		-device "ahci,id=ahci"
 		-device "driver=ide-hd,drive=osdisk,bus=ahci.0"
 	)
 else
 	echo "[run] root fs source: external disk image '$THEOS_DISK_NAME'"
 	BOOT_MEDIA_ARGS=(
-		-cdrom "TheOS.iso"
+		-cdrom "$THEOS_ISO_NAME"
 		-drive "id=disk,file=$THEOS_DISK_NAME,format=raw,if=none"
 		-device "ahci,id=ahci"
 		-device "driver=ide-hd,drive=disk,bus=ahci.0"

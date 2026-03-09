@@ -15,6 +15,7 @@ message(STATUS "Kernel: THEOS_ENABLE_X2APIC_SMP_EXPERIMENTAL=${THEOS_ENABLE_X2AP
 
 set(KERNEL_BOOT_SOURCES
     Boot/Bootloader.S
+    Boot/LimineEntry.S
 )
 
 set(KERNEL_CPU_SOURCES
@@ -100,9 +101,11 @@ set(SOURCES
     ${LIBC_SOURCES}
 )
 
-configure_file(${CMAKE_CURRENT_SOURCE_DIR}/Boot/grub.cfg ${CMAKE_BINARY_DIR}/Kernel/Boot/grub.cfg COPYONLY)
-
-add_link_options(LINKER:-T ${CMAKE_CURRENT_SOURCE_DIR}/kernel.ld -nostdlib -n)
+add_link_options(
+    LINKER:-T,${CMAKE_CURRENT_SOURCE_DIR}/kernel.ld
+    LINKER:-z,max-page-size=0x1000
+    -nostdlib
+)
 
 add_compile_definitions(__THEOS_KERNEL)
 add_compile_definitions(__USE_QEMU)
