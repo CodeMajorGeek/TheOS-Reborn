@@ -125,27 +125,26 @@ It is meant as a **learning and experimentation playground** more than a product
 
 ```mermaid
 flowchart TD
-    A[GRUB / Multiboot2] --> B[Bootloader.S<br/>multiboot_entry]
-    B --> C[k_entry (Entry.c)]
-    C --> D[PMM / VMM init]
-    D --> E[ACPI / APIC / IOAPIC / HPET]
-    E --> F[AHCI + ext4 mount]
-    F --> G[SMP init<br/>AP bring-up]
-    G --> H[TTY / framebuffer switch]
-    H --> I[Launch /bin/TheApp (ring3)]
-    I --> J[TheShell / other userland apps]
+    A["GRUB / Multiboot2"] --> B["Bootloader.S / multiboot_entry"]
+    B --> C["k_entry (Entry.c)"]
+    C --> D["PMM / VMM init"]
+    D --> E["ACPI / APIC / IOAPIC / HPET"]
+    E --> F["AHCI + ext4 mount"]
+    F --> G["SMP init / AP bring-up"]
+    G --> H["TTY / framebuffer switch"]
+    H --> I["Launch /bin/TheApp (ring3)"]
+    I --> J["TheShell / other userland apps"]
 ```
 
 ### Virtual Memory Layout
 
 ```mermaid
 graph TD
-    K0[0x0000_0000_0000_0000] -->|user space| K1[...]
-    K1 --> KU[0x0000_7FFF_FFFF_FFFF<br/>VMM_USER_SPACE_MAX]
-    KU --> G1[gap]
-    G1 --> HH[0xFFFF_8000_0000_0000<br/>VMM_HHDM_BASE]
-    HH --> MM[0xFFFF_C000_0000_0000<br/>VMM_MMIO_BASE]
-    MM --> KV[0xFFFF_FFFF_8000_0000<br/>VMM_KERNEL_VIRT_BASE]
+    K0["0x0000_0000_0000_0000"] -->|user space| KU["VMM_USER_SPACE_MAX"]
+    KU --> G1["gap"]
+    G1 --> HH["VMM_HHDM_BASE"]
+    HH --> MM["VMM_MMIO_BASE"]
+    MM --> KV["VMM_KERNEL_VIRT_BASE"]
 ```
 
 Key points:
