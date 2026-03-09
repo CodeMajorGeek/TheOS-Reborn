@@ -49,7 +49,7 @@ chart_json=$(cat <<EOF
   "data": {
     "labels": [
       "Kernel (${kernel_pct}%)",
-      "Userland natif (${userland_native_pct}%)"
+      "Userland (${userland_native_pct}%)"
     ],
     "datasets": [{
       "data": [${kernel_pct}, ${userland_native_pct}]
