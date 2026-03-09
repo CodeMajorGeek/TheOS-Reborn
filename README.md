@@ -65,10 +65,12 @@ It is meant as a **learning and experimentation playground** more than a product
   - Kernel space and other processes are blocked from mmap APIs.
   - W^X: writable+executable mappings are rejected.
   - NX enforced on non-executable regions when supported.
-- **Interrupts, timers, SMP**
+- **Interrupts, timers, SMP, FPU**
   - APIC/IOAPIC with ACPI MADT parsing and IRQ overrides.
   - LAPIC timer calibrated against HPET.
   - SMP bring-up (INIT/SIPI), AP online, per-CPU queues, TLB shootdown.
+  - Eager FPU context switching (save/restore on task switch, no lazy TS/#NM).
+  - AVX/XSAVE context on bare metal when CPUID/XCR0 allow it, with optional fallback to SSE-only under hypervisors when XRSTOR is unreliable.
 - **Storage & FS**
   - AHCI storage with MSI-X/MSI and fallback paths.
   - ext4 mount from AHCI, with Multiboot2 `bootdev` preference.

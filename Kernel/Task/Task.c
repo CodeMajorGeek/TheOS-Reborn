@@ -929,9 +929,8 @@ bool task_init_cpu(uint32_t cpu_index, uintptr_t kernel_stack, uint8_t apic_id)
         MSR_set(IA32_KERNEL_GS_BASE, (uint64_t) (uintptr_t) cpu_local);
     }
 
-    // Lazy FPU: force #NM on the first SIMD/FPU instruction after a context bind.
-    FPU_lazy_on_task_switch();
-    FPU_lazy_probe_current_cpu();
+    /* Eager FPU: bind initial FPU state to the kernel task on this CPU. */
+    FPU_switch_task(NULL, &kernel_task);
 
     return true;
 }
@@ -1149,10 +1148,11 @@ void task_switch(void)
     if (current_task->rip == TASK_SWITCH_APPENED) // Maybe find a better solution than dummy value into rax...
         return;
 
+    task_t* prev = current_task;
     current_task = next_task;
 
-    // Lazy FPU: defer save/restore until first SIMD/FPU instruction of the new task.
-    FPU_lazy_on_task_switch();
+    /* Eager FPU: save/restore FPU context on every task switch. */
+    FPU_switch_task(prev, current_task);
 
     // Update rsp0 for new task's kernel stack
     // rsp1 and rsp2 are not used for IRQ handling

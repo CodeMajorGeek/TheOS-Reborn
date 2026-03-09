@@ -11,18 +11,12 @@
 
 static uint8_t FPU_initial_state[FPU_XSAVE_AREA_MAX] __attribute__((aligned(FPU_XSAVE_ALIGN)));
 static bool FPU_initial_state_ready = false;
-static bool FPU_nm_handler_registered = false;
 static bool FPU_sse_enabled = false;
 static bool FPU_avx_enabled = false;
 static uint32_t FPU_state_area_size = sizeof(FPU_fx_state_t);
 static uint64_t FPU_state_mask = FPU_XCR0_X87 | FPU_XCR0_SSE;
 static uint8_t FPU_stress_state_a[TASK_MAX_CPUS][FPU_XSAVE_AREA_MAX] __attribute__((aligned(FPU_XSAVE_ALIGN)));
 static uint8_t FPU_stress_state_b[TASK_MAX_CPUS][FPU_XSAVE_AREA_MAX] __attribute__((aligned(FPU_XSAVE_ALIGN)));
-
-static task_t* FPU_owner[TASK_MAX_CPUS] = { 0 };
-static uint64_t FPU_nm_hits[TASK_MAX_CPUS] = { 0 };
-
-static void FPU_nm_handler(interrupt_frame_t* frame);
 
 static inline void FPU_cpuid_full(uint32_t leaf,
                                   uint32_t subleaf,
@@ -155,6 +149,46 @@ static inline bool FPU_restore_task(task_t* task)
     return true;
 }
 
+void FPU_switch_task(task_t* prev, task_t* next)
+{
+    if (!FPU_sse_enabled)
+        return;
+
+    /* Save previous task FPU state if it was ever initialized. */
+    if (prev && prev->fpu_initialized)
+        FPU_save_task(prev);
+
+    /* No next task => no state to restore. */
+    if (!next)
+        return;
+
+    /* Ensure next has a state buffer and either restore from it or
+     * initialize from the global initial state. */
+    if (!next->fpu_initialized)
+    {
+        if (!FPU_ensure_task_state(next))
+        {
+            __asm__ __volatile__("fninit");
+            return;
+        }
+
+        if (FPU_initial_state_ready)
+            FPU_restore_state(FPU_initial_state);
+        else
+            __asm__ __volatile__("fninit");
+
+        next->fpu_initialized = 1;
+    }
+    else
+    {
+        if (!FPU_restore_task(next))
+        {
+            __asm__ __volatile__("fninit");
+            return;
+        }
+    }
+}
+
 bool FPU_init_cpu(uint32_t cpu_index)
 {
     uint32_t eax = 0;
@@ -172,11 +206,11 @@ bool FPU_init_cpu(uint32_t cpu_index)
     FPU_cpuid_full(0, 0, &max_basic_leaf, NULL, NULL, NULL);
 
     bool has_xsave = (ecx & CPUID_FEAT_ECX_XSAVE) != 0;
-    bool has_avx = (ecx & CPUID_FEAT_ECX_AVX) != 0;
+    bool has_avx   = (ecx & CPUID_FEAT_ECX_AVX)   != 0;
 
-    /* On some hypervisors (e.g. KVM), XRSTOR with full AVX state can trigger
-     * #GP even when CPUID advertises AVX+XSAVE. To keep the kernel portable,
-     * only enable AVX context management on bare metal. */
+    /* Under some hypervisors (e.g. KVM), XRSTOR with full AVX state can still
+     * trigger #GP even with eager FPU switching. To stay portable we only
+     * enable AVX context management on bare metal. */
     bool is_hypervisor = (ecx & CPUID_FEAT_ECX_HYPERVISOR) != 0;
     bool enable_avx = has_xsave && has_avx &&
                       (max_basic_leaf >= FPU_XSAVE_CPUID_LEAF) &&
@@ -236,47 +270,14 @@ bool FPU_init_cpu(uint32_t cpu_index)
         FPU_initial_state_ready = true;
     }
 
-    if (!FPU_nm_handler_registered)
-    {
-        ISR_register_vector(7, FPU_nm_handler);
-        FPU_nm_handler_registered = true;
-    }
-
-    if (cpu_index < TASK_MAX_CPUS)
-    {
-        FPU_owner[cpu_index] = NULL;
-        __atomic_store_n(&FPU_nm_hits[cpu_index], 0, __ATOMIC_RELAXED);
-    }
-
     FPU_sse_enabled = true;
 
-    kdebug_printf("[FPU] cpu=%u init sse=on avx=%s lazy=#NM state=%uB mode=%s\n",
+    kdebug_printf("[FPU] cpu=%u init sse=on avx=%s state=%uB mode=%s\n",
                   cpu_index,
                   FPU_avx_enabled ? "on" : "off",
                   FPU_state_area_size,
                   FPU_avx_enabled ? "xsave" : "fxsave");
     return true;
-}
-
-void FPU_lazy_on_task_switch(void)
-{
-    if (!FPU_sse_enabled)
-        return;
-
-    x86_set_ts();
-}
-
-void FPU_lazy_probe_current_cpu(void)
-{
-    if (!FPU_sse_enabled)
-        return;
-
-    __asm__ __volatile__("xorps %%xmm0, %%xmm0" : : : "xmm0");
-
-    if (FPU_avx_enabled)
-    {
-        __asm__ __volatile__("vxorps %%ymm0, %%ymm0, %%ymm0\n\tvzeroupper" : : : "ymm0");
-    }
 }
 
 bool FPU_is_sse_enabled(void)
@@ -313,8 +314,6 @@ bool FPU_stress_ymm_local(uint32_t iterations, uint64_t* signature_out)
 
     uint64_t signature = 0;
     bool ok = true;
-
-    x86_clear_ts();
 
     for (uint32_t iter = 0; iter < iterations; iter++)
     {
@@ -358,74 +357,5 @@ bool FPU_stress_ymm_local(uint32_t iterations, uint64_t* signature_out)
     if (signature_out)
         *signature_out = signature;
 
-    x86_set_ts();
     return ok;
-}
-
-static void FPU_nm_handler(interrupt_frame_t* frame)
-{
-    (void) frame;
-
-    if (!FPU_sse_enabled)
-        return;
-
-    uint32_t cpu_index = task_get_current_cpu_index();
-    if (cpu_index >= TASK_MAX_CPUS)
-        cpu_index = 0;
-
-    // TS must be cleared before any FXSAVE/FXRSTOR.
-    x86_clear_ts();
-
-    task_t* current = task_get_current_task();
-    task_t* owner = FPU_owner[cpu_index];
-
-    if (!current)
-    {
-        __asm__ __volatile__("fninit");
-        FPU_owner[cpu_index] = NULL;
-        return;
-    }
-
-    if (owner == current)
-    {
-        uint64_t hits = __atomic_add_fetch(&FPU_nm_hits[cpu_index], 1, __ATOMIC_RELAXED);
-        if (hits == 1)
-            kdebug_printf("[FPU] #NM cpu=%u task=%p owner=reused\n", cpu_index, current);
-        return;
-    }
-
-    if (owner && owner->fpu_initialized)
-        FPU_save_task(owner);
-
-    if (!current->fpu_initialized)
-    {
-        if (!FPU_ensure_task_state(current))
-        {
-            __asm__ __volatile__("fninit");
-            FPU_owner[cpu_index] = NULL;
-            return;
-        }
-
-        if (FPU_initial_state_ready)
-            FPU_restore_state(FPU_initial_state);
-        else
-            __asm__ __volatile__("fninit");
-
-        current->fpu_initialized = 1;
-    }
-    else
-    {
-        if (!FPU_restore_task(current))
-        {
-            __asm__ __volatile__("fninit");
-            FPU_owner[cpu_index] = NULL;
-            return;
-        }
-    }
-
-    FPU_owner[cpu_index] = current;
-
-    uint64_t hits = __atomic_add_fetch(&FPU_nm_hits[cpu_index], 1, __ATOMIC_RELAXED);
-    if (hits == 1)
-        kdebug_printf("[FPU] #NM cpu=%u task=%p owner=switch\n", cpu_index, current);
 }

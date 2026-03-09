@@ -25,9 +25,10 @@ typedef struct FPU_fx_state
     uint8_t bytes[512];
 } __attribute__((aligned(16))) FPU_fx_state_t;
 
+struct task; /* forward declaration for FPU context API */
+
 bool FPU_init_cpu(uint32_t cpu_index);
-void FPU_lazy_on_task_switch(void);
-void FPU_lazy_probe_current_cpu(void);
+void FPU_switch_task(struct task* prev, struct task* next);
 bool FPU_is_sse_enabled(void);
 bool FPU_is_avx_enabled(void);
 bool FPU_stress_ymm_local(uint32_t iterations, uint64_t* signature_out);
