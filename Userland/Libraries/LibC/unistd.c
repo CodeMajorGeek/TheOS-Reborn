@@ -7,11 +7,26 @@
 
 ssize_t read(int fd, void* buf, size_t count)
 {
-    (void) fd;
-    (void) buf;
-    (void) count;
-    errno = ENOSYS;
-    return -1;
+    if (!buf)
+    {
+        errno = EINVAL;
+        return -1;
+    }
+
+    if (fd == STDIN_FILENO)
+    {
+        errno = ENOSYS;
+        return -1;
+    }
+
+    int rc = sys_read(fd, buf, count);
+    if (rc < 0)
+    {
+        errno = EIO;
+        return -1;
+    }
+
+    return (ssize_t) rc;
 }
 
 ssize_t write(int fd, const void* buf, size_t count)
@@ -33,7 +48,7 @@ ssize_t write(int fd, const void* buf, size_t count)
         return (ssize_t) rc;
     }
 
-    int rc = fs_write(fd, buf, count);
+    int rc = sys_write(fd, buf, count);
     if (rc < 0)
     {
         errno = EIO;
@@ -57,7 +72,7 @@ int close(int fd)
 
 off_t lseek(int fd, off_t offset, int whence)
 {
-    int64_t rc = fs_seek(fd, (int64_t) offset, whence);
+    int64_t rc = sys_lseek(fd, (int64_t) offset, whence);
     if (rc < 0)
     {
         errno = EINVAL;

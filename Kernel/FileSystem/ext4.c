@@ -756,6 +756,66 @@ bool ext4_list_path(ext4_fs_t* fs, const char* path)
     return true;
 }
 
+bool ext4_read_dirent_at(ext4_fs_t* fs, const char* path, size_t index, ext4_dirent_info_t* out)
+{
+    if (!fs || !path || !out)
+        return false;
+
+    ext4_inode_t root;
+    if (!ext4_resolve_path_inode(fs, path, &root))
+        return false;
+    if ((root.i_mode & EXT4_INODE_MODE_TYPE_MASK) != EXT4_INODE_MODE_DIRECTORY)
+        return false;
+
+    uint32_t blocks = (root.i_size_lo + fs->block_size - 1U) / fs->block_size;
+    uint8_t* block = (uint8_t*) kmalloc(fs->block_size);
+    if (!block)
+        return false;
+
+    size_t current = 0;
+    for (uint32_t b = 0; b < blocks; ++b)
+    {
+        uint32_t phys = 0;
+        if (!ext4_inode_get_block(fs, &root, b, &phys))
+            continue;
+        if (!ext4_read_block(fs, phys, block))
+            continue;
+
+        uint32_t offset = 0;
+        while (offset < fs->block_size)
+        {
+            ext4_dir_entry_t* entry = (ext4_dir_entry_t*) (block + offset);
+            if (!ext4_dir_entry_is_valid(fs, offset, entry))
+                break;
+
+            if (entry->inode != 0 && entry->name_len > 0)
+            {
+                if (current == index)
+                {
+                    memset(out, 0, sizeof(*out));
+                    out->inode = entry->inode;
+                    out->file_type = entry->file_type;
+
+                    size_t len = entry->name_len;
+                    if (len > sizeof(out->name) - 1U)
+                        len = sizeof(out->name) - 1U;
+                    memcpy(out->name, entry->name, len);
+                    out->name[len] = '\0';
+
+                    kfree(block);
+                    return true;
+                }
+                current++;
+            }
+
+            offset += entry->rec_len;
+        }
+    }
+
+    kfree(block);
+    return false;
+}
+
 bool ext4_path_is_dir(ext4_fs_t* fs, const char* path)
 {
     if (!fs || !path)

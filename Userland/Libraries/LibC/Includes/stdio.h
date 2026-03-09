@@ -10,6 +10,12 @@
 #define DECIMAL     10
 #define HEXADECIMAL 16
 
+#define STDIO_KEY_UP       0x80
+#define STDIO_KEY_DOWN     0x81
+#define STDIO_KEY_LEFT     0x82
+#define STDIO_KEY_RIGHT    0x83
+#define STDIO_KEY_DELETE   0x84
+
 typedef struct FILE
 {
     int fd;

@@ -10,9 +10,13 @@ enable_testing()
 set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 
 set(THEOS_ARCH "x86_64" CACHE STRING "Target architecture for TheOS.")
+option(THEOS_HARDWARE_TEST_PROFILE "Enable hardware-like defaults (no serial debug logs, file logging on ext4, ISO-embedded rootfs)." ON)
 option(THEOS_QEMU_NUMA_DEFAULT "Enable QEMU NUMA by default for the run target." ON)
 option(THEOS_KERNEL_FS_DISK_IMG "Use disk.img as kernel filesystem in run target. OFF uses filesystem embedded in TheOS.iso." OFF)
 option(THEOS_ENABLE_KVM "Enable KVM acceleration for the run target." ON)
+option(THEOS_RUN_SERIAL_CONSOLE "Enable QEMU serial console wiring for run target." OFF)
+option(THEOS_RUN_GDB_STUB "Enable QEMU GDB stub (-s) for run target." OFF)
+option(THEOS_RUN_TELNET_MONITOR "Enable QEMU telnet monitor on :45454 for run target." OFF)
 
 set(CMAKE_C_STANDARD 11)
 set(CMAKE_C_STANDARD_REQUIRED OFF)
@@ -43,6 +47,20 @@ else()
 	message(STATUS "Run root filesystem source: embedded ext4 in TheOS.iso (THEOS_KERNEL_FS_DISK_IMG=OFF)")
 endif()
 
+if(THEOS_HARDWARE_TEST_PROFILE)
+	message(STATUS "Hardware test profile: ON")
+	set(KERNEL_DEBUG_LOG_SERIAL OFF CACHE BOOL "Enable kernel debug log sink to serial COM1" FORCE)
+	set(KERNEL_DEBUG_LOG_FILE ON CACHE BOOL "Enable kernel debug log sink to ext4 file (RAM buffered until FS ready)" FORCE)
+	set(THEOS_KERNEL_FS_DISK_IMG OFF CACHE BOOL "Use disk.img as kernel filesystem in run target. OFF uses filesystem embedded in TheOS.iso." FORCE)
+	set(THEOS_RUN_SERIAL_CONSOLE OFF CACHE BOOL "Enable QEMU serial console wiring for run target." FORCE)
+	set(THEOS_RUN_GDB_STUB OFF CACHE BOOL "Enable QEMU GDB stub (-s) for run target." FORCE)
+	set(THEOS_RUN_TELNET_MONITOR OFF CACHE BOOL "Enable QEMU telnet monitor on :45454 for run target." FORCE)
+	set(THEOS_BOOT_FROM_ISO_DISK_ARG "1")
+	set(THEOS_EMBED_DISK_IN_ISO_ARG "1")
+else()
+	message(STATUS "Hardware test profile: OFF")
+endif()
+
 add_custom_target(iso
 	COMMAND chmod +x ${CMAKE_SOURCE_DIR}/Meta/iso.sh
 	COMMAND ${CMAKE_COMMAND} -E env THEOS_EMBED_DISK_IN_ISO=${THEOS_EMBED_DISK_IN_ISO_ARG} ${CMAKE_SOURCE_DIR}/Meta/iso.sh
@@ -56,6 +74,9 @@ add_custom_target(run
 		THEOS_QEMU_NUMA=$<IF:$<BOOL:${THEOS_QEMU_NUMA_DEFAULT}>,1,0>
 		THEOS_BOOT_FROM_ISO_DISK=${THEOS_BOOT_FROM_ISO_DISK_ARG}
 		THEOS_QEMU_KVM=$<IF:$<BOOL:${THEOS_ENABLE_KVM}>,1,0>
+		THEOS_QEMU_SERIAL=$<IF:$<BOOL:${THEOS_RUN_SERIAL_CONSOLE}>,1,0>
+		THEOS_QEMU_GDB_STUB=$<IF:$<BOOL:${THEOS_RUN_GDB_STUB}>,1,0>
+		THEOS_QEMU_TELNET_MONITOR=$<IF:$<BOOL:${THEOS_RUN_TELNET_MONITOR}>,1,0>
 		${CMAKE_SOURCE_DIR}/Meta/run.sh
 	USES_TERMINAL
 )

@@ -17,36 +17,19 @@ long syscall(long num, long a1, long a2, long a3, long a4, long a5, long a6)
     return ret;
 }
 
-int fs_ls(void)
-{
-    return (int) syscall(SYS_FS_LS, 0, 0, 0, 0, 0, 0);
-}
-
-int fs_ls_path(const char* path)
-{
-    return (int) syscall(SYS_FS_LS, (long) path, 0, 0, 0, 0, 0);
-}
-
 int fs_is_dir(const char* path)
 {
     return (int) syscall(SYS_FS_ISDIR, (long) path, 0, 0, 0, 0, 0);
 }
 
-int fs_read(const char* name, void* buf, size_t buf_size, size_t* out_size)
-{
-    return (int) syscall(SYS_FS_READ, (long) name, (long) buf, (long) buf_size,
-                         (long) out_size, 0, 0);
-}
-
-int fs_create(const char* name, const void* data, size_t size)
-{
-    return (int) syscall(SYS_FS_CREATE, (long) name, (long) data, (long) size,
-                         0, 0, 0);
-}
-
 int fs_mkdir(const char* path)
 {
     return (int) syscall(SYS_FS_MKDIR, (long) path, 0, 0, 0, 0, 0);
+}
+
+int fs_readdir(const char* path, uint64_t index, syscall_dirent_t* out_entry)
+{
+    return (int) syscall(SYS_FS_READDIR, (long) path, (long) index, (long) out_entry, 0, 0, 0);
 }
 
 int sys_sleep_ms(uint32_t ms)
@@ -141,14 +124,19 @@ int sys_close(int fd)
     return (int) syscall(SYS_CLOSE, (long) fd, 0, 0, 0, 0, 0);
 }
 
-int fs_write(int fd, const void* buf, size_t len)
+int sys_read(int fd, void* buf, size_t len)
 {
-    return (int) syscall(SYS_FS_WRITE, (long) fd, (long) buf, (long) len, 0, 0, 0);
+    return (int) syscall(SYS_READ, (long) fd, (long) buf, (long) len, 0, 0, 0);
 }
 
-int64_t fs_seek(int fd, int64_t offset, int whence)
+int sys_write(int fd, const void* buf, size_t len)
 {
-    return (int64_t) syscall(SYS_FS_SEEK, (long) fd, (long) offset, (long) whence, 0, 0, 0);
+    return (int) syscall(SYS_WRITE, (long) fd, (long) buf, (long) len, 0, 0, 0);
+}
+
+int64_t sys_lseek(int fd, int64_t offset, int whence)
+{
+    return (int64_t) syscall(SYS_LSEEK, (long) fd, (long) offset, (long) whence, 0, 0, 0);
 }
 
 int sys_kbd_get_scancode(void)

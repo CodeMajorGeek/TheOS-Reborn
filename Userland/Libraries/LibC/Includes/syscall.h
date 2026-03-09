@@ -7,12 +7,9 @@
 
 long syscall(long num, long a1, long a2, long a3, long a4, long a5, long a6);
 
-int fs_ls(void);
-int fs_ls_path(const char* path);
 int fs_is_dir(const char* path);
-int fs_read(const char* name, void* buf, size_t buf_size, size_t* out_size);
-int fs_create(const char* name, const void* data, size_t size);
 int fs_mkdir(const char* path);
+int fs_readdir(const char* path, uint64_t index, syscall_dirent_t* out_entry);
 int sys_sleep_ms(uint32_t ms);
 uint64_t sys_tick_get(void);
 int sys_cpu_info_get(syscall_cpu_info_t* out_info);
@@ -30,8 +27,9 @@ int sys_unmap(void* addr, size_t len);
 int sys_mprotect(void* addr, size_t len, uint64_t prot);
 int sys_open(const char* path, uint64_t flags);
 int sys_close(int fd);
-int fs_write(int fd, const void* buf, size_t len);
-int64_t fs_seek(int fd, int64_t offset, int whence);
+int sys_read(int fd, void* buf, size_t len);
+int sys_write(int fd, const void* buf, size_t len);
+int64_t sys_lseek(int fd, int64_t offset, int whence);
 int sys_kbd_get_scancode(void);
 int sys_waitpid(int pid, int* out_status, int* out_signal);
 int sys_kill(int pid, int signal);

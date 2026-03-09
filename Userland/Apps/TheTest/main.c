@@ -108,10 +108,16 @@ static bool thetest_read_counter(const char* path, uint64_t* out_value)
     if (!path || !out_value)
         return false;
 
-    uint8_t raw[64];
-    size_t out_size = 0;
-    if (fs_read(path, raw, sizeof(raw) - 1U, &out_size) != 0)
+    int fd = sys_open(path, SYS_OPEN_READ);
+    if (fd < 0)
         return false;
+
+    uint8_t raw[64];
+    int read_rc = sys_read(fd, raw, sizeof(raw) - 1U);
+    (void) sys_close(fd);
+    if (read_rc < 0)
+        return false;
+    size_t out_size = (size_t) read_rc;
 
     raw[out_size] = '\0';
     return thetest_parse_u64((const char*) raw, out_value);
@@ -131,7 +137,7 @@ static bool thetest_write_counter(const char* path, uint64_t value)
     if (fd < 0)
         return false;
 
-    int write_rc = fs_write(fd, text, (size_t) text_len);
+    int write_rc = sys_write(fd, text, (size_t) text_len);
     int close_rc = sys_close(fd);
     return write_rc == text_len && close_rc == 0;
 }

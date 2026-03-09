@@ -60,8 +60,10 @@ static bool stdio_input_shift = false;
 static bool stdio_input_capslock = false;
 static bool stdio_input_altgr = false;
 static bool stdio_input_ctrl = false;
+static bool stdio_input_numlock = true;
 #define STDIO_KEYMAP_SIZE         128U
 #define STDIO_KBD_CONF_DEFAULT    "/system/keyboard.conf"
+#define STDIO_KBD_BASE_DEFAULT    "/system/qwerty.conf"
 #define STDIO_KBD_PATH_MAX        256U
 #define STDIO_KBD_FILE_MAX        8192U
 
@@ -176,6 +178,34 @@ static bool stdio_copy_cstr(char* dst, size_t dst_size, const char* src)
     return true;
 }
 
+static bool stdio_read_file(const char* path, uint8_t* buf, size_t buf_size, size_t* out_size)
+{
+    if (!path || !buf || buf_size == 0U || !out_size)
+        return false;
+
+    int fd = sys_open(path, SYS_OPEN_READ);
+    if (fd < 0)
+        return false;
+
+    size_t total = 0U;
+    while (total < buf_size)
+    {
+        int rc = sys_read(fd, buf + total, buf_size - total);
+        if (rc < 0)
+        {
+            (void) sys_close(fd);
+            return false;
+        }
+        if (rc == 0)
+            break;
+        total += (size_t) rc;
+    }
+
+    (void) sys_close(fd);
+    *out_size = total;
+    return true;
+}
+
 static bool stdio_decode_single_utf8_codepoint(const char* token, uint32_t* out_cp)
 {
     if (!token || !out_cp || token[0] == '\0')
@@ -276,67 +306,12 @@ static bool stdio_decode_char_token(const char* token, char* out_char)
     return false;
 }
 
-static void stdio_keyboard_set_default_qwerty(void)
+static void stdio_keyboard_reset_maps(void)
 {
     memset(stdio_keymap_base, 0, sizeof(stdio_keymap_base));
     memset(stdio_keymap_shift, 0, sizeof(stdio_keymap_shift));
     memset(stdio_keymap_altgr, 0, sizeof(stdio_keymap_altgr));
     memset(stdio_keymap_altgr_shift, 0, sizeof(stdio_keymap_altgr_shift));
-
-    stdio_keymap_base[0x02] = '1'; stdio_keymap_shift[0x02] = '!';
-    stdio_keymap_base[0x03] = '2'; stdio_keymap_shift[0x03] = '@';
-    stdio_keymap_base[0x04] = '3'; stdio_keymap_shift[0x04] = '#';
-    stdio_keymap_base[0x05] = '4'; stdio_keymap_shift[0x05] = '$';
-    stdio_keymap_base[0x06] = '5'; stdio_keymap_shift[0x06] = '%';
-    stdio_keymap_base[0x07] = '6'; stdio_keymap_shift[0x07] = '^';
-    stdio_keymap_base[0x08] = '7'; stdio_keymap_shift[0x08] = '&';
-    stdio_keymap_base[0x09] = '8'; stdio_keymap_shift[0x09] = '*';
-    stdio_keymap_base[0x0A] = '9'; stdio_keymap_shift[0x0A] = '(';
-    stdio_keymap_base[0x0B] = '0'; stdio_keymap_shift[0x0B] = ')';
-    stdio_keymap_base[0x0C] = '-'; stdio_keymap_shift[0x0C] = '_';
-    stdio_keymap_base[0x0D] = '='; stdio_keymap_shift[0x0D] = '+';
-    stdio_keymap_base[0x0E] = '\b'; stdio_keymap_shift[0x0E] = '\b';
-    stdio_keymap_base[0x0F] = '\t'; stdio_keymap_shift[0x0F] = '\t';
-
-    stdio_keymap_base[0x10] = 'q'; stdio_keymap_shift[0x10] = 'Q';
-    stdio_keymap_base[0x11] = 'w'; stdio_keymap_shift[0x11] = 'W';
-    stdio_keymap_base[0x12] = 'e'; stdio_keymap_shift[0x12] = 'E';
-    stdio_keymap_base[0x13] = 'r'; stdio_keymap_shift[0x13] = 'R';
-    stdio_keymap_base[0x14] = 't'; stdio_keymap_shift[0x14] = 'T';
-    stdio_keymap_base[0x15] = 'y'; stdio_keymap_shift[0x15] = 'Y';
-    stdio_keymap_base[0x16] = 'u'; stdio_keymap_shift[0x16] = 'U';
-    stdio_keymap_base[0x17] = 'i'; stdio_keymap_shift[0x17] = 'I';
-    stdio_keymap_base[0x18] = 'o'; stdio_keymap_shift[0x18] = 'O';
-    stdio_keymap_base[0x19] = 'p'; stdio_keymap_shift[0x19] = 'P';
-    stdio_keymap_base[0x1A] = '['; stdio_keymap_shift[0x1A] = '{';
-    stdio_keymap_base[0x1B] = ']'; stdio_keymap_shift[0x1B] = '}';
-    stdio_keymap_base[0x1C] = '\n'; stdio_keymap_shift[0x1C] = '\n';
-
-    stdio_keymap_base[0x1E] = 'a'; stdio_keymap_shift[0x1E] = 'A';
-    stdio_keymap_base[0x1F] = 's'; stdio_keymap_shift[0x1F] = 'S';
-    stdio_keymap_base[0x20] = 'd'; stdio_keymap_shift[0x20] = 'D';
-    stdio_keymap_base[0x21] = 'f'; stdio_keymap_shift[0x21] = 'F';
-    stdio_keymap_base[0x22] = 'g'; stdio_keymap_shift[0x22] = 'G';
-    stdio_keymap_base[0x23] = 'h'; stdio_keymap_shift[0x23] = 'H';
-    stdio_keymap_base[0x24] = 'j'; stdio_keymap_shift[0x24] = 'J';
-    stdio_keymap_base[0x25] = 'k'; stdio_keymap_shift[0x25] = 'K';
-    stdio_keymap_base[0x26] = 'l'; stdio_keymap_shift[0x26] = 'L';
-    stdio_keymap_base[0x27] = ';'; stdio_keymap_shift[0x27] = ':';
-    stdio_keymap_base[0x28] = '\''; stdio_keymap_shift[0x28] = '"';
-    stdio_keymap_base[0x29] = '`'; stdio_keymap_shift[0x29] = '~';
-    stdio_keymap_base[0x2B] = '\\'; stdio_keymap_shift[0x2B] = '|';
-
-    stdio_keymap_base[0x2C] = 'z'; stdio_keymap_shift[0x2C] = 'Z';
-    stdio_keymap_base[0x2D] = 'x'; stdio_keymap_shift[0x2D] = 'X';
-    stdio_keymap_base[0x2E] = 'c'; stdio_keymap_shift[0x2E] = 'C';
-    stdio_keymap_base[0x2F] = 'v'; stdio_keymap_shift[0x2F] = 'V';
-    stdio_keymap_base[0x30] = 'b'; stdio_keymap_shift[0x30] = 'B';
-    stdio_keymap_base[0x31] = 'n'; stdio_keymap_shift[0x31] = 'N';
-    stdio_keymap_base[0x32] = 'm'; stdio_keymap_shift[0x32] = 'M';
-    stdio_keymap_base[0x33] = ','; stdio_keymap_shift[0x33] = '<';
-    stdio_keymap_base[0x34] = '.'; stdio_keymap_shift[0x34] = '>';
-    stdio_keymap_base[0x35] = '/'; stdio_keymap_shift[0x35] = '?';
-    stdio_keymap_base[0x39] = ' '; stdio_keymap_shift[0x39] = ' ';
 }
 
 static bool stdio_keyboard_parse_layout(char* content)
@@ -470,7 +445,7 @@ static bool stdio_keyboard_load_layout_file(const char* layout_path)
 
     static uint8_t layout_buf[STDIO_KBD_FILE_MAX];
     size_t layout_size = 0;
-    if (fs_read(layout_path, layout_buf, sizeof(layout_buf) - 1U, &layout_size) != 0)
+    if (!stdio_read_file(layout_path, layout_buf, sizeof(layout_buf) - 1U, &layout_size))
         return false;
 
     layout_buf[layout_size] = '\0';
@@ -526,6 +501,15 @@ static char stdio_scancode_to_ascii(uint8_t scancode)
     if (alpha_pair && stdio_input_capslock)
         use_shift = !use_shift;
 
+    if (!stdio_input_numlock &&
+        (scancode == 0x47U || scancode == 0x48U || scancode == 0x49U ||
+         scancode == 0x4BU || scancode == 0x4CU || scancode == 0x4DU ||
+         scancode == 0x4FU || scancode == 0x50U || scancode == 0x51U ||
+         scancode == 0x52U || scancode == 0x53U))
+    {
+        return 0;
+    }
+
     return use_shift ? (shifted ? shifted : base) : base;
 }
 
@@ -576,6 +560,16 @@ static int stdio_read_key(void)
                 extended_prefix = false;
                 continue;
             }
+            if (scancode == 0x48U)
+                return STDIO_KEY_UP;
+            if (scancode == 0x50U)
+                return STDIO_KEY_DOWN;
+            if (scancode == 0x4BU)
+                return STDIO_KEY_LEFT;
+            if (scancode == 0x4DU)
+                return STDIO_KEY_RIGHT;
+            if (scancode == 0x53U)
+                return STDIO_KEY_DELETE;
         }
 
         switch (scancode)
@@ -600,6 +594,10 @@ static int stdio_read_key(void)
                 continue;
             case 0x3A:
                 stdio_input_capslock = !stdio_input_capslock;
+                extended_prefix = false;
+                continue;
+            case 0x45:
+                stdio_input_numlock = !stdio_input_numlock;
                 extended_prefix = false;
                 continue;
             default:
@@ -628,11 +626,14 @@ int keyboard_load_config(const char* config_path)
     (void) config_path;
     return -1;
 #else
-    stdio_keyboard_set_default_qwerty();
+    stdio_keyboard_reset_maps();
     stdio_input_shift = false;
     stdio_input_capslock = false;
     stdio_input_altgr = false;
     stdio_input_ctrl = false;
+    stdio_input_numlock = true;
+
+    bool loaded_base = stdio_keyboard_load_layout_file(STDIO_KBD_BASE_DEFAULT);
 
     const char* conf_path = config_path;
     if (!conf_path || conf_path[0] == '\0')
@@ -640,18 +641,21 @@ int keyboard_load_config(const char* config_path)
 
     static uint8_t conf_buf[STDIO_KBD_FILE_MAX];
     size_t conf_size = 0;
-    if (fs_read(conf_path, conf_buf, sizeof(conf_buf) - 1U, &conf_size) != 0)
+    if (!stdio_read_file(conf_path, conf_buf, sizeof(conf_buf) - 1U, &conf_size))
     {
+        if (!loaded_base)
+            (void) stdio_keyboard_load_layout_file("/system/azerty.conf");
         stdio_keyboard_ready = true;
-        return -1;
+        return loaded_base ? 0 : -1;
     }
     conf_buf[conf_size] = '\0';
 
     char layout_path[STDIO_KBD_PATH_MAX];
-    if (!stdio_keyboard_extract_layout_path((char*) conf_buf,
-                                            layout_path,
-                                            sizeof(layout_path)) ||
-        !stdio_keyboard_load_layout_file(layout_path))
+    bool loaded_layout = false;
+    if (stdio_keyboard_extract_layout_path((char*) conf_buf, layout_path, sizeof(layout_path)))
+        loaded_layout = stdio_keyboard_load_layout_file(layout_path);
+
+    if (!loaded_layout && !loaded_base)
     {
         stdio_keyboard_ready = true;
         return -1;

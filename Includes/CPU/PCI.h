@@ -78,6 +78,7 @@ void PCI_check_device(uint8_t bus, uint8_t slot);
 void PCI_check_function(uint8_t bus, uint8_t slot, uint8_t function);
 
 void PCI_scan_bus(uint8_t bus);
+const char* PCI_get_log_buffer(size_t* out_size);
 
 static void PCI_try_attach(uint8_t bus, uint8_t slot, uint8_t function, uint16_t vendor, uint16_t device);
 static void PCI_attach_storage_dev(uint8_t bus, uint8_t slot, uint8_t function, uint16_t vendor, uint16_t device);

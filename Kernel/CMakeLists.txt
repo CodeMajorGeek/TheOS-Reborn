@@ -1,6 +1,6 @@
 set(KERNEL_ARCH x86_64)
 option(THEOS_ENABLE_KDEBUG "Enable serial KDEBUG output and printf mirroring" ON)
-option(KERNEL_DEBUG_LOG_SERIAL "Enable kernel debug log sink to serial COM1" ON)
+option(KERNEL_DEBUG_LOG_SERIAL "Enable kernel debug log sink to serial COM1" OFF)
 option(KERNEL_DEBUG_LOG_FILE "Enable kernel debug log sink to ext4 file (RAM buffered until FS ready)" ON)
 option(THEOS_ENABLE_SCHED_TESTS "Enable SMP scheduler stress/balance/pathological tests" OFF)
 option(THEOS_ENABLE_X2APIC_SMP_EXPERIMENTAL "Force x2APIC on SMP systems (experimental)." OFF)

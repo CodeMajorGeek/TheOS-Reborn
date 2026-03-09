@@ -5,15 +5,26 @@
 #include <Debug/KDebug.h>
 #include <Memory/VMM.h>
 #include <Storage/AHCI.h>
+#include <string.h>
+
+#define PCI_LOG_BUFFER_SIZE 16384U
+
+static char PCI_log_buffer[PCI_LOG_BUFFER_SIZE];
+static size_t PCI_log_len = 0;
 
 static void PCI_try_attach(uint8_t bus, uint8_t slot, uint8_t function, uint16_t vendor, uint16_t device);
 static void PCI_attach_storage_dev(uint8_t bus, uint8_t slot, uint8_t function, uint16_t vendor, uint16_t device);
 static bool PCI_read_bar_address(uint8_t bus, uint8_t slot, uint8_t function, uint8_t bar_index, uintptr_t* phys_out, bool* is_io_out, bool* is_64_out);
 static uint16_t PCI_set_intx_disable(uint8_t bus, uint8_t slot, uint8_t function, bool disable);
+static void PCI_log_append_line(const char* line);
 
 void PCI_init(void)
 {
+    memset(PCI_log_buffer, 0, sizeof(PCI_log_buffer));
+    PCI_log_len = 0;
+    PCI_log_append_line("[PCI] scan start\n");
     PCI_scan_bus(0);
+    PCI_log_append_line("[PCI] scan done\n");
 }
 
 uint8_t PCI_config_readb(uint8_t bus, uint8_t slot, uint8_t function, uint8_t offset)
@@ -173,6 +184,16 @@ bool PCI_enable_msi(uint8_t bus, uint8_t slot, uint8_t function, uint8_t vector,
                   (unsigned) function,
                   command,
                   (command & PCI_COMMAND_INTX_DISABLE) ? "disabled" : "enabled");
+    char line[128];
+    int n = snprintf(line, sizeof(line),
+                     "[PCI] MSI enabled b=%u s=%u f=%u cmd=0x%X intx=%s\n",
+                     (unsigned) bus,
+                     (unsigned) slot,
+                     (unsigned) function,
+                     command,
+                     (command & PCI_COMMAND_INTX_DISABLE) ? "disabled" : "enabled");
+    if (n > 0)
+        PCI_log_append_line(line);
     return true;
 }
 
@@ -247,6 +268,16 @@ bool PCI_enable_msix(uint8_t bus, uint8_t slot, uint8_t function, uintptr_t mmio
                   (unsigned) function,
                   command,
                   (command & PCI_COMMAND_INTX_DISABLE) ? "disabled" : "enabled");
+    char line[128];
+    int n = snprintf(line, sizeof(line),
+                     "[PCI] MSI-X enabled b=%u s=%u f=%u cmd=0x%X intx=%s\n",
+                     (unsigned) bus,
+                     (unsigned) slot,
+                     (unsigned) function,
+                     command,
+                     (command & PCI_COMMAND_INTX_DISABLE) ? "disabled" : "enabled");
+    if (n > 0)
+        PCI_log_append_line(line);
     return true;
 }
 
@@ -272,6 +303,16 @@ void PCI_check_device(uint8_t bus, uint8_t slot)
 
     uint16_t device_id = PCI_config_readw(bus, slot, function, PCI_DEVICE_REG);
     kdebug_printf("[PCI] b=%u s=%u f=%u vid=0x%X did=0x%X\n", bus, slot, function, vendor_id, device_id);
+    char line[128];
+    int n = snprintf(line, sizeof(line),
+                     "[PCI] b=%u s=%u f=%u vid=0x%X did=0x%X\n",
+                     (unsigned) bus,
+                     (unsigned) slot,
+                     (unsigned) function,
+                     (unsigned) vendor_id,
+                     (unsigned) device_id);
+    if (n > 0)
+        PCI_log_append_line(line);
 
     PCI_try_attach(bus, slot, function, vendor_id, device_id);
 
@@ -306,6 +347,15 @@ static void PCI_try_attach(uint8_t bus, uint8_t slot, uint8_t function, uint16_t
 {
     uint8_t base_class = (uint8_t) ((PCI_config_readw(bus, slot, function, PCI_CLASS_REG) >> 8) & 0xFF);
     kdebug_printf("[PCI] class b=%u s=%u f=%u class=0x%X\n", bus, slot, function, base_class);
+    char line[96];
+    int n = snprintf(line, sizeof(line),
+                     "[PCI] class b=%u s=%u f=%u class=0x%X\n",
+                     (unsigned) bus,
+                     (unsigned) slot,
+                     (unsigned) function,
+                     (unsigned) base_class);
+    if (n > 0)
+        PCI_log_append_line(line);
     switch (base_class)
     {
         case PCI_DEV_CLASS_STORAGE:
@@ -320,4 +370,32 @@ static void PCI_try_attach(uint8_t bus, uint8_t slot, uint8_t function, uint16_t
 static void PCI_attach_storage_dev(uint8_t bus, uint8_t slot, uint8_t function, uint16_t vendor, uint16_t device)
 {
     AHCI_try_setup_device(bus, slot, function, vendor, device);
+}
+
+const char* PCI_get_log_buffer(size_t* out_size)
+{
+    if (out_size)
+        *out_size = PCI_log_len;
+    return PCI_log_buffer;
+}
+
+static void PCI_log_append_line(const char* line)
+{
+    if (!line || line[0] == '\0')
+        return;
+
+    size_t len = strlen(line);
+    if (len == 0)
+        return;
+
+    if (PCI_log_len >= (PCI_LOG_BUFFER_SIZE - 1U))
+        return;
+
+    size_t avail = (PCI_LOG_BUFFER_SIZE - 1U) - PCI_log_len;
+    if (len > avail)
+        len = avail;
+
+    memcpy(PCI_log_buffer + PCI_log_len, line, len);
+    PCI_log_len += len;
+    PCI_log_buffer[PCI_log_len] = '\0';
 }

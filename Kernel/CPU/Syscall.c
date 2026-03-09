@@ -152,6 +152,19 @@ static inline uintptr_t Syscall_align_up_page(uintptr_t value)
     return (value + (SYSCALL_PAGE_SIZE - 1U)) & ~(uintptr_t) (SYSCALL_PAGE_SIZE - 1U);
 }
 
+static uint8_t Syscall_dirent_type_from_ext4(uint8_t ext4_type)
+{
+    switch (ext4_type)
+    {
+        case EXT4_FT_DIR:
+            return SYS_DT_DIR;
+        case EXT4_FT_REG_FILE:
+            return SYS_DT_REG;
+        default:
+            return SYS_DT_UNKNOWN;
+    }
+}
+
 static bool Syscall_user_range_in_bounds(uintptr_t user_ptr, size_t size)
 {
     if (size == 0)
@@ -1421,104 +1434,6 @@ uint64_t Syscall_interupt_handler(uint64_t syscall_num, syscall_frame_t* frame, 
 
     switch (syscall_num)
     {
-        case SYS_FS_LS:
-        {
-            if (!Syscall_fs_lock_ready)
-                return (uint64_t) -1;
-
-            const char* path = "/";
-            char path_buf[SYSCALL_USER_CSTR_MAX];
-            if ((const char*) frame->rdi != NULL)
-            {
-                if (!Syscall_read_user_cstr(path_buf, sizeof(path_buf), (const char*) frame->rdi))
-                    return (uint64_t) -1;
-                path = path_buf;
-            }
-
-            spin_lock(&Syscall_fs_lock);
-            ext4_fs_t* fs = ext4_get_active();
-            bool ok = (fs && ext4_list_path(fs, path));
-            spin_unlock(&Syscall_fs_lock);
-            return ok ? 0 : (uint64_t) -1;
-        }
-
-        case SYS_FS_READ:
-        {
-            if (!Syscall_fs_lock_ready)
-                return (uint64_t) -1;
-
-            char name[SYSCALL_USER_CSTR_MAX];
-            if (!Syscall_read_user_cstr(name, sizeof(name), (const char*) frame->rdi))
-                return (uint64_t) -1;
-
-            uint8_t* user_buf = (uint8_t*) frame->rsi;
-            size_t buf_size = (size_t) frame->rdx;
-            size_t* out_size = (size_t*) frame->r10;
-
-            uint8_t* data = NULL;
-            size_t size = 0;
-            spin_lock(&Syscall_fs_lock);
-            ext4_fs_t* fs = ext4_get_active();
-            bool read_ok = (fs && ext4_read_file(fs, name, &data, &size) && data);
-            spin_unlock(&Syscall_fs_lock);
-            if (!read_ok)
-                return (uint64_t) -1;
-            if (size > buf_size)
-            {
-                kfree(data);
-                return (uint64_t) -1;
-            }
-
-            if (!Syscall_copy_to_user(user_buf, data, size))
-            {
-                kfree(data);
-                return (uint64_t) -1;
-            }
-
-            if (out_size && !Syscall_copy_to_user(out_size, &size, sizeof(size)))
-            {
-                kfree(data);
-                return (uint64_t) -1;
-            }
-            kfree(data);
-            return 0;
-        }
-
-        case SYS_FS_CREATE:
-        {
-            if (!Syscall_fs_lock_ready)
-                return (uint64_t) -1;
-
-            char name[SYSCALL_USER_CSTR_MAX];
-            if (!Syscall_read_user_cstr(name, sizeof(name), (const char*) frame->rdi))
-                return (uint64_t) -1;
-
-            const uint8_t* user_data = (const uint8_t*) frame->rsi;
-            size_t size = (size_t) frame->rdx;
-            uint8_t* kernel_data = NULL;
-
-            if (size != 0)
-            {
-                kernel_data = (uint8_t*) kmalloc(size);
-                if (!kernel_data)
-                    return (uint64_t) -1;
-                if (!Syscall_copy_from_user(kernel_data, user_data, size))
-                {
-                    kfree(kernel_data);
-                    return (uint64_t) -1;
-                }
-            }
-
-            spin_lock(&Syscall_fs_lock);
-            ext4_fs_t* fs = ext4_get_active();
-            bool ok = fs && ext4_create_file(fs, name, kernel_data, size);
-            spin_unlock(&Syscall_fs_lock);
-            if (kernel_data)
-                kfree(kernel_data);
-
-            return ok ? 0 : (uint64_t) -1;
-        }
-
         case SYS_FS_MKDIR:
         {
             if (!Syscall_fs_lock_ready)
@@ -2155,7 +2070,47 @@ mprotect_out:
             return 0;
         }
 
-        case SYS_FS_WRITE:
+        case SYS_READ:
+        {
+            int64_t fd = (int64_t) frame->rdi;
+            void* user_buf = (void*) frame->rsi;
+            size_t len = (size_t) frame->rdx;
+            uint32_t owner_pid = Syscall_proc_current_pid(cpu_index, frame);
+            if (len == 0)
+                return 0;
+            if (!user_buf || fd < 0 || (uint64_t) fd >= SYSCALL_MAX_OPEN_FILES || !Syscall_fd_lock_ready)
+                return (uint64_t) -1;
+            if (owner_pid == 0)
+                return (uint64_t) -1;
+
+            spin_lock(&Syscall_fd_lock);
+            syscall_file_desc_t* entry = &Syscall_fds[(uint32_t) fd];
+            if (!entry->used || entry->owner_pid != owner_pid || !entry->can_read)
+            {
+                spin_unlock(&Syscall_fd_lock);
+                return (uint64_t) -1;
+            }
+
+            if (entry->offset >= entry->size)
+            {
+                spin_unlock(&Syscall_fd_lock);
+                return 0;
+            }
+
+            size_t remaining = entry->size - entry->offset;
+            size_t to_copy = (len < remaining) ? len : remaining;
+            if (!entry->data || !Syscall_copy_to_user(user_buf, entry->data + entry->offset, to_copy))
+            {
+                spin_unlock(&Syscall_fd_lock);
+                return (uint64_t) -1;
+            }
+
+            entry->offset += to_copy;
+            spin_unlock(&Syscall_fd_lock);
+            return (uint64_t) to_copy;
+        }
+
+        case SYS_WRITE:
         {
             int64_t fd = (int64_t) frame->rdi;
             const void* user_buf = (const void*) frame->rsi;
@@ -2218,7 +2173,7 @@ mprotect_out:
             return (uint64_t) len;
         }
 
-        case SYS_FS_SEEK:
+        case SYS_LSEEK:
         {
             int64_t fd = (int64_t) frame->rdi;
             int64_t offset = (int64_t) frame->rsi;
@@ -2299,6 +2254,47 @@ mprotect_out:
             bool is_dir = (fs && ext4_path_is_dir(fs, path));
             spin_unlock(&Syscall_fs_lock);
             return is_dir ? 1ULL : 0ULL;
+        }
+
+        case SYS_FS_READDIR:
+        {
+            if (!Syscall_fs_lock_ready)
+                return (uint64_t) -1;
+
+            char path[SYSCALL_USER_CSTR_MAX];
+            if (!Syscall_read_user_cstr(path, sizeof(path), (const char*) frame->rdi))
+                return (uint64_t) -1;
+
+            size_t index = (size_t) frame->rsi;
+            syscall_dirent_t* user_out = (syscall_dirent_t*) frame->rdx;
+            if (!user_out)
+                return (uint64_t) -1;
+
+            ext4_dirent_info_t info;
+            memset(&info, 0, sizeof(info));
+
+            spin_lock(&Syscall_fs_lock);
+            ext4_fs_t* fs = ext4_get_active();
+            bool ok = (fs && ext4_read_dirent_at(fs, path, index, &info));
+            spin_unlock(&Syscall_fs_lock);
+
+            if (!ok)
+                return 0;
+
+            syscall_dirent_t out;
+            memset(&out, 0, sizeof(out));
+            out.d_ino = info.inode;
+            out.d_type = Syscall_dirent_type_from_ext4(info.file_type);
+            size_t name_len = strlen(info.name);
+            if (name_len > SYS_DIRENT_NAME_MAX)
+                name_len = SYS_DIRENT_NAME_MAX;
+            memcpy(out.d_name, info.name, name_len);
+            out.d_name[name_len] = '\0';
+
+            if (!Syscall_copy_to_user(user_out, &out, sizeof(out)))
+                return (uint64_t) -1;
+
+            return 1;
         }
 
         case SYS_WAITPID:

@@ -9,6 +9,7 @@ static uint32_t TTY_col = 0;
 static uint8_t TTY_color = 0;
 static bool TTY_cursor_enabled = false;
 static bool TTY_use_framebuffer = false;
+static bool TTY_output_enabled = true;
 static uint32_t TTY_cols = VGA_WIDTH;
 static uint32_t TTY_rows = VGA_HEIGHT;
 
@@ -61,6 +62,13 @@ static void TTY_erase_line_from_cursor(void)
     TTY_update_cursor((uint8_t) saved_col, (uint8_t) saved_row);
 }
 
+static void TTY_move_cursor_home(void)
+{
+    TTY_row = 0;
+    TTY_col = 0;
+    TTY_update_cursor((uint8_t) TTY_col, (uint8_t) TTY_row);
+}
+
 static bool TTY_try_handle_ansi(char c)
 {
     uint8_t uc = (uint8_t) c;
@@ -104,6 +112,13 @@ static bool TTY_try_handle_ansi(char c)
     uint32_t param = TTY_ansi_has_param ? TTY_ansi_param : 1U;
     if (c == 'D')
         TTY_move_cursor_left(param);
+    else if (c == 'H')
+        TTY_move_cursor_home();
+    else if (c == 'J')
+    {
+        if (param == 2U)
+            TTY_clear();
+    }
     else if (c == 'K')
         TTY_erase_line_from_cursor();
 
@@ -147,6 +162,7 @@ void TTY_init(void)
     TTY_color = vga_entry_color(VGA_LIGHT_GREEN, VGA_BLACK);
     TTY_cursor_enabled = false;
     TTY_use_framebuffer = false;
+    TTY_output_enabled = true;
     TTY_ansi_reset();
 
     TTYVGA_init(TTY_color);
@@ -219,6 +235,9 @@ void TTY_put_entry_at(char c, uint8_t color, size_t x, size_t y)
 
 void TTY_putc(char c)
 {
+    if (!TTY_output_enabled)
+        return;
+
 #ifdef USE_COM2_OUTPUT
     COM_putc(TTY_COM_PORT, c);
 #endif
@@ -301,6 +320,13 @@ void TTY_putc(char c)
     }
 
     TTY_update_cursor((uint8_t) TTY_col, (uint8_t) TTY_row);
+}
+
+void TTY_set_output_enabled(bool enabled)
+{
+    TTY_output_enabled = enabled;
+    if (!TTY_output_enabled)
+        TTY_enable_cursor(false);
 }
 
 void TTY_write(const char* str, size_t len)

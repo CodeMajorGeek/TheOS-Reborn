@@ -63,5 +63,5 @@ void abort(void)
     printf("abort() called, terminating process.\n");
     sys_exit(128 + SIGABRT);
 #endif
-    __buitin_unrecheable();
+    __builtin_unreachable();
 }

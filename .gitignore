@@ -9,6 +9,9 @@
 *.d
 *.img
 *.iso
+serial.log
+qemu-monitor-socket
+Meta/flash.sh
 
 *.config
 *.includes

@@ -52,6 +52,9 @@ static bool bootdev_hint_present = false;
 static uint32_t bootdev_biosdev = UINT32_MAX;
 static uint32_t bootdev_slice = UINT32_MAX;
 static uint32_t bootdev_part = UINT32_MAX;
+static char boot_cmdline[256] = { 0 };
+static bool boot_headless_mode = false;
+static bool boot_pci_log_mode = false;
 
 #define THEOS_PSF2_FONT_PATH "/system/fonts/ter-powerline-v14n.psf"
 
@@ -75,6 +78,25 @@ static uint64_t boot_read_le64(const uint8_t* ptr)
            ((uint64_t) ptr[5] << 40) |
            ((uint64_t) ptr[6] << 48) |
            ((uint64_t) ptr[7] << 56);
+}
+
+static bool boot_cmdline_has_token(const char* needle)
+{
+    if (!needle || needle[0] == '\0')
+        return false;
+
+    size_t hay_len = strlen(boot_cmdline);
+    size_t needle_len = strlen(needle);
+    if (needle_len == 0 || hay_len < needle_len)
+        return false;
+
+    for (size_t i = 0; i + needle_len <= hay_len; i++)
+    {
+        if (memcmp(boot_cmdline + i, needle, needle_len) == 0)
+            return true;
+    }
+
+    return false;
 }
 
 static size_t boot_collect_mbr_partitions(HBA_PORT_t* port,
@@ -328,6 +350,11 @@ __attribute__((__noreturn__)) void k_entry(const void* mbt2_info)
     
     read_multiboot2_info(mbt2_info);
     kdebug_puts("[BOOT] multiboot parsed\n");
+    if (boot_headless_mode)
+    {
+        TTY_set_output_enabled(false);
+        kdebug_puts("[BOOT] headless mode enabled (TTY output disabled)\n");
+    }
 
     VMM_map_kernel();
     kdebug_puts("[BOOT] VMM kernel map done\n");
@@ -449,6 +476,19 @@ __attribute__((__noreturn__)) void k_entry(const void* mbt2_info)
                           ? " source=bootdev"
                           : "");
         kdebug_file_sink_ready();
+        if (boot_pci_log_mode)
+        {
+            size_t pci_log_size = 0;
+            const char* pci_log = PCI_get_log_buffer(&pci_log_size);
+            if (pci_log && pci_log_size > 0 &&
+                ext4_create_file(&fs, "pci.log", (const uint8_t*) pci_log, pci_log_size))
+            {
+                kdebug_printf("[BOOT] pci.log written (%llu bytes)\n",
+                              (unsigned long long) pci_log_size);
+            }
+            else
+                kdebug_puts("[BOOT] pci.log write failed\n");
+        }
 
         bool psf_loaded = false;
         uint8_t* font_data = NULL;
@@ -614,6 +654,23 @@ void read_multiboot2_info(const void* mbt2_info)
     {
         switch (tag->type)
         {
+            case MULTIBOOT_TAG_TYPE_CMDLINE:
+            {
+                struct multiboot_tag_string* cmd = (struct multiboot_tag_string*) tag;
+                size_t len = strlen(cmd->string);
+                if (len >= sizeof(boot_cmdline))
+                    len = sizeof(boot_cmdline) - 1U;
+                memcpy(boot_cmdline, cmd->string, len);
+                boot_cmdline[len] = '\0';
+
+                if (boot_cmdline_has_token("theos.headless=1"))
+                    boot_headless_mode = true;
+                if (boot_cmdline_has_token("theos.pci_log=1"))
+                    boot_pci_log_mode = true;
+
+                kdebug_printf("[BOOT] MB2 cmdline: %s\n", boot_cmdline);
+                break;
+            }
             case MULTIBOOT_TAG_TYPE_MMAP:
                 multiboot_memory_map_t* mmap;
       

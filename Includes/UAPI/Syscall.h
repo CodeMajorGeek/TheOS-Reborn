@@ -5,34 +5,33 @@
 
 enum
 {
-    SYS_FS_LS = 1,
-    SYS_FS_READ = 2,
-    SYS_FS_CREATE = 3,
-    SYS_SLEEP_MS = 4,
-    SYS_TICK_GET = 5,
-    SYS_CPU_INFO_GET = 6,
-    SYS_SCHED_INFO_GET = 7,
-    SYS_AHCI_IRQ_INFO_GET = 8,
-    SYS_RCU_SYNC = 9,
-    SYS_RCU_INFO_GET = 10,
-    SYS_CONSOLE_WRITE = 11,
-    SYS_EXIT = 12,
-    SYS_FORK = 13,
-    SYS_EXECVE = 14,
-    SYS_YIELD = 15,
-    SYS_MAP = 16,
-    SYS_UNMAP = 17,
-    SYS_MPROTECT = 18,
-    SYS_FS_WRITE = 19,
-    SYS_OPEN = 20,
-    SYS_CLOSE = 21,
-    SYS_FS_SEEK = 22,
-    SYS_KBD_GET_SCANCODE = 23,
-    SYS_FS_ISDIR = 24,
-    SYS_FS_MKDIR = 25,
-    SYS_WAITPID = 26,
-    SYS_KILL = 27,
-    SYS_POWER = 28
+    SYS_SLEEP_MS = 1,
+    SYS_TICK_GET = 2,
+    SYS_CPU_INFO_GET = 3,
+    SYS_SCHED_INFO_GET = 4,
+    SYS_AHCI_IRQ_INFO_GET = 5,
+    SYS_RCU_SYNC = 6,
+    SYS_RCU_INFO_GET = 7,
+    SYS_CONSOLE_WRITE = 8,
+    SYS_EXIT = 9,
+    SYS_FORK = 10,
+    SYS_EXECVE = 11,
+    SYS_YIELD = 12,
+    SYS_MAP = 13,
+    SYS_UNMAP = 14,
+    SYS_MPROTECT = 15,
+    SYS_OPEN = 16,
+    SYS_CLOSE = 17,
+    SYS_READ = 18,
+    SYS_WRITE = 19,
+    SYS_LSEEK = 20,
+    SYS_KBD_GET_SCANCODE = 21,
+    SYS_FS_ISDIR = 22,
+    SYS_FS_MKDIR = 23,
+    SYS_FS_READDIR = 24,
+    SYS_WAITPID = 25,
+    SYS_KILL = 26,
+    SYS_POWER = 27
 };
 
 #define SYS_PROT_READ    (1ULL << 0)
@@ -66,6 +65,11 @@ enum
 #define SYS_POWER_CMD_SLEEP    2U
 #define SYS_POWER_CMD_REBOOT   3U
 
+#define SYS_DIRENT_NAME_MAX 255U
+#define SYS_DT_UNKNOWN      0U
+#define SYS_DT_DIR          4U
+#define SYS_DT_REG          8U
+
 typedef struct syscall_cpu_info
 {
     uint32_t cpu_index;
@@ -98,5 +102,13 @@ typedef struct syscall_rcu_info
     uint32_t local_read_depth;
     uint32_t local_preempt_count;
 } syscall_rcu_info_t;
+
+typedef struct syscall_dirent
+{
+    uint32_t d_ino;
+    uint8_t d_type;
+    uint8_t reserved[3];
+    char d_name[SYS_DIRENT_NAME_MAX + 1U];
+} syscall_dirent_t;
 
 #endif

@@ -159,6 +159,13 @@ typedef struct ext4_fs
     uint32_t desc_size;
 } ext4_fs_t;
 
+typedef struct ext4_dirent_info
+{
+    uint32_t inode;
+    uint8_t file_type;
+    char name[256];
+} ext4_dirent_info_t;
+
 bool ext4_check_format(HBA_PORT_t* port);
 bool ext4_mount(ext4_fs_t* fs, HBA_PORT_t* port);
 bool ext4_mount_lba(ext4_fs_t* fs, HBA_PORT_t* port, uint64_t lba_base);
@@ -166,6 +173,7 @@ void ext4_set_active(ext4_fs_t* fs);
 ext4_fs_t* ext4_get_active(void);
 bool ext4_list_root(ext4_fs_t* fs);
 bool ext4_list_path(ext4_fs_t* fs, const char* path);
+bool ext4_read_dirent_at(ext4_fs_t* fs, const char* path, size_t index, ext4_dirent_info_t* out);
 bool ext4_path_is_dir(ext4_fs_t* fs, const char* path);
 bool ext4_read_file(ext4_fs_t* fs, const char* name, uint8_t** out_buf, size_t* out_size);
 bool ext4_create_file(ext4_fs_t* fs, const char* name, const uint8_t* data, size_t size);
