@@ -225,6 +225,66 @@ static bool shell_build_the_alias_path(const char* command, char* out, size_t ou
     return true;
 }
 
+static bool shell_command_key(const char* command, char* out, size_t out_size)
+{
+    if (!command || !out || out_size < 2U)
+        return false;
+
+    const char* base = command;
+    if (strncasecmp(command, "the", 3U) == 0 && command[3] != '\0')
+        base = command + 3U;
+
+    if (base[0] == '\0')
+        return false;
+
+    size_t pos = 0;
+    while (base[pos] != '\0')
+    {
+        if (pos + 1U >= out_size)
+            return false;
+        out[pos] = (char) tolower((unsigned char) base[pos]);
+        pos++;
+    }
+
+    out[pos] = '\0';
+    return true;
+}
+
+static bool shell_build_known_alias_path(const char* command, char* out, size_t out_size)
+{
+    if (!command || !out || out_size < 8U)
+        return false;
+
+    static const char* known_binaries[] =
+    {
+        "TheApp",
+        "TheShell",
+        "TheTest",
+        "ThePowerManager",
+        "TheMicroPython",
+        "MicroPython"
+    };
+
+    char command_key[SHELL_PATH_MAX];
+    if (!shell_command_key(command, command_key, sizeof(command_key)))
+        return false;
+
+    for (size_t i = 0; i < sizeof(known_binaries) / sizeof(known_binaries[0]); i++)
+    {
+        char known_key[SHELL_PATH_MAX];
+        if (!shell_command_key(known_binaries[i], known_key, sizeof(known_key)))
+            continue;
+
+        if (strcmp(command_key, known_key) != 0)
+            continue;
+
+        int len = snprintf(out, out_size, "/bin/%s", known_binaries[i]);
+        return len > 0 && (size_t) len < out_size;
+    }
+
+    return false;
+}
+
 static bool shell_resolve_exec_command(const char* cwd, const char* command, char* out, size_t out_size)
 {
     if (!cwd || !command || !out || out_size == 0U || command[0] == '\0')
@@ -236,6 +296,17 @@ static bool shell_resolve_exec_command(const char* cwd, const char* command, cha
     int direct_len = snprintf(out, out_size, "/bin/%s", command);
     if (direct_len > 0 && (size_t) direct_len < out_size && shell_path_exists(out))
         return true;
+
+    char known_alias_path[SHELL_PATH_MAX];
+    if (shell_build_known_alias_path(command, known_alias_path, sizeof(known_alias_path)) &&
+        shell_path_exists(known_alias_path))
+    {
+        size_t len = strlen(known_alias_path);
+        if (len + 1U > out_size)
+            return false;
+        memcpy(out, known_alias_path, len + 1U);
+        return true;
+    }
 
     char alias_path[SHELL_PATH_MAX];
     if (!shell_build_the_alias_path(command, alias_path, sizeof(alias_path)))

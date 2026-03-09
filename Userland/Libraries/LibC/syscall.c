@@ -165,3 +165,23 @@ int sys_kill(int pid, int signal)
 {
     return (int) syscall(SYS_KILL, (long) pid, (long) signal, 0, 0, 0, 0);
 }
+
+int sys_power(uint32_t cmd, uint32_t arg)
+{
+    return (int) syscall(SYS_POWER, (long) cmd, (long) arg, 0, 0, 0, 0);
+}
+
+int sys_shutdown(void)
+{
+    return sys_power(SYS_POWER_CMD_SHUTDOWN, 0);
+}
+
+int sys_sleep(uint32_t state)
+{
+    return sys_power(SYS_POWER_CMD_SLEEP, state);
+}
+
+int sys_reboot(void)
+{
+    return sys_power(SYS_POWER_CMD_REBOOT, 0);
+}

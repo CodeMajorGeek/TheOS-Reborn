@@ -2,8 +2,10 @@ set(LIBC_SOURCES
     errno.c
     string.c
     stdlib.c
+    stdlib_parse.c
     stdio.c
     syscall.c
+    unistd.c
 )
 
 set(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} -DTHEOS_LIBC_BUILD")
@@ -11,8 +13,10 @@ set(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} -DTHEOS_LIBC_BUILD")
 add_library(UserLibC STATIC
     errno.c
     string.c
+    stdlib_parse.c
     stdio.c
     syscall.c
+    unistd.c
 )
 target_include_directories(UserLibC
     PUBLIC

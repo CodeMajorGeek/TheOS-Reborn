@@ -187,6 +187,12 @@ int toupper(int c)
     return c;
 }
 
+int isspace(int c)
+{
+    return c == ' ' || c == '\f' || c == '\n' ||
+           c == '\r' || c == '\t' || c == '\v';
+}
+
 int strcasecmp(const char* first, const char* second)
 {
     if (!first || !second)

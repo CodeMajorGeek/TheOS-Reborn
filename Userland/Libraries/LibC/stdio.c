@@ -13,8 +13,17 @@
 #include <stdint.h>
 #include <limits.h>
 #include <string.h>
+#include <unistd.h>
 
 /* We are building stdio as kernel (not for long, we will use syscall later on). */
+
+static FILE stdio_stdin_stream = { .fd = STDIN_FILENO };
+static FILE stdio_stdout_stream = { .fd = STDOUT_FILENO };
+static FILE stdio_stderr_stream = { .fd = STDERR_FILENO };
+
+FILE* stdin = &stdio_stdin_stream;
+FILE* stdout = &stdio_stdout_stream;
+FILE* stderr = &stdio_stderr_stream;
 
 int putc(int c)
 {
@@ -1039,6 +1048,46 @@ int printf(const char* __restrict format, ...)
     return result;
 }
 
+int vfprintf(FILE* stream, const char* __restrict format, va_list ap)
+{
+    if (!stream || !format)
+        return EOF;
+
+    size_t len = 512U;
+    char buf[512];
+    memset(buf, '\0', sizeof(buf));
+
+    va_list local_ap;
+    va_copy(local_ap, ap);
+    int result = __printf(buf, len, format, local_ap);
+    va_end(local_ap);
+    if (result < 0)
+        return EOF;
+
+#if defined(__THEOS_KERNEL)
+    size_t out_len = strlen(buf);
+    for (size_t i = 0; i < out_len; i++)
+        putc(buf[i]);
+    return result;
+#else
+    size_t out_len = strlen(buf);
+    ssize_t rc = write(stream->fd, buf, out_len);
+    if (rc < 0)
+        return EOF;
+
+    return result;
+#endif
+}
+
+int fprintf(FILE* stream, const char* __restrict format, ...)
+{
+    va_list ap;
+    va_start(ap, format);
+    int result = vfprintf(stream, format, ap);
+    va_end(ap);
+    return result;
+}
+
 int sprintf(char* str, const char* __restrict format, ...)
 {
     int result = EOF;
@@ -1046,7 +1095,7 @@ int sprintf(char* str, const char* __restrict format, ...)
     va_list parameters;
     va_start(parameters, format);
 
-    result = __printf(str, NULL, format, parameters);
+    result = __printf(str, 0U, format, parameters);
 
     va_end(parameters);
 

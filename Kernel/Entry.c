@@ -335,6 +335,10 @@ __attribute__((__noreturn__)) void k_entry(const void* mbt2_info)
 
     MADT = (APIC_MADT_t*) ACPI_get_table(ACPI_APIC_SIGNATURE);
     kdebug_puts("[BOOT] ACPI MADT fetched\n");
+    if (ACPI_power_init())
+        kdebug_puts("[BOOT] ACPI power states initialized\n");
+    else
+        kdebug_puts("[BOOT] ACPI power states unavailable\n");
 
     VMM_hardware_mapping();
     VMM_load_cr3();

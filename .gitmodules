@@ -1,3 +1,6 @@
 [submodule "Userland/Apps/MicroPython"]
 	path = Userland/Apps/MicroPython
 	url = https://github.com/micropython/micropython.git
+[submodule "Userland/Libraries/EasyArgs"]
+	path = Userland/Libraries/EasyArgs
+	url = https://github.com/gouwsxander/easy-args.git

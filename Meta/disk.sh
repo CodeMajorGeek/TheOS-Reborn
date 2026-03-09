@@ -9,6 +9,7 @@ set -euo pipefail
 [ -z "${THEOS_USERLAND_APP:-}" ] && THEOS_USERLAND_APP="Userland/Apps/TheApp/TheApp"
 [ -z "${THEOS_USERLAND_SHELL:-}" ] && THEOS_USERLAND_SHELL="Userland/Apps/TheShell/TheShell"
 [ -z "${THEOS_USERLAND_TEST:-}" ] && THEOS_USERLAND_TEST="Userland/Apps/TheTest/TheTest"
+[ -z "${THEOS_USERLAND_POWERMANAGER:-}" ] && THEOS_USERLAND_POWERMANAGER="Userland/Apps/ThePowerManager/ThePowerManager"
 [ -z "${THEOS_USERLAND_MICROPY:-}" ] && THEOS_USERLAND_MICROPY="Userland/Apps/TheMicroPython/TheMicroPython"
 
 
@@ -20,6 +21,9 @@ if [ ! -f "$THEOS_USERLAND_SHELL" ] && [ -f "Build/Userland/Apps/TheShell/TheShe
 fi
 if [ ! -f "$THEOS_USERLAND_TEST" ] && [ -f "Build/Userland/Apps/TheTest/TheTest" ]; then
 	THEOS_USERLAND_TEST="Build/Userland/Apps/TheTest/TheTest"
+fi
+if [ ! -f "$THEOS_USERLAND_POWERMANAGER" ] && [ -f "Build/Userland/Apps/ThePowerManager/ThePowerManager" ]; then
+	THEOS_USERLAND_POWERMANAGER="Build/Userland/Apps/ThePowerManager/ThePowerManager"
 fi
 if [ ! -f "$THEOS_USERLAND_MICROPY" ] && [ -f "Build/Userland/Apps/TheMicroPython/TheMicroPython" ]; then
 	THEOS_USERLAND_MICROPY="Build/Userland/Apps/TheMicroPython/TheMicroPython"
@@ -59,10 +63,16 @@ else
 	echo "[disk] warning: TheTest binary not found at '$THEOS_USERLAND_TEST'"
 fi
 
+if [ -f "$THEOS_USERLAND_POWERMANAGER" ]; then
+	echo "[disk] install ThePowerManager -> /bin/ThePowerManager from '$THEOS_USERLAND_POWERMANAGER'"
+	cp "$THEOS_USERLAND_POWERMANAGER" "$STAGE_DIR/bin/ThePowerManager"
+else
+	echo "[disk] warning: ThePowerManager binary not found at '$THEOS_USERLAND_POWERMANAGER'"
+fi
+
 if [ -f "$THEOS_USERLAND_MICROPY" ]; then
 	echo "[disk] install TheMicroPython -> /bin/TheMicroPython and /bin/MicroPython from '$THEOS_USERLAND_MICROPY'"
 	cp "$THEOS_USERLAND_MICROPY" "$STAGE_DIR/bin/TheMicroPython"
-	cp "$THEOS_USERLAND_MICROPY" "$STAGE_DIR/bin/MicroPython"
 else
 	echo "[disk] warning: TheMicroPython binary not found at '$THEOS_USERLAND_MICROPY'"
 fi

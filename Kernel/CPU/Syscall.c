@@ -1,5 +1,6 @@
 #include <CPU/Syscall.h>
 
+#include <CPU/ACPI.h>
 #include <CPU/APIC.h>
 #include <CPU/ISR.h>
 #include <CPU/MSR.h>
@@ -2404,6 +2405,25 @@ mprotect_out:
                           (unsigned int) sender_pid,
                           (int) target_pid);
             return 0;
+        }
+
+        case SYS_POWER:
+        {
+            uint32_t cmd = (uint32_t) frame->rdi;
+            uint32_t arg = (uint32_t) frame->rsi;
+            switch (cmd)
+            {
+                case SYS_POWER_CMD_SHUTDOWN:
+                    return ACPI_shutdown() ? 0 : (uint64_t) -1;
+                case SYS_POWER_CMD_SLEEP:
+                    if (arg > (uint32_t) ACPI_SLEEP_S5)
+                        return (uint64_t) -1;
+                    return ACPI_sleep((ACPI_sleep_state_t) arg) ? 0 : (uint64_t) -1;
+                case SYS_POWER_CMD_REBOOT:
+                    return ACPI_reboot() ? 0 : (uint64_t) -1;
+                default:
+                    return (uint64_t) -1;
+            }
         }
 
         default:

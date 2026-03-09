@@ -19,5 +19,8 @@ off_t lseek(int fd, off_t offset, int whence);
 int isatty(int fd);
 unsigned int sleep(unsigned int seconds);
 int usleep(unsigned int usec);
+int sleep_state(unsigned int state);
+int shutdown(void);
+int reboot(void);
 
 #endif

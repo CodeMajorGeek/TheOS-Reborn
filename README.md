@@ -306,7 +306,7 @@ Keyboard/font base files:
 
 ## Syscalls (Current Surface)
 
-Current syscall enum range: `1..27`.
+Current syscall enum range: `1..28`.
 
 **Filesystem / IO**
 
@@ -323,6 +323,7 @@ Current syscall enum range: `1..27`.
 
 - `SYS_EXIT`, `SYS_FORK`, `SYS_EXECVE`, `SYS_WAITPID`, `SYS_KILL`, `SYS_YIELD`
 - `SYS_MAP`, `SYS_UNMAP`, `SYS_MPROTECT`
+- `SYS_POWER` (`shutdown` / `sleep Sx` / `reboot` via subcommands)
 
 ---
 
