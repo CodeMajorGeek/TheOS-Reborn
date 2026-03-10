@@ -15,7 +15,10 @@ TheOS-Reborn is a freestanding x86_64 operating system project with a Limine boo
 ## Table of Contents
 
 - [Overview](#overview)
+- [Features](#features)
+- [Stability](#stability)
 - [Current Boot Sequence](#current-boot-sequence)
+- [Boot Screenshot](#boot-screenshot)
 - [Memory Model (Limine-first)](#memory-model-limine-first)
 - [Architecture at a Glance](#architecture-at-a-glance)
 - [Build & Run](#build--run)
@@ -24,6 +27,7 @@ TheOS-Reborn is a freestanding x86_64 operating system project with a Limine boo
 - [Syscalls](#syscalls)
 - [Logging & Debugging](#logging--debugging)
 - [Known Gaps](#known-gaps)
+- [License](#license)
 - [Roadmap](#roadmap)
 
 ---
@@ -53,6 +57,66 @@ To regenerate graphs:
 ```bash
 ninja -C Build graphs
 ```
+
+---
+
+## Features
+
+Core features currently implemented:
+
+- Limine-native boot entry with higher-half kernel handoff.
+- Limine-first boot metadata usage:
+  - runtime kernel base relocation,
+  - HHDM offset,
+  - memory map ingestion,
+  - RSDP ACPI initialization path,
+  - framebuffer discovery/selection,
+  - boot-media hints for root filesystem selection.
+- Custom PMM/VMM stack with:
+  - page-based physical allocator,
+  - HHDM mapping policy,
+  - kernel/user split,
+  - startup identity map and later teardown,
+  - dedicated MMIO mapping window.
+- ACPI/APIC/IOAPIC stack:
+  - MADT parsing,
+  - IRQ override handling,
+  - APIC enable path and IOAPIC routing.
+- SMP bring-up:
+  - AP startup and online tracking,
+  - inter-CPU tests and TLB shootdown paths.
+- Timing stack:
+  - HPET initialization,
+  - LAPIC timer calibration,
+  - PIT fallback path.
+- Storage and filesystem:
+  - AHCI controller discovery and IRQ mode setup (MSI/MSI-X/legacy fallback),
+  - ext4 root mount with preferred Limine hint path and controlled fallback probing.
+- Console and graphics:
+  - early VGA path,
+  - PSF2 font loading,
+  - deferred framebuffer switch,
+  - optional double buffering.
+- Userland/runtime:
+  - ring3 ELF launch,
+  - process syscalls (`fork/execve/waitpid/kill`),
+  - shell, tests, power manager, and MicroPython app.
+
+---
+
+## Stability
+
+`Status: experimental` means:
+
+- Behavior is actively evolving and boot/runtime order may still change between commits.
+- Backward compatibility (internal APIs, syscall details, build defaults) is not guaranteed.
+- Subsystems can be individually stable while overall integration still has edge cases.
+- Regressions are possible when low-level memory, SMP, storage, or interrupt code is modified.
+
+What it does **not** mean:
+
+- It is not a non-booting prototype. The current tree boots, mounts ext4, brings up SMP, and launches userland.
+- It is not abandonware; active refactors and instrumentation are ongoing.
 
 ---
 
@@ -94,6 +158,14 @@ The runtime order in `k_entry` is intentionally staged and observable in `Build/
 
 ---
 
+## Boot Screenshot
+
+Early boot/runtime capture (serial + framebuffer path):
+
+![Boot Screenshot](Docs/screenshot-tty-at-boot.png)
+
+---
+
 ## Memory Model (Limine-first)
 
 ### Physical memory input source
@@ -126,6 +198,22 @@ The kernel now uses **Limine memmap as the source of truth**:
   - `VMM_HHDM_BASE = 0xFFFF800000000000`
   - `VMM_MMIO_BASE = 0xFFFFC00000000000`
   - `VMM_KERNEL_VIRT_BASE = 0xFFFFFFFF80000000`
+
+ASCII view:
+
+```text
+0xFFFFFFFFFFFFFFFF  +-----------------------------------------------+
+                    | Kernel higher-half mappings                    |
+0xFFFFFFFF80000000  +-----------------------------------------------+  VMM_KERNEL_VIRT_BASE
+                    | MMIO window (uncached mappings)               |
+0xFFFFC00000000000  +-----------------------------------------------+  VMM_MMIO_BASE
+                    | HHDM direct map (phys + offset)               |
+0xFFFF800000000000  +-----------------------------------------------+  VMM_HHDM_BASE
+                    | non-canonical gap                             |
+0x0000800000000000  +-----------------------------------------------+
+                    | User virtual address space                    |
+0x0000000000000000  +-----------------------------------------------+
+```
 
 ---
 
@@ -337,6 +425,14 @@ Current public syscall IDs are `1..27` (`Includes/UAPI/Syscall.h`).
 - No complete POSIX process/thread model yet (no COW, no pthread runtime).
 - Signal model is still minimal.
 - Some components (x2APIC SMP mode, parts of scheduler stress paths) are experimental.
+
+---
+
+## License
+
+- This repository ships with the GNU General Public License version 3 text in [`LICENSE`](LICENSE).
+- In practice, treat TheOS-Reborn core code as **GPLv3**.
+- Some bundled/third-party components (for example inside imported projects) may carry their own licenses; check their headers and upstream license files when redistributing.
 
 ---
 
