@@ -50,6 +50,9 @@ bool PMM_boot_entry_add(uintptr_t addr,
                         bool map_hhdm);
 const PMM_boot_entry_t* PMM_get_boot_entries(void);
 int PMM_get_boot_entry_count(void);
+bool PMM_promote_boot_entries_to_allocatable(uint64_t type,
+                                             uint64_t* regions_added_out,
+                                             uint64_t* pages_added_out);
 
 void PMM_mmap_unset(PMM_region_t* region, int bit);
 void PMM_mmap_set(PMM_region_t* region, int bit);

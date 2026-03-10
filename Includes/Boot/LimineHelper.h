@@ -19,6 +19,7 @@ void LimineHelper_resolve_runtime_kernel_bases(uintptr_t linked_phys_start,
 
 void LimineHelper_read_boot_info(void);
 bool LimineHelper_init_acpi_from_rsdp_if_needed(void);
+void LimineHelper_promote_bootloader_reclaimable(void);
 
 bool LimineHelper_get_framebuffer(TTY_framebuffer_info_t* out_info);
 bool LimineHelper_get_mbr_disk_id_hint(uint32_t* out_disk_id);

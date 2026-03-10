@@ -1,6 +1,6 @@
 #!/bin/bash
 
-[ -z "$THEOS_RAM_SIZE" ] && THEOS_RAM_SIZE=128M
+[ -z "$THEOS_RAM_SIZE" ] && THEOS_RAM_SIZE=256M
 
 [ -z "$THEOS_QEMU_CPU" ] && THEOS_QEMU_CPU="max"
 [ -z "$THEOS_QEMU_GPU" ] && THEOS_QEMU_GPU="vga"
@@ -30,7 +30,7 @@ case "$THEOS_QEMU_GPU" in
 	vga|VGA|std|STD|legacy|LEGACY)
 		THEOS_QEMU_GPU="vga"
 		GPU_ARGS=(
-			-device "VGA,vgamem_mb=64"
+			-device "VGA,vgamem_mb=128"
 		)
 		;;
 	virtio|VIRTIO|virtio-vga|VIRTIO-VGA)
@@ -47,8 +47,8 @@ esac
 
 NUMA_ARGS=()
 if [ "$THEOS_QEMU_NUMA" = "1" ]; then
-	[ -z "$THEOS_NUMA_NODE0_MEM" ] && THEOS_NUMA_NODE0_MEM="64M"
-	[ -z "$THEOS_NUMA_NODE1_MEM" ] && THEOS_NUMA_NODE1_MEM="64M"
+	[ -z "$THEOS_NUMA_NODE0_MEM" ] && THEOS_NUMA_NODE0_MEM="128M"
+	[ -z "$THEOS_NUMA_NODE1_MEM" ] && THEOS_NUMA_NODE1_MEM="128M"
 
 	NUMA_ARGS=(
 		-object "memory-backend-ram,id=ram0,size=${THEOS_NUMA_NODE0_MEM}"

@@ -27,6 +27,7 @@ static bool limine_boot_mbr_disk_id_hint_present = false;
 static uint32_t limine_boot_mbr_disk_id_hint = 0;
 static bool limine_boot_slice_hint_present = false;
 static int32_t limine_boot_slice_hint = -1;
+static bool limine_bootloader_reclaimable_promoted = false;
 
 static uintptr_t limine_addr_to_phys(uintptr_t addr)
 {
@@ -471,6 +472,33 @@ bool LimineHelper_init_acpi_from_rsdp_if_needed(void)
                   (unsigned long long) rsdp_phys,
                   (unsigned long long) (uintptr_t) rsdp);
     return false;
+}
+
+void LimineHelper_promote_bootloader_reclaimable(void)
+{
+    if (limine_bootloader_reclaimable_promoted)
+    {
+        kdebug_puts("[BOOT] Limine bootloader reclaimable promotion already done\n");
+        return;
+    }
+
+    uint64_t regions_added = 0;
+    uint64_t pages_added = 0;
+    bool promoted = PMM_promote_boot_entries_to_allocatable(LIMINE_MEMMAP_BOOTLOADER_RECLAIMABLE,
+                                                            &regions_added,
+                                                            &pages_added);
+    limine_bootloader_reclaimable_promoted = true;
+
+    if (promoted)
+    {
+        kdebug_printf("[BOOT] Limine bootloader reclaimable promoted to PMM allocatable regions=%llu pages=%llu\n",
+                      (unsigned long long) regions_added,
+                      (unsigned long long) pages_added);
+    }
+    else
+    {
+        kdebug_puts("[BOOT] Limine bootloader reclaimable promotion: no eligible regions\n");
+    }
 }
 
 bool LimineHelper_get_framebuffer(TTY_framebuffer_info_t* out_info)

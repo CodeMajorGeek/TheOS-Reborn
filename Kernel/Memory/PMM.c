@@ -115,6 +115,40 @@ int PMM_get_boot_entry_count(void)
     return PMM_boot_entry_count;
 }
 
+bool PMM_promote_boot_entries_to_allocatable(uint64_t type,
+                                             uint64_t* regions_added_out,
+                                             uint64_t* pages_added_out)
+{
+    uint64_t regions_added = 0;
+    uint64_t pages_added = 0;
+
+    for (int i = 0; i < PMM_boot_entry_count; i++)
+    {
+        PMM_boot_entry_t* entry = &PMM_boot_entries_store[i];
+        if (entry->type != type)
+            continue;
+        if ((entry->flags & PMM_BOOT_ENTRY_ALLOCATABLE) != 0)
+            continue;
+
+        uintptr_t len = entry->addr_end - entry->addr_start;
+        int regions_before = PMM_num_regions;
+        PMM_init_region(entry->addr_start, len);
+        if (PMM_num_regions <= regions_before)
+            continue;
+        entry->flags |= PMM_BOOT_ENTRY_ALLOCATABLE;
+
+        regions_added++;
+        pages_added += (uint64_t) (PMM_regions[PMM_num_regions - 1].len / PHYS_PAGE_SIZE);
+    }
+
+    if (regions_added_out)
+        *regions_added_out = regions_added;
+    if (pages_added_out)
+        *pages_added_out = pages_added;
+
+    return regions_added != 0;
+}
+
 void PMM_init_region(uintptr_t addr, uintptr_t len)
 {
     uintptr_t region_start = addr;
@@ -135,9 +169,11 @@ void PMM_init_region(uintptr_t addr, uintptr_t len)
     region.len = region_end - region_start;
 
     size_t num_pages = region.len / PHYS_PAGE_SIZE;
-    size_t mmap_size = num_pages < (sizeof (uint64_t) * 8) ? 1 : num_pages / (sizeof (uint64_t) * 8) + (num_pages % (sizeof (uint64_t) * 8) == 0 ? 0 : 1);
-    uint64_t mmap_num_pages = mmap_size < PHYS_PAGE_SIZE ? 1 :
-        (mmap_size % PHYS_PAGE_SIZE == 0 ? mmap_size : (mmap_size / PHYS_PAGE_SIZE) + 1);
+    size_t bitmap_words = (num_pages + ((sizeof(uint64_t) * 8U) - 1U)) / (sizeof(uint64_t) * 8U);
+    size_t bitmap_bytes = bitmap_words * sizeof(uint64_t);
+    size_t mmap_num_pages = (bitmap_bytes + (PHYS_PAGE_SIZE - 1U)) / PHYS_PAGE_SIZE;
+    if (mmap_num_pages == 0)
+        mmap_num_pages = 1;
     uintptr_t kmem_reserved_start = 0;
     uintptr_t kmem_reserved_end = 0;
 

@@ -124,6 +124,42 @@ static bool boot_read_mbr_disk_signature(HBA_PORT_t* port, uint32_t* disk_id_out
     return true;
 }
 
+static void boot_log_ext4_probe_failure(HBA_PORT_t* port,
+                                        int device_index,
+                                        uint64_t lba_base,
+                                        const char* source)
+{
+    if (!port)
+        return;
+
+    uint8_t superblock[AHCI_SECTOR_SIZE * 2];
+    memset(superblock, 0, sizeof(superblock));
+
+    uint64_t super_lba = lba_base + ((uint64_t) EXT4_SUPERBLOCK_ADDR / AHCI_SECTOR_SIZE);
+    int rc = AHCI_sata_read(port,
+                            (uint32_t) super_lba,
+                            (uint32_t) (super_lba >> 32),
+                            2,
+                            superblock);
+    if (rc != 0)
+    {
+        kdebug_printf("[BOOT] ext4 probe fail dev=%d lba=0x%llX (%s) read_rc=%d\n",
+                      device_index,
+                      (unsigned long long) lba_base,
+                      source ? source : "unknown",
+                      rc);
+        return;
+    }
+
+    uint16_t magic = (uint16_t) superblock[56] | ((uint16_t) superblock[57] << 8);
+    kdebug_printf("[BOOT] ext4 probe fail dev=%d lba=0x%llX (%s) read_rc=%d magic=0x%X\n",
+                  device_index,
+                  (unsigned long long) lba_base,
+                  source ? source : "unknown",
+                  rc,
+                  magic);
+}
+
 static size_t boot_collect_gpt_partitions(HBA_PORT_t* port,
                                           uint32_t* part_index_out,
                                           uint64_t* lba_out,
@@ -215,6 +251,7 @@ static bool boot_try_mount_ext4_on_port(ext4_fs_t* fs,
                       (unsigned long long) *lba_base_out);
         return true;
     }
+    boot_log_ext4_probe_failure(port, device_index, 0, "whole-disk");
 
     uint32_t part_index[4];
     uint32_t part_lba[4];
@@ -247,6 +284,8 @@ static bool boot_try_mount_ext4_on_port(ext4_fs_t* fs,
                               part_type[i]);
                 return true;
             }
+
+            boot_log_ext4_probe_failure(port, device_index, part_lba[i], "MBR-slice-hint");
         }
     }
 
@@ -256,7 +295,10 @@ static bool boot_try_mount_ext4_on_port(ext4_fs_t* fs,
             continue;
 
         if (!ext4_mount_lba(fs, port, part_lba[i]))
+        {
+            boot_log_ext4_probe_failure(port, device_index, part_lba[i], "MBR-slice-scan");
             continue;
+        }
 
         *lba_base_out = part_lba[i];
         kdebug_printf("[BOOT] ext4 probe ok dev=%d lba=0x%llX (MBR slice=%u type=0x%X)\n",
@@ -290,7 +332,10 @@ static bool boot_try_mount_ext4_on_port(ext4_fs_t* fs,
 
             gpt_used[i] = true;
             if (!ext4_mount_lba(fs, port, gpt_part_lba[i]))
+            {
+                boot_log_ext4_probe_failure(port, device_index, gpt_part_lba[i], "GPT-part-hint");
                 continue;
+            }
 
             *lba_base_out = gpt_part_lba[i];
             kdebug_printf("[BOOT] ext4 probe ok dev=%d lba=0x%llX (GPT part=%u)\n",
@@ -307,7 +352,10 @@ static bool boot_try_mount_ext4_on_port(ext4_fs_t* fs,
             continue;
 
         if (!ext4_mount_lba(fs, port, gpt_part_lba[i]))
+        {
+            boot_log_ext4_probe_failure(port, device_index, gpt_part_lba[i], "GPT-part-scan");
             continue;
+        }
 
         *lba_base_out = gpt_part_lba[i];
         kdebug_printf("[BOOT] ext4 probe ok dev=%d lba=0x%llX (GPT part=%u)\n",
@@ -402,6 +450,7 @@ __attribute__((__noreturn__)) void k_entry(void)
     kdebug_puts("[BOOT] CR3 loaded\n");
     GDT_load_kernel_segments();
     kdebug_puts("[BOOT] GDT reloaded\n");
+    LimineHelper_promote_bootloader_reclaimable();
 
     bool acpi_ready = boot_init_acpi_early(&MADT);
     if (acpi_ready && ACPI_power_init())

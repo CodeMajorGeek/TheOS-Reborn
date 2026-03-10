@@ -186,7 +186,11 @@ error:
 boot_limine_entry:
     cli
     lgdt gdt64.pointer(%rip)
-    jmp long_mode_entry_high
+    # Force CS reload from our GDT (some VMMs are stricter than QEMU).
+    leaq long_mode_entry_high(%rip), %rax
+    pushq $gdt64.kernel_code
+    pushq %rax
+    lretq
 
 .size boot_limine_entry, . - boot_limine_entry
 
@@ -257,7 +261,8 @@ gdt64:
     .long 0
     .byte 0
     .byte PRESENT | NOT_SYS | RW
-    .byte LONG_MODE
+    # L bit is only valid for code segments; keep data flags clear.
+    .byte 0
     .byte 0
 
 # User data segment.
@@ -265,7 +270,8 @@ gdt64:
     .long 0xFFFF
     .byte 0
     .byte PRESENT | NOT_SYS | RW | RING_USER
-    .byte LONG_MODE
+    # L bit is reserved for data segments.
+    .byte 0
     .byte 0
 
 # User code segment.
