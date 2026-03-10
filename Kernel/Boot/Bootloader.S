@@ -201,7 +201,6 @@ long_mode_entry:    # Finally, we can do some stuff into long mode !
     jmp *%rax
 
 long_mode_entry_high:
-
     # Let's set all the segments registers (ax, ss, ds, es, fs and gs) to the data descritor.
     movw $gdt64.kernel_data, %ax 
     movw %ax, %ss
@@ -235,11 +234,15 @@ pdp_high:
 pd:
     .zero 4096
 
-kernel_stack_bottom:
-    .skip STACK_SIZE
-kernel_stack_top:
-
 .section .data
+.align 4096
+kernel_stack_bottom:
+    /*
+     * Keep the early BSP stack in .data (loaded segment) for stricter VMMs.
+     * .bss-only early stacks can be problematic on some platforms.
+     */
+    .zero STACK_SIZE
+kernel_stack_top:
 .align 8
 
 # We define our GDTs in the data section.

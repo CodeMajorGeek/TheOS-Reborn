@@ -295,44 +295,53 @@ static uint16_t PCI_set_intx_disable(uint8_t bus, uint8_t slot, uint8_t function
 
 void PCI_check_device(uint8_t bus, uint8_t slot)
 {
-    uint8_t function = 0;
-
-    uint16_t vendor_id = PCI_config_readw(bus, slot, function, PCI_VENDOR_REG);
-    if (vendor_id == 0xFFFF)
-        return; // No device attached.
-
-    uint16_t device_id = PCI_config_readw(bus, slot, function, PCI_DEVICE_REG);
-    kdebug_printf("[PCI] b=%u s=%u f=%u vid=0x%X did=0x%X\n", bus, slot, function, vendor_id, device_id);
-    char line[128];
-    int n = snprintf(line, sizeof(line),
-                     "[PCI] b=%u s=%u f=%u vid=0x%X did=0x%X\n",
-                     (unsigned) bus,
-                     (unsigned) slot,
-                     (unsigned) function,
-                     (unsigned) vendor_id,
-                     (unsigned) device_id);
-    if (n > 0)
-        PCI_log_append_line(line);
-
-    PCI_try_attach(bus, slot, function, vendor_id, device_id);
-
-    PCI_check_function(bus, slot, function);
-    uint8_t header_type = (uint8_t) (PCI_config_readw(bus, slot, function, PCI_BIST_REG) & 0xFF);
-    if ((header_type & 0x80U) != 0) // It's a multi function device.
+    for (uint8_t function = 0; function < 8; function++)
     {
-        for (function = 1; function < 8; function++)
-            PCI_check_function(bus, slot, function);
+        uint16_t vendor_id = PCI_config_readw(bus, slot, function, PCI_VENDOR_REG);
+        if (vendor_id == 0xFFFF)
+        {
+            if (function == 0)
+                return; // No device attached on this slot.
+            continue;
+        }
+
+        uint16_t device_id = PCI_config_readw(bus, slot, function, PCI_DEVICE_REG);
+        kdebug_printf("[PCI] b=%u s=%u f=%u vid=0x%X did=0x%X\n",
+                      bus,
+                      slot,
+                      function,
+                      vendor_id,
+                      device_id);
+        char line[128];
+        int n = snprintf(line, sizeof(line),
+                         "[PCI] b=%u s=%u f=%u vid=0x%X did=0x%X\n",
+                         (unsigned) bus,
+                         (unsigned) slot,
+                         (unsigned) function,
+                         (unsigned) vendor_id,
+                         (unsigned) device_id);
+        if (n > 0)
+            PCI_log_append_line(line);
+
+        PCI_try_attach(bus, slot, function, vendor_id, device_id);
+        PCI_check_function(bus, slot, function);
     }
 }
 
 void PCI_check_function(uint8_t bus, uint8_t slot, uint8_t function)
 {
-    uint8_t base_class = (uint8_t) ((PCI_config_readw(bus, slot, function, PCI_CLASS_REG) >> 8) & 0xFF);
-    uint8_t sub_class = (uint8_t) (PCI_config_readw(bus, slot, function, PCI_CLASS_REG) & 0xFF);
+    uint16_t vendor_id = PCI_config_readw(bus, slot, function, PCI_VENDOR_REG);
+    if (vendor_id == 0xFFFF)
+        return;
+
+    uint8_t base_class = PCI_config_readb(bus, slot, function, PCI_BASECLASS_REG);
+    uint8_t sub_class = PCI_config_readb(bus, slot, function, PCI_SUBCLASS_REG);
 
     if (base_class == 0x6 && sub_class == 0x4)
     {
-        uint8_t secondary_bus = (uint8_t) (PCI_config_readw(bus, slot, function, PCI_SECONDARY_BUS_REG) & 0xFF);
+        uint8_t secondary_bus = PCI_config_readb(bus, slot, function, PCI_SECONDARY_BUS_REG);
+        if (secondary_bus == 0 || secondary_bus == bus)
+            return;
         PCI_scan_bus(secondary_bus);
     }
 }
@@ -345,15 +354,26 @@ void PCI_scan_bus(uint8_t bus)
 
 static void PCI_try_attach(uint8_t bus, uint8_t slot, uint8_t function, uint16_t vendor, uint16_t device)
 {
-    uint8_t base_class = (uint8_t) ((PCI_config_readw(bus, slot, function, PCI_CLASS_REG) >> 8) & 0xFF);
-    kdebug_printf("[PCI] class b=%u s=%u f=%u class=0x%X\n", bus, slot, function, base_class);
-    char line[96];
+    uint8_t base_class = PCI_config_readb(bus, slot, function, PCI_BASECLASS_REG);
+    uint8_t sub_class = PCI_config_readb(bus, slot, function, PCI_SUBCLASS_REG);
+    uint8_t prog_if = PCI_config_readb(bus, slot, function, PCI_PROG_IF_REG);
+
+    kdebug_printf("[PCI] class b=%u s=%u f=%u class=0x%X subclass=0x%X prog_if=0x%X\n",
+                  bus,
+                  slot,
+                  function,
+                  base_class,
+                  sub_class,
+                  prog_if);
+    char line[128];
     int n = snprintf(line, sizeof(line),
-                     "[PCI] class b=%u s=%u f=%u class=0x%X\n",
+                     "[PCI] class b=%u s=%u f=%u class=0x%X subclass=0x%X prog_if=0x%X\n",
                      (unsigned) bus,
                      (unsigned) slot,
                      (unsigned) function,
-                     (unsigned) base_class);
+                     (unsigned) base_class,
+                     (unsigned) sub_class,
+                     (unsigned) prog_if);
     if (n > 0)
         PCI_log_append_line(line);
     switch (base_class)

@@ -18,10 +18,13 @@
 #define PCI_STATUS_REG          0x06
 #define PCI_BIST_REG            0x0C
 #define PCI_CLASS_REG           0x08
+#define PCI_PROG_IF_REG         0x09
+#define PCI_SUBCLASS_REG        0x0A
+#define PCI_BASECLASS_REG       0x0B
 #define PCI_HEADER_TYPE_REG     0x0E
 #define PCI_CAP_PTR_REG         0x34
 #define PCI_BAR0_ADDR_REG       0x10
-#define PCI_SECONDARY_BUS_REG   0x1A
+#define PCI_SECONDARY_BUS_REG   0x19
 #define PCI_BAR5_ADDR_REG       0x24
 
 #define PCI_COMMAND_INTX_DISABLE    (1U << 10)

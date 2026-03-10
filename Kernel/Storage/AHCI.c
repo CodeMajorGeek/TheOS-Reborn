@@ -7,6 +7,7 @@
 #include <Task/Task.h>
 #include <Memory/VMM.h>
 #include <Memory/PMM.h>
+#include <Memory/KMem.h>
 #include <CPU/APIC.h>
 #include <CPU/PCI.h>
 #include <CPU/IO.h>
@@ -16,6 +17,7 @@
 #include <stdbool.h>
 #include <string.h>
 #include <stdlib.h>
+#include <stddef.h>
 
 static const AHCI_device_t AHCI_devices[] =
 {
@@ -35,14 +37,20 @@ static uint8_t AHCI_irq_mode = AHCI_IRQ_MODE_POLL;
 static uint64_t AHCI_irq_count = 0;
 static bool AHCI_irq_vector_registered = false;
 
-static uint32_t SATA_device_count = 0;
-static HBA_PORT_t* BLOCK_DEVICES[AHCI_MAX_SLOT];
+static uint32_t AHCI_device_count = 0;
+static HBA_PORT_t* AHCI_block_devices[AHCI_MAX_SLOT];
 
 extern uintptr_t ROOT_DEV;
 
 static void AHCI_irq_handler(interrupt_frame_t* frame);
 static void AHCI_setup_interrupts(uint16_t bus, uint32_t slot, uint16_t function);
 static void AHCI_init_wait_queues(void);
+static int AHCI_prepare_cmd(HBA_PORT_t* port, uint32_t byte_count, uint8_t* buf, AHCI_cmd_context_t* out_ctx);
+static int AHCI_submit_cmd(HBA_PORT_t* port, const AHCI_cmd_context_t* cmd_ctx);
+static bool AHCI_register_device(HBA_PORT_t* port, const char* kind, uint32_t* out_device_num);
+static int AHCI_atapi_read_blocks(HBA_PORT_t* port, uint32_t lba, uint32_t count, uint8_t* buf);
+static int AHCI_atapi_read_512(HBA_PORT_t* port, uint32_t startl, uint32_t starth, uint32_t count, uint8_t* buf);
+static void AHCI_ATAPI_init(HBA_PORT_t* port, int num);
 
 static task_wait_queue_t AHCI_port_waitq[AHCI_MAX_SLOT];
 static uint32_t AHCI_port_irq_error[AHCI_MAX_SLOT];
@@ -181,8 +189,201 @@ static int AHCI_build_prdt(HBA_CMD_TBL_t* cmd_tbl, uintptr_t buf, uint32_t byte_
     return SATA_IO_SUCCESS;
 }
 
+static int AHCI_prepare_cmd(HBA_PORT_t* port, uint32_t byte_count, uint8_t* buf, AHCI_cmd_context_t* out_ctx)
+{
+    if (!port || !out_ctx || !buf || byte_count == 0)
+        return SATA_IO_ERROR_HUNG_PORT;
+
+    port->is = (uint32_t) -1;  // Clear pending interrupt bits.
+
+    int slot = AHCI_find_cmdslot(port);
+    if (slot == -1)
+        return SATA_IO_ERROR_NO_SLOT;
+
+    uint32_t slot_mask = 1U << (uint32_t) slot;
+    int port_index = AHCI_port_index(port);
+    uint32_t port_index_u = (port_index >= 0) ? (uint32_t) port_index : AHCI_MAX_SLOT;
+    if (port_index_u < AHCI_MAX_SLOT)
+        __atomic_store_n(&AHCI_port_irq_error[port_index_u], 0, __ATOMIC_RELEASE);
+
+    uintptr_t clb_phys = HILO2ADDR(port->clbu, port->clb);
+    uintptr_t clb_virt = 0;
+    if (!VMM_phys_to_virt(clb_phys, &clb_virt))
+        panic("SATA CLB is not mapped !");
+    HBA_CMD_HEADER_t* cmd_header = (HBA_CMD_HEADER_t*) clb_virt;
+    cmd_header += slot;
+
+    cmd_header->cfl = sizeof (FIS_REG_H2D_t) / sizeof (uint32_t);
+    cmd_header->a = 0;
+    cmd_header->w = 0;
+    cmd_header->p = 0;
+    cmd_header->r = 0;
+    cmd_header->b = 0;
+    cmd_header->c = 1;
+    cmd_header->rsv0 = 0;
+    cmd_header->pmp = 0;
+    cmd_header->prdbc = 0;
+
+    uintptr_t ctba_phys = HILO2ADDR(cmd_header->ctbau, cmd_header->ctba);
+    uintptr_t ctba_virt = 0;
+    if (!VMM_phys_to_virt(ctba_phys, &ctba_virt))
+        panic("SATA CTBA is not mapped !");
+    HBA_CMD_TBL_t* cmd_tbl = (HBA_CMD_TBL_t*) ctba_virt;
+    memset(cmd_tbl, 0, PHYS_PAGE_SIZE);
+
+    uint16_t prdtl = 0;
+    int prdt_status = AHCI_build_prdt(cmd_tbl, (uintptr_t) buf, byte_count, &prdtl);
+    if (prdt_status != SATA_IO_SUCCESS)
+        return prdt_status;
+
+    cmd_header->prdtl = prdtl;
+
+    out_ctx->cmd_header = cmd_header;
+    out_ctx->cmd_tbl = cmd_tbl;
+    out_ctx->slot_mask = slot_mask;
+    out_ctx->port_index = port_index_u;
+    return SATA_IO_SUCCESS;
+}
+
+static int AHCI_submit_cmd(HBA_PORT_t* port, const AHCI_cmd_context_t* cmd_ctx)
+{
+    if (!port || !cmd_ctx)
+        return SATA_IO_ERROR_HUNG_PORT;
+
+    int spin = 0;
+    while ((port->tfd & (ATA_DEV_BUSY | ATA_DEV_DRQ)) && spin < SATA_IO_MAX_WAIT) // Wait until the port is no longer busy.
+    {
+        spin++;
+        __asm__ __volatile__ ("pause");
+    }
+
+    if (spin == SATA_IO_MAX_WAIT)
+        return SATA_IO_ERROR_HUNG_PORT;
+
+    port->ci = cmd_ctx->slot_mask; // Issue command.
+    if (!AHCI_wait_for_slot_completion(port, cmd_ctx->slot_mask, cmd_ctx->port_index))
+        return SATA_IO_ERROR_HUNG_PORT;
+
+    if ((port->is & HBA_PxIS_TFES) ||
+        (cmd_ctx->port_index < AHCI_MAX_SLOT &&
+         __atomic_load_n(&AHCI_port_irq_error[cmd_ctx->port_index], __ATOMIC_ACQUIRE) != 0))
+    {
+        return SATA_IO_ERROR_HUNG_PORT;
+    }
+
+    return SATA_IO_SUCCESS;
+}
+
+static bool AHCI_register_device(HBA_PORT_t* port, const char* kind, uint32_t* out_device_num)
+{
+    if (!port)
+        return false;
+
+    if (AHCI_device_count >= AHCI_MAX_SLOT)
+    {
+        printf("\tInit failure: AHCI device table is full.\n");
+        return false;
+    }
+
+    uint32_t dev_num = AHCI_device_count++;
+    AHCI_block_devices[dev_num] = port;
+    if (dev_num == 0)
+        ROOT_DEV = TODEVNUM(DEV_SATA, 0);
+
+    if (out_device_num)
+        *out_device_num = dev_num;
+
+    printf("\tInit success: %s(%d, %d) !\n", kind ? kind : "disk", DEV_SATA, dev_num);
+    return true;
+}
+
+static int AHCI_atapi_read_blocks(HBA_PORT_t* port, uint32_t lba, uint32_t count, uint8_t* buf)
+{
+    if (count == 0)
+        return SATA_IO_SUCCESS;
+    if (!port || !buf)
+        return SATA_IO_ERROR_HUNG_PORT;
+    if (count > (UINT32_MAX / AHCI_ATAPI_SECTOR_SIZE))
+        return SATA_IO_ERROR_HUNG_PORT;
+
+    AHCI_cmd_context_t cmd_ctx = { 0 };
+    int prep_rc = AHCI_prepare_cmd(port, count * AHCI_ATAPI_SECTOR_SIZE, buf, &cmd_ctx);
+    if (prep_rc != SATA_IO_SUCCESS)
+        return prep_rc;
+
+    cmd_ctx.cmd_header->a = 1;
+    cmd_ctx.cmd_header->w = 0;
+
+    FIS_REG_H2D_t* cmd_fis = (FIS_REG_H2D_t*) (&cmd_ctx.cmd_tbl->cfis);
+    cmd_fis->fis_type = FIS_TYPE_REG_H2D;
+    cmd_fis->c = 1; // Command.
+    cmd_fis->command = ATA_CMD_PACKET;
+    cmd_fis->device = 0;
+    cmd_fis->featurel = 0x01; // DMA for PACKET.
+
+    uint8_t* cdb = &cmd_ctx.cmd_tbl->acmd[0];
+    cdb[0] = ATAPI_CMD_READ12;
+    cdb[2] = (uint8_t) (lba >> 24);
+    cdb[3] = (uint8_t) (lba >> 16);
+    cdb[4] = (uint8_t) (lba >> 8);
+    cdb[5] = (uint8_t) lba;
+    cdb[6] = (uint8_t) (count >> 24);
+    cdb[7] = (uint8_t) (count >> 16);
+    cdb[8] = (uint8_t) (count >> 8);
+    cdb[9] = (uint8_t) count;
+
+    return AHCI_submit_cmd(port, &cmd_ctx);
+}
+
+static int AHCI_atapi_read_512(HBA_PORT_t* port, uint32_t startl, uint32_t starth, uint32_t count, uint8_t* buf)
+{
+    if (count == 0)
+        return SATA_IO_SUCCESS;
+    if (!port || !buf)
+        return SATA_IO_ERROR_HUNG_PORT;
+
+    uint64_t start_lba_512 = ((uint64_t) starth << 32) | startl;
+    uint64_t byte_offset = start_lba_512 * (uint64_t) AHCI_SECTOR_SIZE;
+    uint64_t total_bytes = (uint64_t) count * (uint64_t) AHCI_SECTOR_SIZE;
+    if (total_bytes == 0)
+        return SATA_IO_SUCCESS;
+    if ((byte_offset + total_bytes) < byte_offset)
+        return SATA_IO_ERROR_HUNG_PORT;
+
+    uint64_t first_block = byte_offset / AHCI_ATAPI_SECTOR_SIZE;
+    uint64_t block_offset = byte_offset % AHCI_ATAPI_SECTOR_SIZE;
+    uint64_t end_byte = byte_offset + total_bytes;
+    uint64_t end_block = (end_byte + AHCI_ATAPI_SECTOR_SIZE - 1ULL) / AHCI_ATAPI_SECTOR_SIZE;
+    if (end_block <= first_block || end_block > 0xFFFFFFFFULL)
+        return SATA_IO_ERROR_HUNG_PORT;
+
+    uint64_t block_count = end_block - first_block;
+    uint64_t staging_bytes_u64 = block_count * (uint64_t) AHCI_ATAPI_SECTOR_SIZE;
+    if (staging_bytes_u64 == 0 || staging_bytes_u64 > (uint64_t) SIZE_MAX)
+        return SATA_IO_ERROR_HUNG_PORT;
+
+    size_t staging_bytes = (size_t) staging_bytes_u64;
+    uint8_t* staging = (uint8_t*) kmalloc(staging_bytes);
+    if (!staging)
+        return SATA_IO_ERROR_HUNG_PORT;
+
+    int rc = AHCI_atapi_read_blocks(port, (uint32_t) first_block, (uint32_t) block_count, staging);
+    if (rc == SATA_IO_SUCCESS)
+    {
+        memcpy(buf, staging + block_offset, (size_t) total_bytes);
+    }
+
+    kfree(staging);
+    return rc;
+}
+
 void AHCI_try_setup_device(uint16_t bus, uint32_t slot, uint16_t function, uint16_t vendor, uint16_t device)
 {
+    uint8_t base_class = PCI_config_readb((uint8_t) bus, (uint8_t) slot, (uint8_t) function, PCI_BASECLASS_REG);
+    uint8_t sub_class = PCI_config_readb((uint8_t) bus, (uint8_t) slot, (uint8_t) function, PCI_SUBCLASS_REG);
+    uint8_t prog_if = PCI_config_readb((uint8_t) bus, (uint8_t) slot, (uint8_t) function, PCI_PROG_IF_REG);
+    bool class_matches_ahci = (base_class == 0x01U && sub_class == 0x06U && prog_if == 0x01U);
+
     uint32_t bar5 = PCI_config_read(bus, slot, function, PCI_BAR5_ADDR_REG);
     if (bar5 == 0 || bar5 == 0xFFFFFFFF)
         return;
@@ -203,6 +404,12 @@ void AHCI_try_setup_device(uint16_t bus, uint32_t slot, uint16_t function, uint1
         }
     }
 
+    if (!identified && class_matches_ahci)
+    {
+        name = "Generic AHCI Controller";
+        identified = true;
+    }
+
     if (identified)
     {
         AHCI_base_phys = AHCI_base;
@@ -216,14 +423,14 @@ void AHCI_try_setup_device(uint16_t bus, uint32_t slot, uint16_t function, uint1
 
 int AHCI_get_device_count(void)
 {
-    return (int) SATA_device_count;
+    return (int) AHCI_device_count;
 }
 
 HBA_PORT_t* AHCI_get_device(int index)
 {
-    if (index < 0 || index >= (int) SATA_device_count)
+    if (index < 0 || index >= (int) AHCI_device_count)
         return NULL;
-    return BLOCK_DEVICES[index];
+    return AHCI_block_devices[index];
 }
 
 uint8_t AHCI_get_irq_mode(void)
@@ -412,7 +619,7 @@ void AHCI_try_setup_known_device(char* name, HBA_MEM_t* AHCI, uint16_t bus, uint
             continue;
 
         HBA_PORT_t* HBA_port = (HBA_PORT_t*) &AHCI->ports[i];
-        if (HBA_port->sig == SATA_SIG_ATAPI || HBA_port->sig == SATA_SIG_SEMB || HBA_port->sig == SATA_SIG_PM)
+        if (HBA_port->sig == SATA_SIG_SEMB || HBA_port->sig == SATA_SIG_PM)
             continue;
 
         uint32_t ssts = HBA_port->ssts;
@@ -420,6 +627,13 @@ void AHCI_try_setup_known_device(char* name, HBA_MEM_t* AHCI, uint16_t bus, uint
         uint8_t det = ssts & 0x07; // The device detection (DET) flags are the bottom 3 bits.
         if (det != HBA_PORT_DET_PRESENT || ipm != HBA_PORT_IPM_ACTIVE)
             continue;
+
+        if (HBA_port->sig == SATA_SIG_ATAPI)
+        {
+            printf("ATAPI device detected:\n");
+            AHCI_ATAPI_init(HBA_port, i);
+            continue;
+        }
 
         printf("SATA device detected:\n");
         AHCI_SATA_init(HBA_port, i);
@@ -430,23 +644,15 @@ void AHCI_SATA_init(HBA_PORT_t* port, int num)
 {
     if (AHCI_rebase_port(port, num))
     {
-        uint8_t buf[512];
+        uint8_t buf[AHCI_SECTOR_SIZE];
         memset(buf, 0xFF, sizeof (buf));
 
         int result = AHCI_sata_read(port, 1, 0, 1, buf);
         if (result == SATA_IO_SUCCESS)
         {
-            if (SATA_device_count >= AHCI_MAX_SLOT)
-            {
-                printf("\tInit failure: AHCI device table is full.\n");
+            uint32_t dev_num = 0;
+            if (!AHCI_register_device(port, "disk", &dev_num))
                 return;
-            }
-
-            uint32_t dev_num = SATA_device_count++;
-            printf("\tInit success: disk(%d, %d) !\n", DEV_SATA, dev_num);
-            BLOCK_DEVICES[dev_num] = port;
-            if (dev_num == 0)
-                ROOT_DEV = TODEVNUM(DEV_SATA, 0);
 
             bool whole_disk_ext4 = ext4_check_format(port);
             if (whole_disk_ext4)
@@ -456,6 +662,32 @@ void AHCI_SATA_init(HBA_PORT_t* port, int num)
         } else
             printf("\tInit failure !\n");
     }
+}
+
+static void AHCI_ATAPI_init(HBA_PORT_t* port, int num)
+{
+    if (!AHCI_rebase_port(port, num))
+        return;
+
+    uint8_t probe[AHCI_ATAPI_SECTOR_SIZE];
+    memset(probe, 0xFF, sizeof(probe));
+
+    int result = AHCI_atapi_read_blocks(port, 0, 1, probe);
+    if (result != SATA_IO_SUCCESS)
+    {
+        printf("\tInit failure !\n");
+        return;
+    }
+
+    uint32_t dev_num = 0;
+    if (!AHCI_register_device(port, "atapi", &dev_num))
+        return;
+
+    bool whole_disk_ext4 = ext4_check_format(port);
+    if (whole_disk_ext4)
+        printf("\tWhole medium is ext4.\n");
+    else
+        printf("\tWhole medium is not ext4 (root may be on a partition).\n");
 }
 
 bool AHCI_rebase_port(HBA_PORT_t* port, int num)
@@ -556,49 +788,24 @@ int AHCI_find_cmdslot(HBA_PORT_t* port)
 
 int AHCI_sata_read(HBA_PORT_t* port, uint32_t startl, uint32_t starth, uint32_t count, uint8_t* buf) // TODO: FIXME
 {
-    port->is = (uint32_t) -1;  // Clear pending interrupt bits.
-
     if (count == 0)
         return SATA_IO_SUCCESS;
+    if (!port || !buf)
+        return SATA_IO_ERROR_HUNG_PORT;
 
-    int slot = AHCI_find_cmdslot(port);
-    if (slot == -1)
-        return SATA_IO_ERROR_NO_SLOT;
+    if (port->sig == SATA_SIG_ATAPI)
+        return AHCI_atapi_read_512(port, startl, starth, count, buf);
+    if (count > (UINT32_MAX / AHCI_SECTOR_SIZE))
+        return SATA_IO_ERROR_HUNG_PORT;
 
-    uint32_t slot_mask = 1U << (uint32_t) slot;
-    int port_index = AHCI_port_index(port);
-    uint32_t port_index_u = (port_index >= 0) ? (uint32_t) port_index : AHCI_MAX_SLOT;
-    if (port_index_u < AHCI_MAX_SLOT)
-        __atomic_store_n(&AHCI_port_irq_error[port_index_u], 0, __ATOMIC_RELEASE);
-
-    uintptr_t clb_phys = HILO2ADDR(port->clbu, port->clb);
-    uintptr_t clb_virt = 0;
-    if (!VMM_phys_to_virt(clb_phys, &clb_virt))
-        panic("SATA CLB is not mapped !");
-    HBA_CMD_HEADER_t* cmd_header = (HBA_CMD_HEADER_t*) clb_virt;
-
-    cmd_header += slot;
-    cmd_header->cfl = sizeof (FIS_REG_H2D_t) / sizeof (uint32_t);
-    cmd_header->w = 0; // Read from device.
-    cmd_header->prdbc = 0;
-
-    uintptr_t ctba_phys = HILO2ADDR(cmd_header->ctbau, cmd_header->ctba);
-    uintptr_t ctba_virt = 0;
-    if (!VMM_phys_to_virt(ctba_phys, &ctba_virt))
-        panic("SATA CTBA is not mapped !");
-    HBA_CMD_TBL_t* cmd_tbl = (HBA_CMD_TBL_t*) ctba_virt;
-    memset(cmd_tbl, 0, PHYS_PAGE_SIZE);
-
-    uint32_t byte_count = count * AHCI_SECTOR_SIZE;
-    uint16_t prdtl = 0;
-    int prdt_status = AHCI_build_prdt(cmd_tbl, (uintptr_t) buf, byte_count, &prdtl);
-    if (prdt_status != SATA_IO_SUCCESS)
-        return prdt_status;
-
-    cmd_header->prdtl = prdtl;
+    AHCI_cmd_context_t cmd_ctx = { 0 };
+    int prep_rc = AHCI_prepare_cmd(port, count * AHCI_SECTOR_SIZE, buf, &cmd_ctx);
+    if (prep_rc != SATA_IO_SUCCESS)
+        return prep_rc;
+    cmd_ctx.cmd_header->w = 0; // Read from device.
 
     // Setup command.
-    FIS_REG_H2D_t* cmd_fis = (FIS_REG_H2D_t*) (&cmd_tbl->cfis);
+    FIS_REG_H2D_t* cmd_fis = (FIS_REG_H2D_t*) (&cmd_ctx.cmd_tbl->cfis);
 
     cmd_fis->fis_type = FIS_TYPE_REG_H2D;
     cmd_fis->c = 1; // Command.
@@ -614,75 +821,27 @@ int AHCI_sata_read(HBA_PORT_t* port, uint32_t startl, uint32_t starth, uint32_t 
     cmd_fis->countl = count & 0xFF;
     cmd_fis->counth = (count >> 8) & 0xFF;
 
-    int spin = 0;
-    while ((port->tfd & (ATA_DEV_BUSY | ATA_DEV_DRQ)) && spin < SATA_IO_MAX_WAIT) // Wait until the port is no longer busy.
-    {
-        spin++;
-        __asm__ __volatile__ ("pause");
-    }
-
-    if (spin == SATA_IO_MAX_WAIT)
-        return SATA_IO_ERROR_HUNG_PORT;
-
-    port->ci = slot_mask; // Issue command.
-    if (!AHCI_wait_for_slot_completion(port, slot_mask, port_index_u))
-        return SATA_IO_ERROR_HUNG_PORT;
-
-    if ((port->is & HBA_PxIS_TFES) ||
-        (port_index_u < AHCI_MAX_SLOT &&
-         __atomic_load_n(&AHCI_port_irq_error[port_index_u], __ATOMIC_ACQUIRE) != 0))
-    {
-        return SATA_IO_ERROR_HUNG_PORT;
-    }
-
-    return SATA_IO_SUCCESS;
+    return AHCI_submit_cmd(port, &cmd_ctx);
 }
 
 int AHCI_SATA_write(HBA_PORT_t* port, uint32_t startl, uint32_t starth, uint32_t count, uint8_t* buf)
 {
     if (count == 0)
         return SATA_IO_SUCCESS;
+    if (!port || !buf)
+        return SATA_IO_ERROR_HUNG_PORT;
+    if (port->sig == SATA_SIG_ATAPI)
+        return SATA_IO_ERROR_UNSUPPORTED;
+    if (count > (UINT32_MAX / AHCI_SECTOR_SIZE))
+        return SATA_IO_ERROR_HUNG_PORT;
 
-    port->is = (uint32_t) -1;
+    AHCI_cmd_context_t cmd_ctx = { 0 };
+    int prep_rc = AHCI_prepare_cmd(port, count * AHCI_SECTOR_SIZE, buf, &cmd_ctx);
+    if (prep_rc != SATA_IO_SUCCESS)
+        return prep_rc;
+    cmd_ctx.cmd_header->w = 1; // Write to device.
 
-    int slot = AHCI_find_cmdslot(port);
-    if (slot == -1)
-        return SATA_IO_ERROR_NO_SLOT;
-
-    uint32_t slot_mask = 1U << (uint32_t) slot;
-    int port_index = AHCI_port_index(port);
-    uint32_t port_index_u = (port_index >= 0) ? (uint32_t) port_index : AHCI_MAX_SLOT;
-    if (port_index_u < AHCI_MAX_SLOT)
-        __atomic_store_n(&AHCI_port_irq_error[port_index_u], 0, __ATOMIC_RELEASE);
-
-    uintptr_t clb_phys = HILO2ADDR(port->clbu, port->clb);
-    uintptr_t clb_virt = 0;
-    if (!VMM_phys_to_virt(clb_phys, &clb_virt))
-        panic("SATA CLB is not mapped !");
-    HBA_CMD_HEADER_t* cmd_header = (HBA_CMD_HEADER_t*) clb_virt;
-    cmd_header += slot;
-
-    cmd_header->cfl = sizeof (FIS_REG_H2D_t) / sizeof (uint32_t);
-    cmd_header->w = 1; // Write to device.
-    cmd_header->c = 1;
-    cmd_header->prdbc = 0;
-
-    uintptr_t ctba_phys = HILO2ADDR(cmd_header->ctbau, cmd_header->ctba);
-    uintptr_t ctba_virt = 0;
-    if (!VMM_phys_to_virt(ctba_phys, &ctba_virt))
-        panic("SATA CTBA is not mapped !");
-    HBA_CMD_TBL_t* cmd_tbl = (HBA_CMD_TBL_t*) ctba_virt;
-    memset(cmd_tbl, 0, PHYS_PAGE_SIZE);
-
-    uint32_t byte_count = count * AHCI_SECTOR_SIZE;
-    uint16_t prdtl = 0;
-    int prdt_status = AHCI_build_prdt(cmd_tbl, (uintptr_t) buf, byte_count, &prdtl);
-    if (prdt_status != SATA_IO_SUCCESS)
-        return prdt_status;
-
-    cmd_header->prdtl = prdtl;
-
-    FIS_REG_H2D_t* cmd_fis = (FIS_REG_H2D_t*) (&cmd_tbl->cfis);
+    FIS_REG_H2D_t* cmd_fis = (FIS_REG_H2D_t*) (&cmd_ctx.cmd_tbl->cfis);
 
     cmd_fis->fis_type = FIS_TYPE_REG_H2D;
     cmd_fis->c = 1; // Cmd.
@@ -699,26 +858,5 @@ int AHCI_SATA_write(HBA_PORT_t* port, uint32_t startl, uint32_t starth, uint32_t
     cmd_fis->countl = count & 0xFF;
     cmd_fis->counth = (count >> 8) & 0xFF;
 
-    int spin = 0;
-    while ((port->tfd & (ATA_DEV_BUSY | ATA_DEV_DRQ)) && spin < SATA_IO_MAX_WAIT) // Wait until the port is no longer busy.
-    {
-        spin++;
-        __asm__ __volatile__ ("pause");
-    }
-
-    if (spin == SATA_IO_MAX_WAIT)
-        return SATA_IO_ERROR_HUNG_PORT;
-
-    port->ci = slot_mask; // Issue command.
-    if (!AHCI_wait_for_slot_completion(port, slot_mask, port_index_u))
-        return SATA_IO_ERROR_HUNG_PORT;
-
-    if ((port->is & HBA_PxIS_TFES) ||
-        (port_index_u < AHCI_MAX_SLOT &&
-         __atomic_load_n(&AHCI_port_irq_error[port_index_u], __ATOMIC_ACQUIRE) != 0))
-    {
-        return SATA_IO_ERROR_HUNG_PORT;
-    }
-
-    return SATA_IO_SUCCESS;
+    return AHCI_submit_cmd(port, &cmd_ctx);
 }

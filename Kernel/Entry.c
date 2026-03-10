@@ -26,7 +26,6 @@
 #include <CPU/ISR.h>
 #include <CPU/FPU.h>
 #include <CPU/PCI.h>
-#include <CPU/IO.h>
 #include <CPU/x86.h>
 
 #include <stdint.h>
@@ -640,9 +639,9 @@ __attribute__((__noreturn__)) void k_entry(void)
     else
     {
         if (device_count <= 0)
-            printf("AHCI: no SATA device detected\n");
+            printf("AHCI: no block device detected\n");
         else
-            printf("Unable to mount ext4 filesystem on AHCI devices\n");
+            printf("Unable to mount ext4 filesystem on AHCI block devices\n");
     }
 
     task_init((uintptr_t) &kernel_stack_top);
