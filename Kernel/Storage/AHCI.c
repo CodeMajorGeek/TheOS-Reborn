@@ -36,9 +36,15 @@ static uintptr_t AHCI_base_phys = 0;
 static uint8_t AHCI_irq_mode = AHCI_IRQ_MODE_POLL;
 static uint64_t AHCI_irq_count = 0;
 static bool AHCI_irq_vector_registered = false;
+static bool AHCI_write_guard_armed = false;
+static HBA_PORT_t* AHCI_write_guard_port = NULL;
+static uint64_t AHCI_write_guard_lba_start = 0;
+static uint64_t AHCI_write_guard_lba_end = 0; // Exclusive.
 
 static uint32_t AHCI_device_count = 0;
 static HBA_PORT_t* AHCI_block_devices[AHCI_MAX_SLOT];
+static uint64_t AHCI_port_sector_capacity[AHCI_MAX_SLOT];
+static bool AHCI_port_capacity_valid[AHCI_MAX_SLOT];
 
 extern uintptr_t ROOT_DEV;
 
@@ -48,6 +54,8 @@ static void AHCI_init_wait_queues(void);
 static int AHCI_prepare_cmd(HBA_PORT_t* port, uint32_t byte_count, uint8_t* buf, AHCI_cmd_context_t* out_ctx);
 static int AHCI_submit_cmd(HBA_PORT_t* port, const AHCI_cmd_context_t* cmd_ctx);
 static bool AHCI_register_device(HBA_PORT_t* port, const char* kind, uint32_t* out_device_num);
+static bool AHCI_identify_capacity_sectors(HBA_PORT_t* port, uint64_t* out_sector_count);
+static bool AHCI_get_cached_capacity_sectors(HBA_PORT_t* port, uint64_t* out_sector_count);
 static int AHCI_atapi_read_blocks(HBA_PORT_t* port, uint32_t lba, uint32_t count, uint8_t* buf);
 static int AHCI_atapi_read_512(HBA_PORT_t* port, uint32_t startl, uint32_t starth, uint32_t count, uint8_t* buf);
 static void AHCI_ATAPI_init(HBA_PORT_t* port, int num);
@@ -151,6 +159,8 @@ static void AHCI_init_wait_queues(void)
     {
         task_wait_queue_init(&AHCI_port_waitq[port]);
         __atomic_store_n(&AHCI_port_irq_error[port], 0, __ATOMIC_RELAXED);
+        AHCI_port_sector_capacity[port] = 0;
+        AHCI_port_capacity_valid[port] = false;
     }
 
     AHCI_waitq_ready = true;
@@ -294,6 +304,75 @@ static bool AHCI_register_device(HBA_PORT_t* port, const char* kind, uint32_t* o
         *out_device_num = dev_num;
 
     printf("\tInit success: %s(%d, %d) !\n", kind ? kind : "disk", DEV_SATA, dev_num);
+    return true;
+}
+
+static bool AHCI_identify_capacity_sectors(HBA_PORT_t* port, uint64_t* out_sector_count)
+{
+    if (!port || !out_sector_count || port->sig == SATA_SIG_ATAPI)
+        return false;
+
+    uint8_t identify_data[AHCI_SECTOR_SIZE];
+    memset(identify_data, 0, sizeof(identify_data));
+
+    AHCI_cmd_context_t cmd_ctx = { 0 };
+    int prep_rc = AHCI_prepare_cmd(port, AHCI_SECTOR_SIZE, identify_data, &cmd_ctx);
+    if (prep_rc != SATA_IO_SUCCESS)
+        return false;
+
+    cmd_ctx.cmd_header->w = 0; // Device -> host.
+
+    FIS_REG_H2D_t* cmd_fis = (FIS_REG_H2D_t*) (&cmd_ctx.cmd_tbl->cfis);
+    cmd_fis->fis_type = FIS_TYPE_REG_H2D;
+    cmd_fis->c = 1;
+    cmd_fis->command = ATA_CMD_IDENTIFY;
+    cmd_fis->device = 0;
+
+    if (AHCI_submit_cmd(port, &cmd_ctx) != SATA_IO_SUCCESS)
+        return false;
+
+    const uint16_t* words = (const uint16_t*) identify_data;
+    uint64_t lba48 = ((uint64_t) words[103] << 48) |
+                     ((uint64_t) words[102] << 32) |
+                     ((uint64_t) words[101] << 16) |
+                     (uint64_t) words[100];
+    if (lba48 != 0)
+    {
+        *out_sector_count = lba48;
+        return true;
+    }
+
+    uint32_t lba28 = ((uint32_t) words[61] << 16) | (uint32_t) words[60];
+    if (lba28 == 0)
+        return false;
+
+    *out_sector_count = (uint64_t) lba28;
+    return true;
+}
+
+static bool AHCI_get_cached_capacity_sectors(HBA_PORT_t* port, uint64_t* out_sector_count)
+{
+    if (!port || !out_sector_count)
+        return false;
+
+    int port_index = AHCI_port_index(port);
+    if (port_index < 0 || port_index >= (int) AHCI_MAX_SLOT)
+        return false;
+
+    uint32_t idx = (uint32_t) port_index;
+    if (AHCI_port_capacity_valid[idx])
+    {
+        *out_sector_count = AHCI_port_sector_capacity[idx];
+        return true;
+    }
+
+    uint64_t sectors = 0;
+    if (!AHCI_identify_capacity_sectors(port, &sectors) || sectors == 0)
+        return false;
+
+    AHCI_port_sector_capacity[idx] = sectors;
+    AHCI_port_capacity_valid[idx] = true;
+    *out_sector_count = sectors;
     return true;
 }
 
@@ -454,6 +533,36 @@ const char* AHCI_get_irq_mode_name(void)
         default:
             return "INTx/POLL";
     }
+}
+
+void AHCI_write_guard_disallow_all(void)
+{
+    AHCI_write_guard_armed = false;
+    AHCI_write_guard_port = NULL;
+    AHCI_write_guard_lba_start = 0;
+    AHCI_write_guard_lba_end = 0;
+    kdebug_puts("[AHCI] write guard: disallow all writes\n");
+}
+
+bool AHCI_write_guard_allow_region(HBA_PORT_t* port, uint64_t lba_start, uint64_t sector_count)
+{
+    if (!port || sector_count == 0)
+        return false;
+
+    uint64_t lba_end = lba_start + sector_count;
+    if (lba_end <= lba_start)
+        return false;
+
+    AHCI_write_guard_port = port;
+    AHCI_write_guard_lba_start = lba_start;
+    AHCI_write_guard_lba_end = lba_end;
+    AHCI_write_guard_armed = true;
+
+    kdebug_printf("[AHCI] write guard: allow port=%d lba=[0x%llX..0x%llX)\n",
+                  AHCI_port_index(port),
+                  (unsigned long long) lba_start,
+                  (unsigned long long) lba_end);
+    return true;
 }
 
 static void AHCI_irq_handler(interrupt_frame_t* frame)
@@ -834,6 +943,36 @@ int AHCI_SATA_write(HBA_PORT_t* port, uint32_t startl, uint32_t starth, uint32_t
         return SATA_IO_ERROR_UNSUPPORTED;
     if (count > (UINT32_MAX / AHCI_SECTOR_SIZE))
         return SATA_IO_ERROR_HUNG_PORT;
+
+    uint64_t write_lba = ((uint64_t) starth << 32) | (uint64_t) startl;
+    uint64_t write_lba_end = write_lba + (uint64_t) count;
+    if (write_lba_end <= write_lba)
+        return SATA_IO_ERROR_HUNG_PORT;
+
+    if (!AHCI_write_guard_armed)
+    {
+        kdebug_printf("[AHCI] write blocked: guard not armed (port=%d lba=%llu count=%u)\n",
+                      AHCI_port_index(port),
+                      (unsigned long long) write_lba,
+                      (unsigned) count);
+        return SATA_IO_ERROR_UNSUPPORTED;
+    }
+
+    if (port != AHCI_write_guard_port ||
+        write_lba < AHCI_write_guard_lba_start ||
+        write_lba_end > AHCI_write_guard_lba_end)
+    {
+        kdebug_printf("[AHCI] write blocked by region guard: port=%d lba=[%llu..%llu) allowed=[0x%llX..0x%llX)\n",
+                      AHCI_port_index(port),
+                      (unsigned long long) write_lba,
+                      (unsigned long long) write_lba_end,
+                      (unsigned long long) AHCI_write_guard_lba_start,
+                      (unsigned long long) AHCI_write_guard_lba_end);
+        return SATA_IO_ERROR_UNSUPPORTED;
+    }
+
+    uint64_t ignored_disk_sector_count = 0;
+    (void) AHCI_get_cached_capacity_sectors(port, &ignored_disk_sector_count);
 
     AHCI_cmd_context_t cmd_ctx = { 0 };
     int prep_rc = AHCI_prepare_cmd(port, count * AHCI_SECTOR_SIZE, buf, &cmd_ctx);

@@ -14,6 +14,7 @@
 #define ATA_CMD_READ_DMA_EX     0x25
 #define ATA_CMD_WRITE_DMA_EXT   0x35
 #define ATA_CMD_PACKET          0xA0
+#define ATA_CMD_IDENTIFY        0xEC
 #define ATAPI_CMD_READ12        0xA8
 #define AHCI_ATAPI_SECTOR_SIZE  0x800       // 2048 bytes (CD/DVD logical block size).
 
@@ -201,5 +202,7 @@ HBA_PORT_t* AHCI_get_device(int index);
 uint8_t AHCI_get_irq_mode(void);
 uint64_t AHCI_get_irq_count(void);
 const char* AHCI_get_irq_mode_name(void);
+void AHCI_write_guard_disallow_all(void);
+bool AHCI_write_guard_allow_region(HBA_PORT_t* port, uint64_t lba_start, uint64_t sector_count);
 
 #endif

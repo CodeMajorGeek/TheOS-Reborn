@@ -72,6 +72,27 @@ static uint64_t boot_read_le64(const uint8_t* ptr)
            ((uint64_t) ptr[7] << 56);
 }
 
+static bool boot_ext4_span_sectors(const ext4_fs_t* fs, uint64_t* sectors_out)
+{
+    if (!fs || !sectors_out || fs->block_size == 0)
+        return false;
+
+    uint64_t block_count = (uint64_t) fs->superblock.s_blocks_count_lo;
+    if (block_count == 0)
+        return false;
+
+    uint64_t fs_bytes = block_count * (uint64_t) fs->block_size;
+    if (fs_bytes == 0 || (fs_bytes / (uint64_t) fs->block_size) != block_count)
+        return false;
+
+    uint64_t sectors = (fs_bytes + AHCI_SECTOR_SIZE - 1ULL) / AHCI_SECTOR_SIZE;
+    if (sectors == 0)
+        return false;
+
+    *sectors_out = sectors;
+    return true;
+}
+
 static size_t boot_collect_mbr_partitions(HBA_PORT_t* port,
                                           uint32_t* part_index_out,
                                           uint32_t* lba_out,
@@ -509,6 +530,7 @@ __attribute__((__noreturn__)) void k_entry(void)
     kdebug_puts("[BOOT] keyboard init\n");
     Syscall_init();
     kdebug_puts("[BOOT] syscall init\n");
+    AHCI_write_guard_disallow_all();
 
     static ext4_fs_t fs;
     HBA_PORT_t* root_port = NULL;
@@ -602,7 +624,6 @@ __attribute__((__noreturn__)) void k_entry(void)
                           ? " source=limine-file"
                           : ""
                       );
-        kdebug_file_sink_ready();
 
         bool psf_loaded = false;
         uint8_t* font_data = NULL;
@@ -745,6 +766,25 @@ __attribute__((__noreturn__)) void k_entry(void)
            (unsigned) rtc.hours,
            (unsigned) rtc.minutes,
            (unsigned) rtc.seconds);
+
+    if (!root_port)
+        panic("Missing root filesystem with /bin/TheApp");
+
+    uint8_t* app_probe_data = NULL;
+    size_t app_probe_size = 0;
+    if (!ext4_read_file(&fs, "/bin/TheApp", &app_probe_data, &app_probe_size))
+        panic("/bin/TheApp missing on mounted root filesystem");
+
+    kfree(app_probe_data);
+
+    uint64_t root_fs_sectors = 0;
+    if (!boot_ext4_span_sectors(&fs, &root_fs_sectors))
+        panic("Unable to determine root ext4 span");
+
+    if (!AHCI_write_guard_allow_region(root_port, root_lba_base, root_fs_sectors))
+        panic("Unable to arm AHCI write guard for root filesystem");
+
+    kdebug_file_sink_ready();
 
     if (!UserMode_run_elf("/bin/TheApp"))
         kdebug_puts("[USER] launch failed, staying in kernel idle loop\n");
