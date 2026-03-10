@@ -6,7 +6,7 @@
 ![Build](https://img.shields.io/badge/build-passing-brightgreen)
 ![Status](https://img.shields.io/badge/status-experimental-orange)
 
-TheOS-Reborn is a freestanding x86_64 operating system project with a Limine boot path, custom PMM/VMM, SMP, ACPI/APIC, AHCI/ext4, ring3 userland, a minimal libc, and a MicroPython port.
+TheOS-Reborn is a freestanding x86_64 operating system project with a Limine boot path, custom PMM/VMM, SMP, ACPI/APIC, AHCI/ext4, ring3 userland, a minimal libc, and a MicroPython port (validated on both QEMU and VirtualBox with AHCI SATA/ATAPI storage).
 
 > This README reflects repository behavior as of **March 10, 2026**.
 
@@ -91,6 +91,7 @@ Core features currently implemented:
   - PIT fallback path.
 - Storage and filesystem:
   - AHCI controller discovery and IRQ mode setup (MSI/MSI-X/legacy fallback),
+  - AHCI block-device support for both SATA disks and ATAPI media,
   - ext4 root mount with preferred Limine hint path and controlled fallback probing.
 - Console and graphics:
   - early VGA path,
@@ -285,6 +286,12 @@ ninja install-run   # install + iso + run
 ninja graphs        # regenerate project graphs
 ```
 
+### VirtualBox notes
+
+- VirtualBox boot is supported when storage is exposed through a SATA/AHCI controller.
+- If you boot from ISO with embedded ext4 rootfs, attach the ISO as an optical drive on the AHCI controller (ATAPI path).
+- Legacy IDE-only controller setups are not used by the current storage path.
+
 ---
 
 ## Configuration Options
@@ -357,7 +364,7 @@ Runtime resources:
 At boot, root mount does:
 
 1. Try Limine executable-file hint (`mbr_disk_id_hint`, optional partition hint).
-2. If that path fails, fallback probe on remaining AHCI devices/partitions.
+2. If that path fails, fallback probe on remaining AHCI block devices/partitions (SATA disks and ATAPI media).
 
 ---
 
@@ -424,6 +431,7 @@ Current public syscall IDs are `1..27` (`Includes/UAPI/Syscall.h`).
 - libc is partial and targeted to current apps/ports.
 - No complete POSIX process/thread model yet (no COW, no pthread runtime).
 - Signal model is still minimal.
+- Legacy IDE/PIIX storage path is not implemented; storage discovery currently targets AHCI-class controllers.
 - Some components (x2APIC SMP mode, parts of scheduler stress paths) are experimental.
 
 ---
