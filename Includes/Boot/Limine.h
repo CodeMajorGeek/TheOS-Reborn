@@ -17,6 +17,44 @@
 #ifndef LIMINE_H
 #define LIMINE_H 1
 
+#ifdef __ASSEMBLER__
+
+/* Common */
+#define LIMINE_COMMON_MAGIC_0                   0xc7b1dd30df4c8b88
+#define LIMINE_COMMON_MAGIC_1                   0x0a82e883a194f07b
+
+/* Base revision */
+#define LIMINE_BASE_REVISION_0                   0xf9562b2d5c95a6c8
+#define LIMINE_BASE_REVISION_1                   0x6a7b384944536bdc
+
+/* Request markers */
+#define LIMINE_REQUESTS_START_MARKER_0          0xf6b8f4b39de7d1ae
+#define LIMINE_REQUESTS_START_MARKER_1          0xfab91a6940fcb9cf
+#define LIMINE_REQUESTS_START_MARKER_2          0x785c6ed015d3e316
+#define LIMINE_REQUESTS_START_MARKER_3          0x181e920a7852b9d9
+#define LIMINE_REQUESTS_END_MARKER_0            0xadc0e0531bb10d03
+#define LIMINE_REQUESTS_END_MARKER_1            0x9572709f31764c62
+
+/* Request IDs (request-specific words only, common magic excluded). */
+#define LIMINE_ENTRY_POINT_REQUEST_ID_0         0x13d86c035a1cd3e1
+#define LIMINE_ENTRY_POINT_REQUEST_ID_1         0x2b0caa89d8f3026a
+#define LIMINE_EXECUTABLE_ADDRESS_REQUEST_ID_0  0x71ba76863cc55f63
+#define LIMINE_EXECUTABLE_ADDRESS_REQUEST_ID_1  0xb2644a48c516a487
+#define LIMINE_EXECUTABLE_CMDLINE_REQUEST_ID_0  0x4b161536e598651e
+#define LIMINE_EXECUTABLE_CMDLINE_REQUEST_ID_1  0xb390ad4a2f1f303a
+#define LIMINE_EXECUTABLE_FILE_REQUEST_ID_0     0xad97e90e83f1ed67
+#define LIMINE_EXECUTABLE_FILE_REQUEST_ID_1     0x31eb5d1c5ff23b69
+#define LIMINE_MEMMAP_REQUEST_ID_0              0x67cf3d9d378a806f
+#define LIMINE_MEMMAP_REQUEST_ID_1              0xe304acdfc50c3c62
+#define LIMINE_HHDM_REQUEST_ID_0                0x48dcf1cb8ad2b852
+#define LIMINE_HHDM_REQUEST_ID_1                0x63984e959a98244b
+#define LIMINE_FRAMEBUFFER_REQUEST_ID_0         0x9d5827dcd881dd75
+#define LIMINE_FRAMEBUFFER_REQUEST_ID_1         0xa3148604f6fab11b
+#define LIMINE_RSDP_REQUEST_ID_0                0xc5e77b6b397e7b43
+#define LIMINE_RSDP_REQUEST_ID_1                0x27637845accdcf3c
+
+#else
+
 #include <stdint.h>
 
 #ifdef __cplusplus
@@ -583,5 +621,7 @@ struct limine_x86_64_keep_iommu_request {
 #ifdef __cplusplus
 }
 #endif
+
+#endif /* __ASSEMBLER__ */
 
 #endif

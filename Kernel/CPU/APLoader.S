@@ -12,8 +12,6 @@
 
 .set AP_IA32_EFER_MSR,     0xC0000080
 .set AP_EFER_LME,          0x00000100
-.set AP_HHDM_BASE,         VMM_HHDM_BASE
-.set AP_HANDOFF_VIRT,      AP_HHDM_BASE + SMP_HANDOFF_PHYS
 
 .section .ap_trampoline, "ax"
 .code16
@@ -112,7 +110,7 @@ ap64_entry:
     movw %ax, %fs
     movw %ax, %gs
 
-    movabsq $AP_HANDOFF_VIRT, %rsi
+    movabsq $SMP_HANDOFF_PHYS, %rsi
 
     movq SMP_HANDOFF_MAGIC_OFF(%rsi), %rax
     movq $SMP_HANDOFF_MAGIC_VALUE, %rdx

@@ -12,8 +12,10 @@
 
 static PMM_region_t PMM_regions_store[PMM_MAX_REGIONS];
 static PMM_region_t* PMM_regions = PMM_regions_store;
+static PMM_boot_entry_t PMM_boot_entries_store[PMM_MAX_BOOT_ENTRIES];
 
 static int PMM_num_regions = 0;
+static int PMM_boot_entry_count = 0;
 
 static uintptr_t PMM_kernel_phys_start;
 static uintptr_t PMM_kernel_phys_end;
@@ -61,6 +63,56 @@ PMM_region_t* PMM_get_regions(void)
 int PMM_get_num_regions(void)
 {
     return PMM_num_regions;
+}
+
+void PMM_boot_entries_reset(void)
+{
+    PMM_boot_entry_count = 0;
+    memset(PMM_boot_entries_store, 0, sizeof(PMM_boot_entries_store));
+}
+
+bool PMM_boot_entry_add(uintptr_t addr,
+                        uintptr_t len,
+                        uint64_t type,
+                        bool allocatable,
+                        bool map_hhdm)
+{
+    if (len == 0)
+        return false;
+
+    if (PMM_boot_entry_count >= PMM_MAX_BOOT_ENTRIES)
+        return false;
+
+    uintptr_t end = addr + len;
+    if (end < addr)
+        return false;
+
+    uintptr_t aligned_start = addr & ~(uintptr_t) (PHYS_PAGE_SIZE - 1U);
+    uintptr_t aligned_end = (end + (PHYS_PAGE_SIZE - 1U)) & ~(uintptr_t) (PHYS_PAGE_SIZE - 1U);
+    if (aligned_end <= aligned_start)
+        return false;
+
+    PMM_boot_entry_t* entry = &PMM_boot_entries_store[PMM_boot_entry_count++];
+    entry->addr_start = aligned_start;
+    entry->addr_end = aligned_end;
+    entry->type = type;
+    entry->flags = 0;
+    if (allocatable)
+        entry->flags |= PMM_BOOT_ENTRY_ALLOCATABLE;
+    if (map_hhdm)
+        entry->flags |= PMM_BOOT_ENTRY_HHDM_MAP;
+
+    return true;
+}
+
+const PMM_boot_entry_t* PMM_get_boot_entries(void)
+{
+    return PMM_boot_entries_store;
+}
+
+int PMM_get_boot_entry_count(void)
+{
+    return PMM_boot_entry_count;
 }
 
 void PMM_init_region(uintptr_t addr, uintptr_t len)

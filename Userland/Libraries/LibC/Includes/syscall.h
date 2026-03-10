@@ -1,10 +1,13 @@
 #ifndef _SYSCALL_H
 #define _SYSCALL_H
 
+#ifndef __ASSEMBLER__
 #include <stddef.h>
 #include <stdint.h>
+#endif
 #include "../../../../Includes/UAPI/Syscall.h"
 
+#ifndef __ASSEMBLER__
 long syscall(long num, long a1, long a2, long a3, long a4, long a5, long a6);
 
 int fs_is_dir(const char* path);
@@ -37,5 +40,6 @@ int sys_power(uint32_t cmd, uint32_t arg);
 int sys_shutdown(void);
 int sys_sleep(uint32_t state);
 int sys_reboot(void);
+#endif
 
 #endif

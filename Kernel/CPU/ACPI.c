@@ -139,15 +139,15 @@ static bool ACPI_mmio_read(uint64_t phys, uint8_t width_bytes, uint32_t* out_val
 
     uintptr_t phys_addr = (uintptr_t) phys;
     uintptr_t page_phys = phys_addr & ~(uintptr_t) 0xFFFULL;
-    uintptr_t page_virt = VMM_MMIO_VIRT(page_phys);
-    VMM_map_mmio_uc_page(page_virt, page_phys);
+    uintptr_t page_virt = P2V(page_phys);
+    VMM_map_page_flags(page_virt, page_phys, WRITE_THROUGH | CACHE_DISABLE | NO_EXECUTE);
 
     uintptr_t offset = phys_addr - page_phys;
     if (offset + width_bytes > 0x1000)
     {
         uintptr_t next_phys = page_phys + 0x1000;
-        uintptr_t next_virt = VMM_MMIO_VIRT(next_phys);
-        VMM_map_mmio_uc_page(next_virt, next_phys);
+        uintptr_t next_virt = P2V(next_phys);
+        VMM_map_page_flags(next_virt, next_phys, WRITE_THROUGH | CACHE_DISABLE | NO_EXECUTE);
     }
 
     volatile uint8_t* reg = (volatile uint8_t*) (page_virt + offset);
@@ -174,15 +174,15 @@ static bool ACPI_mmio_write(uint64_t phys, uint8_t width_bytes, uint32_t value)
 
     uintptr_t phys_addr = (uintptr_t) phys;
     uintptr_t page_phys = phys_addr & ~(uintptr_t) 0xFFFULL;
-    uintptr_t page_virt = VMM_MMIO_VIRT(page_phys);
-    VMM_map_mmio_uc_page(page_virt, page_phys);
+    uintptr_t page_virt = P2V(page_phys);
+    VMM_map_page_flags(page_virt, page_phys, WRITE_THROUGH | CACHE_DISABLE | NO_EXECUTE);
 
     uintptr_t offset = phys_addr - page_phys;
     if (offset + width_bytes > 0x1000)
     {
         uintptr_t next_phys = page_phys + 0x1000;
-        uintptr_t next_virt = VMM_MMIO_VIRT(next_phys);
-        VMM_map_mmio_uc_page(next_virt, next_phys);
+        uintptr_t next_virt = P2V(next_phys);
+        VMM_map_page_flags(next_virt, next_phys, WRITE_THROUGH | CACHE_DISABLE | NO_EXECUTE);
     }
 
     volatile uint8_t* reg = (volatile uint8_t*) (page_virt + offset);

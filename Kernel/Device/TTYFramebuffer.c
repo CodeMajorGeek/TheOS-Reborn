@@ -608,8 +608,8 @@ bool TTYFB_init(const TTY_framebuffer_info_t* info, uint8_t color)
         return false;
 
     size_t map_len = (size_t) map_len64;
-    uintptr_t virt_base = VMM_MMIO_VIRT(phys_base);
-    VMM_map_mmio_uc_pages(virt_base, phys_base, map_len);
+    uintptr_t virt_base = P2V(phys_base);
+    VMM_map_pages_flags(virt_base, phys_base, map_len, WRITE_THROUGH | CACHE_DISABLE | NO_EXECUTE);
 
     TTYFB_release_backbuffer();
     TTYFB_double_buffer = false;

@@ -28,8 +28,13 @@
 #define ADDRHI(a)           (((a) >> 32) & 0xFFFFFFFFULL)
 #define ADDRLO(a)           ((a) & 0xFFFFFFFFULL)
 
-#define V2P(a)              ((uintptr_t) (a) - VMM_HHDM_BASE)
-#define P2V(a)              ((uintptr_t) (a) + VMM_HHDM_BASE)
+uintptr_t VMM_get_hhdm_base(void);
+void VMM_set_hhdm_base(uintptr_t hhdm_base);
+uintptr_t VMM_hhdm_to_phys_addr(uintptr_t virt);
+uintptr_t VMM_phys_to_hhdm_addr(uintptr_t phys);
+
+#define V2P(a)              VMM_hhdm_to_phys_addr((uintptr_t) (a))
+#define P2V(a)              VMM_phys_to_hhdm_addr((uintptr_t) (a))
 
 #define VMM_MMIO_VIRT(phys) (VMM_MMIO_BASE + (uintptr_t) (phys))
 #define VMM_VGA_VIRT_BASE   (VMM_MMIO_BASE + 0x00000000000B8000ULL)

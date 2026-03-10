@@ -180,6 +180,16 @@ error:
 
 .extern k_entry
 
+.globl boot_limine_entry
+.type boot_limine_entry, @function
+
+boot_limine_entry:
+    cli
+    lgdt gdt64.pointer(%rip)
+    jmp long_mode_entry_high
+
+.size boot_limine_entry, . - boot_limine_entry
+
 long_mode_entry:    # Finally, we can do some stuff into long mode !
     cli
 

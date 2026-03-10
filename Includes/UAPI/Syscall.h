@@ -1,38 +1,37 @@
 #ifndef _UAPI_SYSCALL_H
 #define _UAPI_SYSCALL_H
 
+#ifndef __ASSEMBLER__
 #include <stdint.h>
+#endif
 
-enum
-{
-    SYS_SLEEP_MS = 1,
-    SYS_TICK_GET = 2,
-    SYS_CPU_INFO_GET = 3,
-    SYS_SCHED_INFO_GET = 4,
-    SYS_AHCI_IRQ_INFO_GET = 5,
-    SYS_RCU_SYNC = 6,
-    SYS_RCU_INFO_GET = 7,
-    SYS_CONSOLE_WRITE = 8,
-    SYS_EXIT = 9,
-    SYS_FORK = 10,
-    SYS_EXECVE = 11,
-    SYS_YIELD = 12,
-    SYS_MAP = 13,
-    SYS_UNMAP = 14,
-    SYS_MPROTECT = 15,
-    SYS_OPEN = 16,
-    SYS_CLOSE = 17,
-    SYS_READ = 18,
-    SYS_WRITE = 19,
-    SYS_LSEEK = 20,
-    SYS_KBD_GET_SCANCODE = 21,
-    SYS_FS_ISDIR = 22,
-    SYS_FS_MKDIR = 23,
-    SYS_FS_READDIR = 24,
-    SYS_WAITPID = 25,
-    SYS_KILL = 26,
-    SYS_POWER = 27
-};
+#define SYS_SLEEP_MS          1
+#define SYS_TICK_GET          2
+#define SYS_CPU_INFO_GET      3
+#define SYS_SCHED_INFO_GET    4
+#define SYS_AHCI_IRQ_INFO_GET 5
+#define SYS_RCU_SYNC          6
+#define SYS_RCU_INFO_GET      7
+#define SYS_CONSOLE_WRITE     8
+#define SYS_EXIT              9
+#define SYS_FORK              10
+#define SYS_EXECVE            11
+#define SYS_YIELD             12
+#define SYS_MAP               13
+#define SYS_UNMAP             14
+#define SYS_MPROTECT          15
+#define SYS_OPEN              16
+#define SYS_CLOSE             17
+#define SYS_READ              18
+#define SYS_WRITE             19
+#define SYS_LSEEK             20
+#define SYS_KBD_GET_SCANCODE  21
+#define SYS_FS_ISDIR          22
+#define SYS_FS_MKDIR          23
+#define SYS_FS_READDIR        24
+#define SYS_WAITPID           25
+#define SYS_KILL              26
+#define SYS_POWER             27
 
 #define SYS_PROT_READ    (1ULL << 0)
 #define SYS_PROT_WRITE   (1ULL << 1)
@@ -70,6 +69,7 @@ enum
 #define SYS_DT_DIR          4U
 #define SYS_DT_REG          8U
 
+#ifndef __ASSEMBLER__
 typedef struct syscall_cpu_info
 {
     uint32_t cpu_index;
@@ -110,5 +110,6 @@ typedef struct syscall_dirent
     uint8_t reserved[3];
     char d_name[SYS_DIRENT_NAME_MAX + 1U];
 } syscall_dirent_t;
+#endif
 
 #endif

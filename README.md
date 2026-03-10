@@ -6,162 +6,157 @@
 ![Build](https://img.shields.io/badge/build-passing-brightgreen)
 ![Status](https://img.shields.io/badge/status-experimental-orange)
 
-TheOS-Reborn is a freestanding x86_64 OS project with a Limine kernel boot path, custom VMM/PMM, SMP, ext4, ring3 userland, a minimal libc and a MicroPython port.
+TheOS-Reborn is a freestanding x86_64 operating system project with a Limine boot path, custom PMM/VMM, SMP, ACPI/APIC, AHCI/ext4, ring3 userland, a minimal libc, and a MicroPython port.
 
-> This README reflects the repository state as of **March 2026**.
+> This README reflects repository behavior as of **March 10, 2026**.
 
 ---
 
 ## Table of Contents
 
-- **Overview**
-- **Feature Overview**
-  - Stable
-  - Experimental
-  - Known Gaps
-- **Architecture at a Glance**
-  - Boot & runtime pipeline
-  - Virtual memory layout
-  - Isolation / security model
-- **Build & Run**
-  - Prerequisites
-  - Cross-toolchain
-  - Configure, build, run
-  - Runtime QEMU options
-- **Disk Image & Userland**
-- **Syscalls**
-- **LibC Status**
-- **Logging & Debugging**
-- **Roadmap**
+- [Overview](#overview)
+- [Current Boot Sequence](#current-boot-sequence)
+- [Memory Model (Limine-first)](#memory-model-limine-first)
+- [Architecture at a Glance](#architecture-at-a-glance)
+- [Build & Run](#build--run)
+- [Configuration Options](#configuration-options)
+- [Disk Image & Userland](#disk-image--userland)
+- [Syscalls](#syscalls)
+- [Logging & Debugging](#logging--debugging)
+- [Known Gaps](#known-gaps)
+- [Roadmap](#roadmap)
 
 ---
 
 ## Overview
 
-TheOS-Reborn is a “from-scratch” 64‑bit OS kernel and userland for x86_64:
+Project goals:
 
-- Limine bootloader entry, higher-half kernel at `0xFFFFFFFF80000000`.
-- Custom physical and virtual memory managers with strict kernel/user split.
-- SMP bring-up, APIC/IOAPIC, HPET-timed LAPIC scheduling.
-- ext4-based root filesystem and ring3 ELF processes.
-- A small but practical libc plus several userland apps, including a MicroPython port.
+- Learn OS internals on real x86_64 abstractions.
+- Keep a full boot-to-userland stack in one repository.
+- Favor explicit low-level behavior over hidden magic.
+
+Current stack includes:
+
+- Limine native entry (`Boot/LimineEntry.c.S` -> `boot_limine_entry` -> `k_entry`).
+- Higher-half kernel with runtime relocation support from Limine executable address response.
+- PMM + VMM with HHDM and dedicated MMIO mapping window.
+- ACPI initialization from Limine-provided RSDP (no legacy BIOS scan).
+- APIC/IOAPIC + HPET/PIT + SMP bring-up.
+- AHCI storage and ext4 root mount.
+- Ring3 ELF launch (`/bin/TheApp`, then shell and apps).
 
 ![Rough component split](Docs/components.png)
 
-> The donut above is generated from the current repository LOC counts via `Meta/gen-graphs.sh`.
-> You can regenerate it with:
-> ```bash
-> ninja -C Build graphs
-> ```
+To regenerate graphs:
 
-It is meant as a **learning and experimentation playground** more than a production OS.
+```bash
+ninja -C Build graphs
+```
 
 ---
 
-## Feature Overview
+## Current Boot Sequence
 
-### Stable / Working
+The runtime order in `k_entry` is intentionally staged and observable in `Build/serial.log`:
 
-- **Boot & CPU**
-  - Limine boot + long mode + higher-half kernel.
-  - Startup identity map kept during bring-up, dropped after SMP is online.
-  - NX detection and enable path.
-- **Virtual memory**
-  - Split layout:
-    - Lower half: user space (`<= 0x00007FFFFFFFFFFF`).
-    - Higher half: kernel/HHDM/MMIO (`>= 0xFFFF800000000000`).
-  - Kernel mappings are supervisor-only; user mappings are explicit `USER_MODE`.
-  - HHDM globally fixed and shared on all CPUs.
-  - Explicit, uncached MMIO mappings through dedicated MMIO window.
-- **Isolation / safety**
-  - Per-process address spaces (own `CR3`).
-  - `SYS_MAP/SYS_UNMAP/SYS_MPROTECT` restricted to a user mmap window.
-  - Kernel space and other processes are blocked from mmap APIs.
-  - W^X: writable+executable mappings are rejected.
-  - NX enforced on non-executable regions when supported.
-- **Interrupts, timers, SMP, FPU**
-  - APIC/IOAPIC with ACPI MADT parsing and IRQ overrides.
-  - LAPIC timer calibrated against HPET.
-  - SMP bring-up (INIT/SIPI), AP online, per-CPU queues, TLB shootdown.
-  - Eager FPU context switching (save/restore on task switch, no lazy TS/#NM).
-  - AVX/XSAVE context on bare metal when CPUID/XCR0 allow it, with optional fallback to SSE-only under hypervisors when XRSTOR is unreliable.
-- **Storage & FS**
-  - AHCI storage with MSI-X/MSI and fallback paths.
-  - ext4 mount from AHCI, with Limine executable-file disk/partition hint and partition probing fallback.
-- **Userland**
-  - Ring3 ELF launch at boot (`/bin/TheApp`), then process syscalls (`fork/execve/waitpid/kill`).
-  - Shell (`TheShell`), regression test app (`TheTest`), and MicroPython (`TheMicroPython`).
-- **Console**
-  - Early VGA text init.
-  - Framebuffer console: PSF2 font load, scroll, backspace, blinking cursor.
-  - Deferred switch from VGA to framebuffer after PSF2 load.
-  - Double buffering when backbuffer allocation succeeds.
-- **Logging**
-  - Serial KDEBUG logs.
-  - Optional file sink (RAM‑buffered until ext4 is ready).
-  - Run logs mirrored to `Build/serial.log` by `Meta/run.sh`.
+1. **Limine loads kernel image** (`/boot/TheOS`) and jumps to Limine entrypoint.
+2. **Assembly handoff** (`limine_entry` -> `boot_limine_entry`) switches to kernel stack and enters `k_entry`.
+3. **Early debug sinks**: VGA TTY + logger + serial/file kdebug init.
+4. **Limine base revision check** and runtime kernel base resolution (physical + virtual).
+5. **PMM base init** with runtime kernel boundaries.
+6. **Limine boot info parse**:
+   - HHDM offset,
+   - cmdline,
+   - memory map (`memmap_request`),
+   - RSDP pointer,
+   - executable source hints (`mbr_disk_id`, partition index),
+   - framebuffer discovery/selection.
+7. **VMM map kernel**:
+   - maps kernel image,
+   - maps HHDM from Limine-derived boot entries,
+   - keeps startup identity map during early bring-up.
+8. **Load CR3**, **reload GDT**, enable NX path when supported.
+9. **Early ACPI path from Limine RSDP** (RSDT/XSDT init), then MADT fetch and ACPI power init.
+10. **IDT init** and BSP FPU init.
+11. **APIC/IOAPIC/NUMA path** (if MADT + APIC available).
+12. **PCI scan** (ACPI is already resolved before this stage).
+13. **Keyboard + syscall init**.
+14. **Root filesystem mount**:
+   - prefer Limine boot-media hint (`mbr_disk_id_hint` + optional partition hint),
+   - fallback to wider AHCI probing only if preferred path fails.
+15. **Framebuffer activation deferred** until PSF2 font is loaded from ext4.
+16. **Task init** then **SMP bring-up** of APs.
+17. **Drop startup identity map** after SMP is online.
+18. **Timer stack init** (HPET preferred for LAPIC calibration, PIT fallback).
+19. **Enable interrupts**, start LAPIC timers on BSP/APs.
+20. **Launch ring3 userland** (`/bin/TheApp` -> `TheShell`).
 
-### Partially Working / Experimental
+---
 
-- x2APIC support behind `THEOS_ENABLE_X2APIC_SMP_EXPERIMENTAL` (default OFF).
-- NUMA detection (SRAT/SLIT) without NUMA-aware allocator/scheduler yet.
-- Process model is minimal (no COW, no full Unix semantics).
+## Memory Model (Limine-first)
 
-### Known Gaps
+### Physical memory input source
 
-- ext4 implementation is intentionally limited (no journaling, constrained write path).
-- libc is partial (enough for current apps/ports, not full POSIX).
-- No userland thread API/runtime yet.
-- Signals are minimal: fault→signal translation + `SIGKILL` via `SYS_KILL` only.
-- MicroPython port:
-  - REPL usable.
-  - Script execution still has some unresolved limitations.
+The kernel now uses **Limine memmap as the source of truth**:
+
+- `limine_memmap_request` entries are classified and stored in PMM boot entries.
+- Each boot entry tracks:
+  - physical range,
+  - Limine memmap type,
+  - flags: `allocatable` and `hhdm_map`.
+
+### PMM policy
+
+- PMM allocates pages only from entries considered allocatable (`LIMINE_MEMMAP_USABLE`).
+- Low memory under `0x100000` is never managed by PMM.
+- Kernel image pages are never returned by allocator.
+
+### VMM/HHDM policy
+
+- HHDM mappings are built from boot entries flagged `hhdm_map` (not only PMM-usable ranges).
+- This allows safe access to needed non-allocatable ranges (for example ACPI data, framebuffer, bootloader reclaimable areas while still in early boot).
+- If no boot entries are available, VMM falls back to legacy usable-region mapping.
+
+### Virtual layout
+
+- User canonical lower half up to `0x00007FFFFFFFFFFF`.
+- Kernel/HHDM/MMIO in higher half.
+- Default constants:
+  - `VMM_HHDM_BASE = 0xFFFF800000000000`
+  - `VMM_MMIO_BASE = 0xFFFFC00000000000`
+  - `VMM_KERNEL_VIRT_BASE = 0xFFFFFFFF80000000`
 
 ---
 
 ## Architecture at a Glance
 
-### Boot & Runtime Pipeline
+### Boot pipeline
 
 ```mermaid
 flowchart TD
-    A["Limine"] --> B["Bootloader.S + limine_entry"]
-    B --> C["k_entry (Entry.c)"]
-    C --> D["PMM / VMM init"]
-    D --> E["ACPI / APIC / IOAPIC / HPET"]
-    E --> F["AHCI + ext4 mount"]
-    F --> G["SMP init / AP bring-up"]
-    G --> H["TTY / framebuffer switch"]
-    H --> I["Launch /bin/TheApp (ring3)"]
-    I --> J["TheShell / other userland apps"]
+    A["Limine"] --> B["LimineEntry.c.S"]
+    B --> C["Bootloader.S / boot_limine_entry"]
+    C --> D["k_entry (Entry.c)"]
+    D --> E["LimineHelper: memmap/HHDM/RSDP/fb"]
+    E --> F["PMM + VMM map kernel/HHDM"]
+    F --> G["ACPI early (RSDP -> MADT)"]
+    G --> H["APIC/IOAPIC + PCI + AHCI/ext4"]
+    H --> I["SMP + timers + userland launch"]
 ```
 
-### Virtual Memory Layout
+### CPU and interrupt subsystem
 
-```mermaid
-graph TD
-    K0["0x0000_0000_0000_0000"] -->|user space| KU["VMM_USER_SPACE_MAX"]
-    KU --> G1["gap"]
-    G1 --> HH["VMM_HHDM_BASE"]
-    HH --> MM["VMM_MMIO_BASE"]
-    MM --> KV["VMM_KERNEL_VIRT_BASE"]
-```
+- APIC/IOAPIC configured from ACPI MADT.
+- IRQ overrides handled from MADT records.
+- MSI/MSI-X path for AHCI when available.
+- HPET-backed LAPIC calibration preferred; PIT fallback remains available.
 
-Key points:
+### Userland model
 
-- **User space** lives entirely in the canonical lower half.
-- **HHDM** maps physical memory 1:1 at a fixed high-half virtual base.
-- **Kernel code/data** live in the `VMM_KERNEL_VIRT_BASE` window.
-- **MMIO** has its own uncached region above HHDM.
-
-### Isolation / Security Model
-
-- Per-process `CR3` with only:
-  - user mappings in lower half;
-  - supervisor-only kernel/HHDM mappings in higher half.
-- mmap/syscalls limited to a user window (no direct mapping of kernel or other processes).
-- W^X and NX enforced at the VMM / syscall layer.
-- User stack follows SysV ABI (`argc`, `argv[]`, `envp[]`).
+- Ring3 ELF process start.
+- `fork/execve/waitpid/kill/yield` path implemented.
+- Shell-centric workflow with additional user apps (`TheTest`, `ThePowerManager`, `TheMicroPython`).
 
 ---
 
@@ -171,93 +166,84 @@ Key points:
 
 ```bash
 sudo apt update
-sudo apt full-upgrade
 sudo apt install -y \
-  gcc binutils make cmake ninja-build libmpc-dev \
-  qemu-system-x86 xorriso mtools
+  gcc binutils make cmake ninja-build git \
+  libmpc-dev qemu-system-x86 xorriso mtools
 ```
 
-### Cross Toolchain
-
-TheOS-Reborn uses a dedicated cross toolchain in `Toolchain/Local/x86_64`:
+### Cross toolchain
 
 ```bash
 cd Toolchain
 ./build.sh
 ```
 
-### Configure & Build
-
-From the repository root:
+### Configure and build
 
 ```bash
-mkdir Build
+mkdir -p Build
 cd Build
 cmake .. -GNinja
-ninja create-disk install-run
+ninja install-run
 ```
 
-Useful `ninja` targets (from `Build/`):
+Useful targets:
 
 ```bash
 ninja create-disk   # build/populate ext4 disk image
 ninja iso           # build bootable ISO
-ninja run           # run QEMU with TheOS.iso
+ninja run           # run QEMU with current ISO
 ninja install-run   # install + iso + run
+ninja graphs        # regenerate project graphs
 ```
 
-### Main CMake Options
+---
 
-Top-level:
+## Configuration Options
 
+### Top-level CMake options
+
+- `THEOS_HARDWARE_TEST_PROFILE` (default `OFF`)
+  - when `ON`, forces hardware-like defaults (serial off, embedded disk path, no gdb/telnet monitor).
 - `THEOS_QEMU_NUMA_DEFAULT` (default `ON`)
 - `THEOS_KERNEL_FS_DISK_IMG` (default `OFF`)
+  - `OFF`: ext4 embedded inside ISO.
+  - `ON`: external `disk.img` rootfs.
+- `THEOS_ENABLE_KVM` (default `ON`)
+- `THEOS_RUN_SERIAL_CONSOLE` (default `ON`)
+- `THEOS_RUN_GDB_STUB` (default `OFF`)
+- `THEOS_RUN_TELNET_MONITOR` (default `OFF`)
+- `THEOS_AUTO_PULL_SUBMODULES` (default `ON`)
+  - auto-updates required submodules (currently `EasyArgs`) during configure.
 
-`THEOS_KERNEL_FS_DISK_IMG`:
-
-- `OFF`: ext4 root is embedded into `TheOS.iso` by the `iso` target.
-- `ON`: ext4 root comes from external `disk.img` (`create-disk` required).
-
-Kernel options:
+### Kernel CMake options
 
 - `THEOS_ENABLE_KDEBUG` (default `ON`)
-- `KERNEL_DEBUG_LOG_SERIAL` (default `OFF`)
+- `KERNEL_DEBUG_LOG_SERIAL` (default `ON`)
 - `KERNEL_DEBUG_LOG_FILE` (default `ON`)
 - `THEOS_ENABLE_SCHED_TESTS` (default `OFF`)
 - `THEOS_ENABLE_X2APIC_SMP_EXPERIMENTAL` (default `OFF`)
-- `THEOS_ENABLE_KVM` (default `ON`) – controls whether `ninja run` passes `-enable-kvm` to QEMU.
 
-Examples:
+### Runtime options (`Meta/run.sh`)
 
-```bash
-cd Build
-
-# Use external disk.img as root fs instead of embedded ext4
-cmake -GNinja -DTHEOS_KERNEL_FS_DISK_IMG=ON ..
-
-# Re-enable scheduler stress tests at boot
-cmake -GNinja -DTHEOS_ENABLE_SCHED_TESTS=ON ..
-```
-
-### Runtime Options (`Meta/run.sh`)
-
-Environment variables (most useful):
+Main environment controls:
 
 - `THEOS_RAM_SIZE` (default `128M`)
 - `THEOS_QEMU_CPU` (default `max`)
 - `THEOS_QEMU_GPU` (`vga` or `virtio`, default `vga`)
-- `THEOS_DISK_NAME` (default `disk.img`)
-- `THEOS_BOOT_FROM_ISO_DISK`
-  - `1` (default): ext4 root embedded in `TheOS.iso`
-  - `0`: root from external `disk.img`
-- `THEOS_QEMU_NUMA` (`0` or `1`)
-  - with `THEOS_NUMA_NODE0_MEM`, `THEOS_NUMA_NODE1_MEM` when enabled.
-- `THEOS_QEMU_KVM` (`1` default, `0` to run without KVM acceleration)
+- `THEOS_QEMU_NUMA` (`0`/`1`)
+- `THEOS_QEMU_KVM` (`0`/`1`)
+- `THEOS_QEMU_SERIAL` (`0`/`1`)
+- `THEOS_QEMU_GDB_STUB` (`0`/`1`)
+- `THEOS_QEMU_TELNET_MONITOR` (`0`/`1`)
+- `THEOS_BOOT_FROM_ISO_DISK` (`1` embedded disk in ISO, `0` external disk image)
 
-Notes:
+Limine config (`Kernel/Boot/limine.conf`) currently enables serial output:
 
-- `ninja -C Build run` sets `THEOS_QEMU_NUMA` based on `THEOS_QEMU_NUMA_DEFAULT`.
-- Limine is configured with a single default entry and zero timeout.
+```ini
+serial: yes
+serial_baudrate: 115200
+```
 
 ---
 
@@ -268,105 +254,96 @@ Notes:
 - `/bin/TheApp`
 - `/bin/TheShell`
 - `/bin/TheTest`
+- `/bin/ThePowerManager`
 - `/bin/TheMicroPython`
 - `/bin/MicroPython` (alias)
 
-Keyboard/font base files:
+Runtime resources:
 
 - `/system/keyboard.conf`
 - `/system/azerty.conf`
-- `/system/fonts/ter-powerline-v14n.psf` (default runtime font)
+- `/system/fonts/ter-powerline-v14n.psf`
 
-### TheApp
+### Root filesystem selection policy
 
-- Boot userland entry app.
-- Prints a hello message, then `execve("/bin/TheShell", ...)`.
+At boot, root mount does:
 
-### TheShell
-
-- Built-in commands: `pwd`, `cd`, `ls`, `cat`, `touch`, `mkdir`, `echo <text> | <path>`, `help`, `exit`.
-- Executes binaries from `/bin` (supports aliases like `test` → `/bin/TheTest`).
-- Uses libc keyboard/scancode layer with configurable layout (`/system/keyboard.conf` → `azerty.conf`).
-
-### TheTest
-
-- Security/regression test app for syscall behavior:
-  - mmap boundary tests.
-  - unmap edge cases.
-  - fork/wait race scenarios.
-  - deliberate fault probes.
-
-### TheMicroPython
-
-- Built as a standalone userland app from `ports/theos`.
-- Supports REPL and script execution (`--help`, script path).
-- Integrated with TheOS keyboard input and Ctrl+C polling hook.
+1. Try Limine executable-file hint (`mbr_disk_id_hint`, optional partition hint).
+2. If that path fails, fallback probe on remaining AHCI devices/partitions.
 
 ---
 
-## Syscalls (Current Surface)
+## Syscalls
 
-Current syscall enum range: `1..28`.
+Current public syscall IDs are `1..27` (`Includes/UAPI/Syscall.h`).
 
-**Filesystem / IO**
-
-- `SYS_FS_LS`, `SYS_FS_READ`, `SYS_FS_CREATE`, `SYS_FS_WRITE`
-- `SYS_OPEN`, `SYS_CLOSE`, `SYS_FS_SEEK`, `SYS_FS_ISDIR`, `SYS_FS_MKDIR`
-- `SYS_CONSOLE_WRITE`, `SYS_KBD_GET_SCANCODE`
-
-**Timing / system info**
-
-- `SYS_SLEEP_MS`, `SYS_TICK_GET`, `SYS_CPU_INFO_GET`, `SYS_SCHED_INFO_GET`
-- `SYS_AHCI_IRQ_INFO_GET`, `SYS_RCU_SYNC`, `SYS_RCU_INFO_GET`
-
-**Process / memory**
-
-- `SYS_EXIT`, `SYS_FORK`, `SYS_EXECVE`, `SYS_WAITPID`, `SYS_KILL`, `SYS_YIELD`
-- `SYS_MAP`, `SYS_UNMAP`, `SYS_MPROTECT`
-- `SYS_POWER` (`shutdown` / `sleep Sx` / `reboot` via subcommands)
-
----
-
-## LibC Status
-
-- Focused on:
-  - syscall wrappers;
-  - `stdio` / `printf` subset;
-  - string/memory helpers;
-  - minimal `errno` / headers for porting (e.g. MicroPython).
-- Keyboard input path:
-  - in libc `stdio` (`getchar/fgets`);
-  - scancode parsing with Shift/Caps/AltGr and layout files.
-- `strings.h` includes `strcasecmp`, `strncasecmp`.
-- Headers like `math.h`, `errno.h`, `stddef.h`, `limits.h` expanded for compatibility.
-- Still incomplete vs POSIX:
-  - many `unistd.h` APIs are declared but unimplemented.
-  - no userland heap allocator (`malloc/free/realloc/calloc`) yet.
+- `1` `SYS_SLEEP_MS`
+- `2` `SYS_TICK_GET`
+- `3` `SYS_CPU_INFO_GET`
+- `4` `SYS_SCHED_INFO_GET`
+- `5` `SYS_AHCI_IRQ_INFO_GET`
+- `6` `SYS_RCU_SYNC`
+- `7` `SYS_RCU_INFO_GET`
+- `8` `SYS_CONSOLE_WRITE`
+- `9` `SYS_EXIT`
+- `10` `SYS_FORK`
+- `11` `SYS_EXECVE`
+- `12` `SYS_YIELD`
+- `13` `SYS_MAP`
+- `14` `SYS_UNMAP`
+- `15` `SYS_MPROTECT`
+- `16` `SYS_OPEN`
+- `17` `SYS_CLOSE`
+- `18` `SYS_READ`
+- `19` `SYS_WRITE`
+- `20` `SYS_LSEEK`
+- `21` `SYS_KBD_GET_SCANCODE`
+- `22` `SYS_FS_ISDIR`
+- `23` `SYS_FS_MKDIR`
+- `24` `SYS_FS_READDIR`
+- `25` `SYS_WAITPID`
+- `26` `SYS_KILL`
+- `27` `SYS_POWER`
 
 ---
 
 ## Logging & Debugging
 
-- Serial run logs are written to **`Build/serial.log`** when `THEOS_QEMU_SERIAL=1`.
-- Kernel debug file sink:
-  - logs to RAM first;
-  - flushes to ext4 once the filesystem is mounted.
-- File sink output files:
+### Serial path
+
+- Limine serial output is enabled in `limine.conf`.
+- Kernel `kdebug` serial sink is enabled by default (`KERNEL_DEBUG_LOG_SERIAL=ON`).
+- `Meta/run.sh` writes QEMU serial logs to `Build/serial.log` when serial console is enabled.
+
+### File sink
+
+- Kernel logs are buffered in RAM first.
+- Once ext4 is mounted, buffered logs are flushed to files such as:
   - `kdebug.log`
-  - `kdebug.log.<n>` (extra chunks)
-  - `kdebug.log.overflow` (if RAM buffer overflows before flush)
+  - `kdebug.log.<n>`
+  - `kdebug.log.overflow` (if pre-flush overflow happened)
 
-For deep debugging you can:
+### Debug helpers
 
-- Attach **GDB** to QEMU (`-s` option in `Meta/run.sh`).
-- Use QEMU tracing flags via `THEOS_QEMU_DEBUG` (see comments in `Meta/run.sh`).
+- GDB stub: enable `THEOS_RUN_GDB_STUB=ON`.
+- Telnet monitor: enable `THEOS_RUN_TELNET_MONITOR=ON`.
 
 ---
 
-## Roadmap / Current Priorities
+## Known Gaps
 
-- Harden process / memory / filesystem semantics.
-- Expand libc coverage for larger userland ports.
-- Stabilize MicroPython script execution.
-- Extend ext4 write capabilities beyond the current single-block-oriented constraints.
-- Move toward a richer userland scheduling/threading model.
+- ext4 implementation remains intentionally limited (not full production ext4 feature set).
+- libc is partial and targeted to current apps/ports.
+- No complete POSIX process/thread model yet (no COW, no pthread runtime).
+- Signal model is still minimal.
+- Some components (x2APIC SMP mode, parts of scheduler stress paths) are experimental.
+
+---
+
+## Roadmap
+
+- Keep hardening memory and process semantics.
+- Extend filesystem write-path coverage.
+- Expand libc coverage for larger userland compatibility.
+- Continue stabilizing MicroPython script execution behavior.
+- Improve scheduling and multi-process runtime capabilities.

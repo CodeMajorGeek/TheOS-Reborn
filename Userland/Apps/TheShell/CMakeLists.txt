@@ -1,9 +1,10 @@
 set(THESHELL_SOURCES
-    crt0.S
+    crt0.c.S
     main.c
 )
 
 add_executable(TheShell ${THESHELL_SOURCES})
+set_source_files_properties(crt0.c.S PROPERTIES COMPILE_FLAGS "-x assembler-with-cpp")
 target_include_directories(TheShell
     PRIVATE
         ${CMAKE_SOURCE_DIR}/Userland/Libraries/LibC/Includes

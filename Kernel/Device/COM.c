@@ -8,7 +8,7 @@ bool COM_init(uint16_t port)
 {
     IO_outb(port + COM_INTERRUPT_OFFSET, 0x00);     // Disable all interrupts.
     IO_outb(port + COM_CONTROL_OFFSET, 0x80);       // Enable DLAB (set baud rate divisor).
-    IO_outb(port + COM_DATA_OFFSET, 0x03);          // Set divisor to 3 (lo byte) 38400 baud.
+    IO_outb(port + COM_DATA_OFFSET, 0x01);          // Set divisor to 1 (lo byte) 115200 baud (matches limine.conf).
     IO_outb(port + COM_INTERRUPT_OFFSET, 0x00);     //                  (hi byte)           .
     IO_outb(port + COM_CONTROL_OFFSET, 0x03);       // 8 bits, no parity, one stop bit.
     IO_outb(port + COM_FIFO_OFFSET, 0xC7);          // Enable FIFO, clear them, with 14-byte threshold.
