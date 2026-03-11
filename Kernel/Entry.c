@@ -1,4 +1,4 @@
-#include <Multiboot2/multiboot2.h>
+#include <Boot/LimineHelper.h>
 
 #include <Device/Keyboard.h>
 #include <FileSystem/ext4.h>
@@ -12,6 +12,7 @@
 #include <Device/HPET.h>
 #include <Device/PIT.h>
 #include <Device/RTC.h>
+#include <Device/VGA.h>
 #include <Memory/PMM.h>
 #include <Memory/VMM.h>
 #include <Memory/KMem.h>
@@ -25,7 +26,6 @@
 #include <CPU/ISR.h>
 #include <CPU/FPU.h>
 #include <CPU/PCI.h>
-#include <CPU/IO.h>
 #include <CPU/x86.h>
 
 #include <stdint.h>
@@ -33,7 +33,7 @@
 #include <string.h>
 #include <stdlib.h>
 
-void read_multiboot2_info(const void*);
+__attribute__((__noreturn__)) void k_entry(void);
 
 extern void* kernel_phys_start;
 extern void* kernel_phys_end;
@@ -46,15 +46,7 @@ extern void* kernel_stack_bottom;
 static APIC_MADT_t* MADT = NULL;
 static const uint32_t BSP_TIMER_HZ = 100;
 static const uint32_t PIT_TIMER_HZ = 1000;
-static TTY_framebuffer_info_t boot_framebuffer = { 0 };
-static bool boot_framebuffer_available = false;
-static bool bootdev_hint_present = false;
-static uint32_t bootdev_biosdev = UINT32_MAX;
-static uint32_t bootdev_slice = UINT32_MAX;
-static uint32_t bootdev_part = UINT32_MAX;
-static char boot_cmdline[256] = { 0 };
-static bool boot_headless_mode = false;
-static bool boot_pci_log_mode = false;
+static uint16_t boot_tty_shadow[VGA_WIDTH * VGA_HEIGHT];
 
 #define THEOS_PSF2_FONT_PATH "/system/fonts/ter-powerline-v14n.psf"
 
@@ -80,23 +72,25 @@ static uint64_t boot_read_le64(const uint8_t* ptr)
            ((uint64_t) ptr[7] << 56);
 }
 
-static bool boot_cmdline_has_token(const char* needle)
+static bool boot_ext4_span_sectors(const ext4_fs_t* fs, uint64_t* sectors_out)
 {
-    if (!needle || needle[0] == '\0')
+    if (!fs || !sectors_out || fs->block_size == 0)
         return false;
 
-    size_t hay_len = strlen(boot_cmdline);
-    size_t needle_len = strlen(needle);
-    if (needle_len == 0 || hay_len < needle_len)
+    uint64_t block_count = (uint64_t) fs->superblock.s_blocks_count_lo;
+    if (block_count == 0)
         return false;
 
-    for (size_t i = 0; i + needle_len <= hay_len; i++)
-    {
-        if (memcmp(boot_cmdline + i, needle, needle_len) == 0)
-            return true;
-    }
+    uint64_t fs_bytes = block_count * (uint64_t) fs->block_size;
+    if (fs_bytes == 0 || (fs_bytes / (uint64_t) fs->block_size) != block_count)
+        return false;
 
-    return false;
+    uint64_t sectors = (fs_bytes + AHCI_SECTOR_SIZE - 1ULL) / AHCI_SECTOR_SIZE;
+    if (sectors == 0)
+        return false;
+
+    *sectors_out = sectors;
+    return true;
 }
 
 static size_t boot_collect_mbr_partitions(HBA_PORT_t* port,
@@ -132,6 +126,58 @@ static size_t boot_collect_mbr_partitions(HBA_PORT_t* port,
     }
 
     return count;
+}
+
+static bool boot_read_mbr_disk_signature(HBA_PORT_t* port, uint32_t* disk_id_out)
+{
+    if (!port || !disk_id_out)
+        return false;
+
+    uint8_t sector[AHCI_SECTOR_SIZE];
+    if (AHCI_sata_read(port, 0, 0, 1, sector) != 0)
+        return false;
+
+    if (sector[510] != 0x55 || sector[511] != 0xAA)
+        return false;
+
+    *disk_id_out = boot_read_le32(&sector[440]);
+    return true;
+}
+
+static void boot_log_ext4_probe_failure(HBA_PORT_t* port,
+                                        int device_index,
+                                        uint64_t lba_base,
+                                        const char* source)
+{
+    if (!port)
+        return;
+
+    uint8_t superblock[AHCI_SECTOR_SIZE * 2];
+    memset(superblock, 0, sizeof(superblock));
+
+    uint64_t super_lba = lba_base + ((uint64_t) EXT4_SUPERBLOCK_ADDR / AHCI_SECTOR_SIZE);
+    int rc = AHCI_sata_read(port,
+                            (uint32_t) super_lba,
+                            (uint32_t) (super_lba >> 32),
+                            2,
+                            superblock);
+    if (rc != 0)
+    {
+        kdebug_printf("[BOOT] ext4 probe fail dev=%d lba=0x%llX (%s) read_rc=%d\n",
+                      device_index,
+                      (unsigned long long) lba_base,
+                      source ? source : "unknown",
+                      rc);
+        return;
+    }
+
+    uint16_t magic = (uint16_t) superblock[56] | ((uint16_t) superblock[57] << 8);
+    kdebug_printf("[BOOT] ext4 probe fail dev=%d lba=0x%llX (%s) read_rc=%d magic=0x%X\n",
+                  device_index,
+                  (unsigned long long) lba_base,
+                  source ? source : "unknown",
+                  rc,
+                  magic);
 }
 
 static size_t boot_collect_gpt_partitions(HBA_PORT_t* port,
@@ -225,6 +271,7 @@ static bool boot_try_mount_ext4_on_port(ext4_fs_t* fs,
                       (unsigned long long) *lba_base_out);
         return true;
     }
+    boot_log_ext4_probe_failure(port, device_index, 0, "whole-disk");
 
     uint32_t part_index[4];
     uint32_t part_lba[4];
@@ -257,6 +304,8 @@ static bool boot_try_mount_ext4_on_port(ext4_fs_t* fs,
                               part_type[i]);
                 return true;
             }
+
+            boot_log_ext4_probe_failure(port, device_index, part_lba[i], "MBR-slice-hint");
         }
     }
 
@@ -266,7 +315,10 @@ static bool boot_try_mount_ext4_on_port(ext4_fs_t* fs,
             continue;
 
         if (!ext4_mount_lba(fs, port, part_lba[i]))
+        {
+            boot_log_ext4_probe_failure(port, device_index, part_lba[i], "MBR-slice-scan");
             continue;
+        }
 
         *lba_base_out = part_lba[i];
         kdebug_printf("[BOOT] ext4 probe ok dev=%d lba=0x%llX (MBR slice=%u type=0x%X)\n",
@@ -300,7 +352,10 @@ static bool boot_try_mount_ext4_on_port(ext4_fs_t* fs,
 
             gpt_used[i] = true;
             if (!ext4_mount_lba(fs, port, gpt_part_lba[i]))
+            {
+                boot_log_ext4_probe_failure(port, device_index, gpt_part_lba[i], "GPT-part-hint");
                 continue;
+            }
 
             *lba_base_out = gpt_part_lba[i];
             kdebug_printf("[BOOT] ext4 probe ok dev=%d lba=0x%llX (GPT part=%u)\n",
@@ -317,7 +372,10 @@ static bool boot_try_mount_ext4_on_port(ext4_fs_t* fs,
             continue;
 
         if (!ext4_mount_lba(fs, port, gpt_part_lba[i]))
+        {
+            boot_log_ext4_probe_failure(port, device_index, gpt_part_lba[i], "GPT-part-scan");
             continue;
+        }
 
         *lba_base_out = gpt_part_lba[i];
         kdebug_printf("[BOOT] ext4 probe ok dev=%d lba=0x%llX (GPT part=%u)\n",
@@ -330,53 +388,97 @@ static bool boot_try_mount_ext4_on_port(ext4_fs_t* fs,
     return false;
 }
 
-__attribute__((__noreturn__)) void k_entry(const void* mbt2_info)
+static bool boot_init_acpi_early(APIC_MADT_t** out_madt)
 {
+    if (out_madt)
+        *out_madt = NULL;
+
+    if (!LimineHelper_init_acpi_from_rsdp_if_needed())
+    {
+        kdebug_puts("[BOOT] ACPI init skipped (Limine RSDP unavailable)\n");
+        return false;
+    }
+
+    APIC_MADT_t* madt = (APIC_MADT_t*) ACPI_get_table(ACPI_APIC_SIGNATURE);
+    if (!madt)
+    {
+        kdebug_puts("[BOOT] ACPI MADT missing after Limine RSDP init\n");
+        return true;
+    }
+
+    if (out_madt)
+        *out_madt = madt;
+
+    kdebug_printf("[BOOT] ACPI MADT ready len=%u lapic=0x%X flags=0x%X\n",
+                  madt->SDT_header.length,
+                  madt->lapic_ptr,
+                  madt->flags);
+    return true;
+}
+
+__attribute__((__noreturn__)) void k_entry(void)
+{
+    uintptr_t kernel_phys_start_runtime = (uintptr_t) &kernel_phys_start;
+    uintptr_t kernel_phys_end_runtime = (uintptr_t) &kernel_phys_end;
+    uintptr_t kernel_virt_start_runtime = (uintptr_t) &kernel_virt_start;
+    uintptr_t kernel_virt_end_runtime = (uintptr_t) &kernel_virt_end;
+    TTY_framebuffer_info_t boot_framebuffer = { 0 };
+    bool boot_framebuffer_available = false;
+    bool boot_limine_mbr_disk_id_hint_present = false;
+    uint32_t boot_limine_mbr_disk_id_hint = 0;
+    bool boot_limine_slice_hint_present = false;
+    int32_t boot_limine_slice_hint = -1;
+
+    TTY_set_buffer(boot_tty_shadow);
     TTY_init();
     logger_init();
     kdebug_init();
     kdebug_puts("[BOOT] k_entry start\n");
 
-    PMM_init((uintptr_t) &kernel_phys_start,
-             (uintptr_t) &kernel_phys_end,
-             (uintptr_t) &kernel_virt_start,
-             (uintptr_t) &kernel_virt_end);
+    if (!LimineHelper_base_revision_supported())
+        panic("Booted via Limine with unsupported base revision");
+
+    LimineHelper_resolve_runtime_kernel_bases((uintptr_t) &kernel_phys_start,
+                                              (uintptr_t) &kernel_phys_end,
+                                              (uintptr_t) &kernel_virt_start,
+                                              (uintptr_t) &kernel_virt_end,
+                                              &kernel_phys_start_runtime,
+                                              &kernel_phys_end_runtime,
+                                              &kernel_virt_start_runtime,
+                                              &kernel_virt_end_runtime);
+
+    PMM_init(kernel_phys_start_runtime,
+             kernel_phys_end_runtime,
+             kernel_virt_start_runtime,
+             kernel_virt_end_runtime);
     printf("Kernel phys [0x%llX..0x%llX) virt [0x%llX..0x%llX)\n",
-           (unsigned long long) (uintptr_t) &kernel_phys_start,
-           (unsigned long long) (uintptr_t) &kernel_phys_end,
-           (unsigned long long) (uintptr_t) &kernel_virt_start,
-           (unsigned long long) (uintptr_t) &kernel_virt_end);
+           (unsigned long long) kernel_phys_start_runtime,
+           (unsigned long long) kernel_phys_end_runtime,
+           (unsigned long long) kernel_virt_start_runtime,
+           (unsigned long long) kernel_virt_end_runtime);
     kdebug_puts("[BOOT] PMM base set\n");
     
-    read_multiboot2_info(mbt2_info);
-    kdebug_puts("[BOOT] multiboot parsed\n");
-    if (boot_headless_mode)
-    {
-        TTY_set_output_enabled(false);
-        kdebug_puts("[BOOT] headless mode enabled (TTY output disabled)\n");
-    }
+    LimineHelper_read_boot_info();
+    kdebug_puts("[BOOT] limine parsed\n");
 
     VMM_map_kernel();
     kdebug_puts("[BOOT] VMM kernel map done\n");
     // VMM_map_userland_stack();
-
-    MADT = (APIC_MADT_t*) ACPI_get_table(ACPI_APIC_SIGNATURE);
-    kdebug_puts("[BOOT] ACPI MADT fetched\n");
-    if (ACPI_power_init())
-        kdebug_puts("[BOOT] ACPI power states initialized\n");
-    else
-        kdebug_puts("[BOOT] ACPI power states unavailable\n");
 
     VMM_hardware_mapping();
     VMM_load_cr3();
     kdebug_puts("[BOOT] CR3 loaded\n");
     GDT_load_kernel_segments();
     kdebug_puts("[BOOT] GDT reloaded\n");
+    LimineHelper_promote_bootloader_reclaimable();
 
-    if (boot_framebuffer_available)
-        kdebug_puts("[BOOT] framebuffer detected, switch deferred until PSF2 load\n");
+    bool acpi_ready = boot_init_acpi_early(&MADT);
+    if (acpi_ready && ACPI_power_init())
+        kdebug_puts("[BOOT] ACPI power states initialized (Limine RSDP path)\n");
+    else if (acpi_ready)
+        kdebug_puts("[BOOT] ACPI power states unavailable (Limine RSDP path)\n");
     else
-        kdebug_puts("[BOOT] framebuffer unavailable\n");
+        kdebug_puts("[BOOT] ACPI power init skipped (no Limine RSDP)\n");
 
     IDT_init();
     kdebug_puts("[BOOT] IDT loaded\n");
@@ -388,7 +490,20 @@ __attribute__((__noreturn__)) void k_entry(const void* mbt2_info)
     }
     kdebug_puts("[BOOT] FPU init done\n");
 
-    if (APIC_check())
+    boot_framebuffer_available = LimineHelper_get_framebuffer(&boot_framebuffer);
+    boot_limine_mbr_disk_id_hint_present = LimineHelper_get_mbr_disk_id_hint(&boot_limine_mbr_disk_id_hint);
+    boot_limine_slice_hint_present = LimineHelper_get_slice_hint(&boot_limine_slice_hint);
+
+    if (boot_framebuffer_available)
+        kdebug_puts("[BOOT] framebuffer detected, switch deferred until PSF2 load\n");
+    else
+        kdebug_puts("[BOOT] framebuffer unavailable\n");
+
+    if (!MADT)
+    {
+        kdebug_puts("[BOOT] APIC skipped (MADT unavailable from Limine ACPI)\n");
+    }
+    else if (APIC_check())
     {
         kdebug_puts("[BOOT] APIC supported\n");
         PIC_disable();
@@ -407,6 +522,7 @@ __attribute__((__noreturn__)) void k_entry(const void* mbt2_info)
         kdebug_puts("[BOOT] APIC skipped (PIC mode)\n");
     }
 
+    kdebug_puts("[BOOT] PCI scan start (ACPI/RSDP/MADT already resolved via Limine)\n");
     PCI_init();
     kdebug_puts("[BOOT] PCI scanned\n");
 
@@ -414,53 +530,87 @@ __attribute__((__noreturn__)) void k_entry(const void* mbt2_info)
     kdebug_puts("[BOOT] keyboard init\n");
     Syscall_init();
     kdebug_puts("[BOOT] syscall init\n");
+    AHCI_write_guard_disallow_all();
 
     static ext4_fs_t fs;
     HBA_PORT_t* root_port = NULL;
     uint64_t root_lba_base = 0;
     int root_device_index = -1;
+    bool root_from_limine_hint = false;
     int device_count = AHCI_get_device_count();
 
     if (device_count > 0)
     {
-        int ordered_devices[AHCI_MAX_SLOT];
-        int ordered_count = 0;
         int preferred_device = -1;
+        bool preferred_is_limine_hint = false;
+        bool preferred_mount_attempted = false;
 
-        if (bootdev_hint_present && bootdev_biosdev >= 0x80)
+        if (boot_limine_mbr_disk_id_hint_present)
         {
-            uint32_t candidate = bootdev_biosdev - 0x80;
-            if (candidate < (uint32_t) device_count)
-                preferred_device = (int) candidate;
+            kdebug_printf("[BOOT] Limine root hint mbr_disk_id=0x%X slice_hint=%d\n",
+                          boot_limine_mbr_disk_id_hint,
+                          boot_limine_slice_hint_present ? (int) boot_limine_slice_hint : -1);
+
+            for (int i = 0; i < device_count; i++)
+            {
+                HBA_PORT_t* candidate = AHCI_get_device(i);
+                uint32_t disk_sig = 0;
+                if (!candidate || !boot_read_mbr_disk_signature(candidate, &disk_sig))
+                    continue;
+                if (disk_sig != boot_limine_mbr_disk_id_hint)
+                    continue;
+                preferred_device = i;
+                preferred_is_limine_hint = true;
+                break;
+            }
+
+            if (preferred_device >= 0)
+            {
+                HBA_PORT_t* preferred_port = AHCI_get_device(preferred_device);
+                int32_t slice_hint = boot_limine_slice_hint_present ? boot_limine_slice_hint : -1;
+                preferred_mount_attempted = true;
+                kdebug_printf("[BOOT] Limine root hint matched AHCI dev=%d, probing preferred device first\n",
+                              preferred_device);
+
+                if (preferred_port &&
+                    boot_try_mount_ext4_on_port(&fs, preferred_port, preferred_device, slice_hint, &root_lba_base))
+                {
+                    root_port = preferred_port;
+                    root_device_index = preferred_device;
+                    root_from_limine_hint = true;
+                }
+                else
+                {
+                    kdebug_printf("[BOOT] Limine preferred dev=%d mount failed, fallback probing enabled\n",
+                                  preferred_device);
+                }
+            }
+            else
+            {
+                kdebug_printf("[BOOT] Limine mbr_disk_id hint 0x%X not found on AHCI devices, fallback probing all devices\n",
+                              boot_limine_mbr_disk_id_hint);
+            }
         }
 
-        if (preferred_device >= 0)
-            ordered_devices[ordered_count++] = preferred_device;
-
-        for (int i = 0; i < device_count && ordered_count < AHCI_MAX_SLOT; i++)
+        if (!root_port)
         {
-            if (i == preferred_device)
-                continue;
-            ordered_devices[ordered_count++] = i;
-        }
+            for (int dev_index = 0; dev_index < device_count; dev_index++)
+            {
+                if (preferred_mount_attempted && dev_index == preferred_device)
+                    continue;
 
-        for (int i = 0; i < ordered_count; i++)
-        {
-            int dev_index = ordered_devices[i];
-            HBA_PORT_t* candidate = AHCI_get_device(dev_index);
-            if (!candidate)
-                continue;
+                HBA_PORT_t* candidate = AHCI_get_device(dev_index);
+                if (!candidate)
+                    continue;
 
-            int32_t slice_hint = -1;
-            if (bootdev_hint_present && dev_index == preferred_device && bootdev_slice != UINT32_MAX)
-                slice_hint = (int32_t) bootdev_slice;
+                if (!boot_try_mount_ext4_on_port(&fs, candidate, dev_index, -1, &root_lba_base))
+                    continue;
 
-            if (!boot_try_mount_ext4_on_port(&fs, candidate, dev_index, slice_hint, &root_lba_base))
-                continue;
-
-            root_port = candidate;
-            root_device_index = dev_index;
-            break;
+                root_port = candidate;
+                root_device_index = dev_index;
+                root_from_limine_hint = (preferred_is_limine_hint && dev_index == preferred_device);
+                break;
+            }
         }
     }
 
@@ -470,25 +620,10 @@ __attribute__((__noreturn__)) void k_entry(const void* mbt2_info)
         kdebug_printf("[BOOT] ext4 mounted dev=%d lba_base=0x%llX%s\n",
                       root_device_index,
                       (unsigned long long) root_lba_base,
-                      (bootdev_hint_present && root_device_index >= 0 &&
-                       bootdev_biosdev >= 0x80 &&
-                       (uint32_t) root_device_index == (bootdev_biosdev - 0x80))
-                          ? " source=bootdev"
-                          : "");
-        kdebug_file_sink_ready();
-        if (boot_pci_log_mode)
-        {
-            size_t pci_log_size = 0;
-            const char* pci_log = PCI_get_log_buffer(&pci_log_size);
-            if (pci_log && pci_log_size > 0 &&
-                ext4_create_file(&fs, "pci.log", (const uint8_t*) pci_log, pci_log_size))
-            {
-                kdebug_printf("[BOOT] pci.log written (%llu bytes)\n",
-                              (unsigned long long) pci_log_size);
-            }
-            else
-                kdebug_puts("[BOOT] pci.log write failed\n");
-        }
+                      (root_from_limine_hint && root_device_index >= 0)
+                          ? " source=limine-file"
+                          : ""
+                      );
 
         bool psf_loaded = false;
         uint8_t* font_data = NULL;
@@ -525,9 +660,9 @@ __attribute__((__noreturn__)) void k_entry(const void* mbt2_info)
     else
     {
         if (device_count <= 0)
-            printf("AHCI: no SATA device detected\n");
+            printf("AHCI: no block device detected\n");
         else
-            printf("Unable to mount ext4 filesystem on AHCI devices\n");
+            printf("Unable to mount ext4 filesystem on AHCI block devices\n");
     }
 
     task_init((uintptr_t) &kernel_stack_top);
@@ -632,6 +767,25 @@ __attribute__((__noreturn__)) void k_entry(const void* mbt2_info)
            (unsigned) rtc.minutes,
            (unsigned) rtc.seconds);
 
+    if (!root_port)
+        panic("Missing root filesystem with /bin/TheApp");
+
+    uint8_t* app_probe_data = NULL;
+    size_t app_probe_size = 0;
+    if (!ext4_read_file(&fs, "/bin/TheApp", &app_probe_data, &app_probe_size))
+        panic("/bin/TheApp missing on mounted root filesystem");
+
+    kfree(app_probe_data);
+
+    uint64_t root_fs_sectors = 0;
+    if (!boot_ext4_span_sectors(&fs, &root_fs_sectors))
+        panic("Unable to determine root ext4 span");
+
+    if (!AHCI_write_guard_allow_region(root_port, root_lba_base, root_fs_sectors))
+        panic("Unable to arm AHCI write guard for root filesystem");
+
+    kdebug_file_sink_ready();
+
     if (!UserMode_run_elf("/bin/TheApp"))
         kdebug_puts("[USER] launch failed, staying in kernel idle loop\n");
 
@@ -639,122 +793,4 @@ __attribute__((__noreturn__)) void k_entry(const void* mbt2_info)
         __asm__ __volatile__("sti\nhlt");
 
     __builtin_unreachable();
-}
-
-void read_multiboot2_info(const void* mbt2_info)
-{
-    struct multiboot_tag *tag;
-    unsigned size;
-
-    size = *(unsigned *) mbt2_info;
-    for (tag = (struct multiboot_tag *) (mbt2_info + 8);
-       tag->type != MULTIBOOT_TAG_TYPE_END;
-       tag = (struct multiboot_tag *) ((multiboot_uint8_t *) tag 
-                                       + ((tag->size + 7) & ~7)))
-    {
-        switch (tag->type)
-        {
-            case MULTIBOOT_TAG_TYPE_CMDLINE:
-            {
-                struct multiboot_tag_string* cmd = (struct multiboot_tag_string*) tag;
-                size_t len = strlen(cmd->string);
-                if (len >= sizeof(boot_cmdline))
-                    len = sizeof(boot_cmdline) - 1U;
-                memcpy(boot_cmdline, cmd->string, len);
-                boot_cmdline[len] = '\0';
-
-                if (boot_cmdline_has_token("theos.headless=1"))
-                    boot_headless_mode = true;
-                if (boot_cmdline_has_token("theos.pci_log=1"))
-                    boot_pci_log_mode = true;
-
-                kdebug_printf("[BOOT] MB2 cmdline: %s\n", boot_cmdline);
-                break;
-            }
-            case MULTIBOOT_TAG_TYPE_MMAP:
-                multiboot_memory_map_t* mmap;
-      
-                for (mmap = ((struct multiboot_tag_mmap*) tag)->entries; (multiboot_uint8_t*) mmap < (multiboot_uint8_t*) tag + tag->size;
-                    mmap = (multiboot_memory_map_t*) ((unsigned long) mmap + ((struct multiboot_tag_mmap*) tag)->entry_size))
-                {
-                    if (mmap->type == MULTIBOOT_MEMORY_AVAILABLE)
-                    {
-                        printf("MMAP avaliable found at addr 0x%llX with size of 0x%llX !\n", mmap->addr, mmap->len);
-                        PMM_init_region(mmap->addr, mmap->len);
-                    }   
-                }
-                break;
-            case MULTIBOOT_TAG_TYPE_BOOTDEV:
-            {
-                struct multiboot_tag_bootdev* bootdev = (struct multiboot_tag_bootdev*) tag;
-                bootdev_hint_present = true;
-                bootdev_biosdev = bootdev->biosdev;
-                bootdev_slice = bootdev->slice;
-                bootdev_part = bootdev->part;
-                kdebug_printf("[BOOT] MB2 bootdev biosdev=0x%X slice=%u part=%u\n",
-                              bootdev_biosdev,
-                              bootdev_slice,
-                              bootdev_part);
-                break;
-            }
-            case MULTIBOOT_TAG_TYPE_ACPI_OLD:
-                struct multiboot_tag_old_acpi* old_acpi = (struct multiboot_tag_old_acpi*) tag;
-                if (ACPI_RSDP_old_check(old_acpi->rsdp))
-                    ACPI_init_RSDT((ACPI_RSDP_descriptor10_t*) old_acpi->rsdp);
-                break;
-            case MULTIBOOT_TAG_TYPE_ACPI_NEW:
-                struct multiboot_tag_new_acpi* new_acpi = (struct multiboot_tag_new_acpi*) tag;
-                if (ACPI_RSDP_new_check(new_acpi->rsdp))
-                    ACPI_init_XSDT((ACPI_RSDP_descriptor20_t*) new_acpi->rsdp);
-                break;
-            case MULTIBOOT_TAG_TYPE_FRAMEBUFFER:
-            {
-                struct multiboot_tag_framebuffer* fb = (struct multiboot_tag_framebuffer*) tag;
-                struct multiboot_tag_framebuffer_common* common = &fb->common;
-                boot_framebuffer_available = false;
-
-                if (common->framebuffer_type == MULTIBOOT_FRAMEBUFFER_TYPE_RGB &&
-                    common->framebuffer_width != 0 &&
-                    common->framebuffer_height != 0 &&
-                    common->framebuffer_pitch != 0)
-                {
-                    boot_framebuffer.phys_addr = common->framebuffer_addr;
-                    boot_framebuffer.pitch = common->framebuffer_pitch;
-                    boot_framebuffer.width = common->framebuffer_width;
-                    boot_framebuffer.height = common->framebuffer_height;
-                    boot_framebuffer.bpp = common->framebuffer_bpp;
-                    boot_framebuffer.type = common->framebuffer_type;
-                    boot_framebuffer.red_field_position = fb->framebuffer_red_field_position;
-                    boot_framebuffer.red_mask_size = fb->framebuffer_red_mask_size;
-                    boot_framebuffer.green_field_position = fb->framebuffer_green_field_position;
-                    boot_framebuffer.green_mask_size = fb->framebuffer_green_mask_size;
-                    boot_framebuffer.blue_field_position = fb->framebuffer_blue_field_position;
-                    boot_framebuffer.blue_mask_size = fb->framebuffer_blue_mask_size;
-                    boot_framebuffer_available = true;
-
-                    kdebug_printf("[BOOT] MB2 framebuffer addr=0x%llX %ux%u pitch=%u bpp=%u rgb=(r%u:%u g%u:%u b%u:%u)\n",
-                                  (unsigned long long) boot_framebuffer.phys_addr,
-                                  (unsigned int) boot_framebuffer.width,
-                                  (unsigned int) boot_framebuffer.height,
-                                  (unsigned int) boot_framebuffer.pitch,
-                                  (unsigned int) boot_framebuffer.bpp,
-                                  (unsigned int) boot_framebuffer.red_field_position,
-                                  (unsigned int) boot_framebuffer.red_mask_size,
-                                  (unsigned int) boot_framebuffer.green_field_position,
-                                  (unsigned int) boot_framebuffer.green_mask_size,
-                                  (unsigned int) boot_framebuffer.blue_field_position,
-                                  (unsigned int) boot_framebuffer.blue_mask_size);
-                }
-                else
-                {
-                    kdebug_printf("[BOOT] MB2 framebuffer ignored type=%u width=%u height=%u pitch=%u\n",
-                                  (unsigned int) common->framebuffer_type,
-                                  (unsigned int) common->framebuffer_width,
-                                  (unsigned int) common->framebuffer_height,
-                                  (unsigned int) common->framebuffer_pitch);
-                }
-                break;
-            }
-        }
-    }
 }

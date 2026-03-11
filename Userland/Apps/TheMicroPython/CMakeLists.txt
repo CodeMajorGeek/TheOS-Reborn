@@ -21,7 +21,7 @@ add_custom_target(TheMicroPythonApp ALL
         ${MICROPY_PORT_DIR}/mpconfigport.h
         ${MICROPY_PORT_DIR}/mphalport.h
         ${MICROPY_PORT_DIR}/qstrdefsport.h
-        ${MICROPY_PORT_DIR}/crt0.S
+        ${MICROPY_PORT_DIR}/crt0.c.S
         ${MICROPY_PORT_DIR}/linker.ld
         ${MICROPY_PORT_DIR}/main.c
         ${MICROPY_PORT_DIR}/theos_mphal.c

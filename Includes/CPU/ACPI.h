@@ -1,8 +1,6 @@
 #ifndef _ACPI_H
 #define _ACPI_H
 
-#include <Multiboot2/multiboot2.h>
-
 #include <stdbool.h>
 #include <stdint.h>
 
@@ -166,8 +164,8 @@ typedef struct ACPI_FADT
     ACPI_generic_address_t sleep_status_reg;
 } __attribute__((__packed__)) ACPI_FADT_t;
 
-bool ACPI_RSDP_old_check(multiboot_uint8_t* rsdt);
-bool ACPI_RSDP_new_check(multiboot_uint8_t* rsdt);
+bool ACPI_RSDP_old_check(uint8_t* rsdt);
+bool ACPI_RSDP_new_check(uint8_t* rsdt);
 bool ACPI_SDT_check(ACPI_SDT_header_t* sdt_header);
 
 void ACPI_init_RSDT(ACPI_RSDP_descriptor10_t* desc);

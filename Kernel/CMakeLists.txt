@@ -1,6 +1,6 @@
 set(KERNEL_ARCH x86_64)
 option(THEOS_ENABLE_KDEBUG "Enable serial KDEBUG output and printf mirroring" ON)
-option(KERNEL_DEBUG_LOG_SERIAL "Enable kernel debug log sink to serial COM1" OFF)
+option(KERNEL_DEBUG_LOG_SERIAL "Enable kernel debug log sink to serial COM1" ON)
 option(KERNEL_DEBUG_LOG_FILE "Enable kernel debug log sink to ext4 file (RAM buffered until FS ready)" ON)
 option(THEOS_ENABLE_SCHED_TESTS "Enable SMP scheduler stress/balance/pathological tests" OFF)
 option(THEOS_ENABLE_X2APIC_SMP_EXPERIMENTAL "Force x2APIC on SMP systems (experimental)." OFF)
@@ -15,7 +15,11 @@ message(STATUS "Kernel: THEOS_ENABLE_X2APIC_SMP_EXPERIMENTAL=${THEOS_ENABLE_X2AP
 
 set(KERNEL_BOOT_SOURCES
     Boot/Bootloader.S
+    Boot/LimineEntry.c.S
+    Boot/LimineHelper.c
 )
+
+set_source_files_properties(Boot/LimineEntry.c.S PROPERTIES COMPILE_FLAGS "-x assembler-with-cpp")
 
 set(KERNEL_CPU_SOURCES
     CPU/IDT.c
@@ -100,9 +104,11 @@ set(SOURCES
     ${LIBC_SOURCES}
 )
 
-configure_file(${CMAKE_CURRENT_SOURCE_DIR}/Boot/grub.cfg ${CMAKE_BINARY_DIR}/Kernel/Boot/grub.cfg COPYONLY)
-
-add_link_options(LINKER:-T ${CMAKE_CURRENT_SOURCE_DIR}/kernel.ld -nostdlib -n)
+add_link_options(
+    LINKER:-T,${CMAKE_CURRENT_SOURCE_DIR}/kernel.ld
+    LINKER:-z,max-page-size=0x1000
+    -nostdlib
+)
 
 add_compile_definitions(__THEOS_KERNEL)
 add_compile_definitions(__USE_QEMU)

@@ -13,6 +13,10 @@
 #define FIS_TYPE_REG_H2D        0x27
 #define ATA_CMD_READ_DMA_EX     0x25
 #define ATA_CMD_WRITE_DMA_EXT   0x35
+#define ATA_CMD_PACKET          0xA0
+#define ATA_CMD_IDENTIFY        0xEC
+#define ATAPI_CMD_READ12        0xA8
+#define AHCI_ATAPI_SECTOR_SIZE  0x800       // 2048 bytes (CD/DVD logical block size).
 
 #define ATA_DEV_BUSY            0x80
 #define ATA_DEV_DRQ             0x08
@@ -172,6 +176,14 @@ typedef struct HBA_CMD_TBL
     HBA_PRDT_ENTRY_t prdt_entry[1]; // Physical region descriptor table entries, 0 ~ 65535.
 } HBA_CMD_TBL_t;
 
+typedef struct AHCI_cmd_context
+{
+    HBA_CMD_HEADER_t* cmd_header;
+    HBA_CMD_TBL_t* cmd_tbl;
+    uint32_t slot_mask;
+    uint32_t port_index;
+} AHCI_cmd_context_t;
+
 void AHCI_try_setup_device(uint16_t bus, uint32_t slot, uint16_t function, uint16_t vendor, uint16_t device);
 void AHCI_try_setup_known_device(char* name, HBA_MEM_t* AHCI_base, uint16_t bus, uint16_t slot, uint16_t func);
 
@@ -190,5 +202,7 @@ HBA_PORT_t* AHCI_get_device(int index);
 uint8_t AHCI_get_irq_mode(void);
 uint64_t AHCI_get_irq_count(void);
 const char* AHCI_get_irq_mode_name(void);
+void AHCI_write_guard_disallow_all(void);
+bool AHCI_write_guard_allow_region(HBA_PORT_t* port, uint64_t lba_start, uint64_t sector_count);
 
 #endif

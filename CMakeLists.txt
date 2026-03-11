@@ -10,13 +10,14 @@ enable_testing()
 set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 
 set(THEOS_ARCH "x86_64" CACHE STRING "Target architecture for TheOS.")
-option(THEOS_HARDWARE_TEST_PROFILE "Enable hardware-like defaults (no serial debug logs, file logging on ext4, ISO-embedded rootfs)." ON)
+option(THEOS_HARDWARE_TEST_PROFILE "Enable hardware-like defaults (no serial debug logs, file logging on ext4, ISO-embedded rootfs)." OFF)
 option(THEOS_QEMU_NUMA_DEFAULT "Enable QEMU NUMA by default for the run target." ON)
 option(THEOS_KERNEL_FS_DISK_IMG "Use disk.img as kernel filesystem in run target. OFF uses filesystem embedded in TheOS.iso." OFF)
 option(THEOS_ENABLE_KVM "Enable KVM acceleration for the run target." ON)
-option(THEOS_RUN_SERIAL_CONSOLE "Enable QEMU serial console wiring for run target." OFF)
+option(THEOS_RUN_SERIAL_CONSOLE "Enable QEMU serial console wiring for run target." ON)
 option(THEOS_RUN_GDB_STUB "Enable QEMU GDB stub (-s) for run target." OFF)
 option(THEOS_RUN_TELNET_MONITOR "Enable QEMU telnet monitor on :45454 for run target." OFF)
+option(THEOS_AUTO_PULL_SUBMODULES "Automatically update required submodules (EasyArgs) during configure." ON)
 
 set(CMAKE_C_STANDARD 11)
 set(CMAKE_C_STANDARD_REQUIRED OFF)
@@ -36,6 +37,35 @@ set(CMAKE_ASM_COMPILER ${TOOLCHAIN_PREFIX}gcc)
 set(CMAKE_AR ${TOOLCHAIN_PREFIX}ar)
 
 set(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} -msoft-float -O -fno-stack-protector -ffreestanding -nostdlib -nostdinc -static")
+
+if(THEOS_AUTO_PULL_SUBMODULES)
+	find_package(Git QUIET)
+	if(GIT_FOUND AND EXISTS "${CMAKE_SOURCE_DIR}/.git")
+		set(THEOS_REQUIRED_SUBMODULES
+			Userland/Libraries/EasyArgs
+		)
+		message(STATUS "Auto-updating submodules: ${THEOS_REQUIRED_SUBMODULES}")
+		execute_process(
+			COMMAND ${GIT_EXECUTABLE} submodule update --init ${THEOS_REQUIRED_SUBMODULES}
+			WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}
+			RESULT_VARIABLE THEOS_SUBMODULE_INIT_RC
+		)
+		if(NOT THEOS_SUBMODULE_INIT_RC EQUAL 0)
+			message(FATAL_ERROR "Failed to initialize required submodules: ${THEOS_REQUIRED_SUBMODULES}")
+		endif()
+
+		execute_process(
+			COMMAND ${GIT_EXECUTABLE} submodule update --remote --checkout ${THEOS_REQUIRED_SUBMODULES}
+			WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}
+			RESULT_VARIABLE THEOS_SUBMODULE_PULL_RC
+		)
+		if(NOT THEOS_SUBMODULE_PULL_RC EQUAL 0)
+			message(WARNING "Automatic submodule pull failed; continuing with current checked-out revisions.")
+		endif()
+	else()
+		message(STATUS "Skipping auto submodule pull (git unavailable or source tree is not a git checkout).")
+	endif()
+endif()
 
 set(THEOS_BOOT_FROM_ISO_DISK_ARG "1")
 set(THEOS_EMBED_DISK_IN_ISO_ARG "1")
@@ -63,12 +93,15 @@ endif()
 
 add_custom_target(iso
 	COMMAND chmod +x ${CMAKE_SOURCE_DIR}/Meta/iso.sh
-	COMMAND ${CMAKE_COMMAND} -E env THEOS_EMBED_DISK_IN_ISO=${THEOS_EMBED_DISK_IN_ISO_ARG} ${CMAKE_SOURCE_DIR}/Meta/iso.sh
+	COMMAND ${CMAKE_COMMAND} -E env
+		THEOS_EMBED_DISK_IN_ISO=${THEOS_EMBED_DISK_IN_ISO_ARG}
+		THEOS_ISO_NAME=TheOS.iso
+		${CMAKE_SOURCE_DIR}/Meta/iso.sh
 	USES_TERMINAL
 )
 
 add_custom_target(run
-	DEPENDS iso
+	DEPENDS iso create-disk
 	COMMAND chmod +x ${CMAKE_SOURCE_DIR}/Meta/run.sh
 	COMMAND ${CMAKE_COMMAND} -E env
 		THEOS_QEMU_NUMA=$<IF:$<BOOL:${THEOS_QEMU_NUMA_DEFAULT}>,1,0>

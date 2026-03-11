@@ -11,5 +11,6 @@
 #define SATA_IO_SUCCESS         0
 #define SATA_IO_ERROR_NO_SLOT   3
 #define SATA_IO_ERROR_HUNG_PORT 4
+#define SATA_IO_ERROR_UNSUPPORTED 5
 
 #endif

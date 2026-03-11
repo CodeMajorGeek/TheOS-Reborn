@@ -12,7 +12,7 @@
 
 void SMP_ap_entry(uintptr_t handoff_phys)
 {
-    volatile SMP_handoff_t* handoff = (volatile SMP_handoff_t*) P2V(handoff_phys);
+    volatile SMP_handoff_t* handoff = (volatile SMP_handoff_t*) handoff_phys;
 
     cli();
 

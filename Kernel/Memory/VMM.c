@@ -13,8 +13,6 @@
 
 _Static_assert(((VMM_HHDM_BASE >> 39) & 0x1FFULL) == VMM_HHDM_PML4_INDEX,
                "VMM layout mismatch: HHDM base and PML4 index disagree");
-_Static_assert(VMM_HHDM_BASE == VMM_KERNEL_SPACE_MIN,
-               "VMM layout mismatch: kernel space min must match HHDM base");
 _Static_assert(VMM_HHDM_BASE < VMM_MMIO_BASE,
                "VMM layout mismatch: HHDM must be below MMIO window");
 _Static_assert(VMM_MMIO_BASE < VMM_KERNEL_VIRT_BASE,
@@ -22,6 +20,7 @@ _Static_assert(VMM_MMIO_BASE < VMM_KERNEL_VIRT_BASE,
 
 static PML4_t* VMM_PML4 = NULL;
 static uintptr_t VMM_PML4_phys = 0;
+static uintptr_t VMM_hhdm_base = VMM_HHDM_BASE;
 
 static uintptr_t VMM_VGA_virt = 0;
 static uintptr_t VMM_AHCI_virt = 0;
@@ -94,6 +93,49 @@ void VMM_enable_nx_current_cpu(void)
 
 static uintptr_t VMM_hhdm_to_phys(uintptr_t virt);
 static uintptr_t VMM_phys_to_hhdm(uintptr_t phys);
+
+uintptr_t VMM_get_hhdm_base(void)
+{
+    return VMM_hhdm_base;
+}
+
+void VMM_set_hhdm_base(uintptr_t hhdm_base)
+{
+    if ((hhdm_base & ((uintptr_t) PHYS_PAGE_SIZE - 1U)) != 0)
+        panic("VMM: HHDM base must be page-aligned");
+
+    uintptr_t canonical = canonical_address(hhdm_base);
+    if (canonical != hhdm_base)
+        panic("VMM: HHDM base must be canonical");
+
+    if (hhdm_base < 0xFFFF800000000000ULL)
+        panic("VMM: HHDM base must be in higher-half kernel space");
+
+    if (hhdm_base >= VMM_MMIO_BASE)
+        panic("VMM: HHDM base overlaps MMIO window");
+
+    if (VMM_hhdm_base == hhdm_base)
+        return;
+
+    if (VMM_cr3_loaded)
+        panic("VMM: cannot change HHDM base after CR3 load");
+
+    VMM_hhdm_base = hhdm_base;
+    kdebug_printf("[VMM] HHDM base set to 0x%llX\n", (unsigned long long) VMM_hhdm_base);
+}
+
+uintptr_t VMM_hhdm_to_phys_addr(uintptr_t virt)
+{
+    if (virt < VMM_hhdm_base)
+        panic("VMM: V2P address below HHDM base");
+
+    return virt - VMM_hhdm_base;
+}
+
+uintptr_t VMM_phys_to_hhdm_addr(uintptr_t phys)
+{
+    return VMM_hhdm_base + phys;
+}
 
 static bool VMM_is_mmio_window_addr(uintptr_t virt)
 {
@@ -168,12 +210,12 @@ static PT_t* VMM_get_pt(uint16_t pml4_index, uint16_t pdpt_index, uint16_t pdt_i
 
 static uintptr_t VMM_hhdm_to_phys(uintptr_t virt)
 {
-    return virt - VMM_HHDM_BASE;
+    return VMM_hhdm_to_phys_addr(virt);
 }
 
 static uintptr_t VMM_phys_to_hhdm(uintptr_t phys)
 {
-    return VMM_HHDM_BASE + phys;
+    return VMM_phys_to_hhdm_addr(phys);
 }
 
 static void* VMM_alloc_table(void)
@@ -382,32 +424,66 @@ void VMM_map_kernel(void)
                   (unsigned long long) (kernel_virt_start + (kernel_phys_end - kernel_phys_start)),
                   (unsigned long long) kernel_pages);
 
-    PMM_region_t* regions = PMM_get_regions();
     uint64_t hhdm_total_pages = 0;
-    for (int i = 0; i < PMM_get_num_regions(); i++)
+    const PMM_boot_entry_t* boot_entries = PMM_get_boot_entries();
+    int boot_entry_count = PMM_get_boot_entry_count();
+    if (boot_entry_count > 0)
     {
-        PMM_region_t region = regions[i];
-        uint64_t region_pages = 0;
-        for (uintptr_t phys = region.addr_start; phys < region.addr_end; phys += PHYS_PAGE_SIZE)
+        for (int i = 0; i < boot_entry_count; i++)
         {
-            VMM_map_page(VMM_phys_to_hhdm(phys), phys);
-            region_pages++;
+            PMM_boot_entry_t entry = boot_entries[i];
+            if ((entry.flags & PMM_BOOT_ENTRY_HHDM_MAP) == 0)
+                continue;
+
+            uint64_t entry_pages = 0;
+            for (uintptr_t phys = entry.addr_start; phys < entry.addr_end; phys += PHYS_PAGE_SIZE)
+            {
+                VMM_map_page(VMM_phys_to_hhdm(phys), phys);
+                entry_pages++;
+            }
+
+            hhdm_total_pages += entry_pages;
+            if (entry_pages != 0)
+            {
+                kdebug_printf("[VMM] HHDM map boot[%d] type=%llu phys=[0x%llX..0x%llX) virt=[0x%llX..0x%llX) pages=%llu\n",
+                              i,
+                              (unsigned long long) entry.type,
+                              (unsigned long long) entry.addr_start,
+                              (unsigned long long) entry.addr_end,
+                              (unsigned long long) VMM_phys_to_hhdm(entry.addr_start),
+                              (unsigned long long) VMM_phys_to_hhdm(entry.addr_end),
+                              (unsigned long long) entry_pages);
+            }
         }
-        hhdm_total_pages += region_pages;
-        if (region_pages != 0)
+    }
+    else
+    {
+        PMM_region_t* regions = PMM_get_regions();
+        for (int i = 0; i < PMM_get_num_regions(); i++)
         {
-            kdebug_printf("[VMM] HHDM map region[%d] phys=[0x%llX..0x%llX) virt=[0x%llX..0x%llX) pages=%llu\n",
-                          i,
-                          (unsigned long long) region.addr_start,
-                          (unsigned long long) region.addr_end,
-                          (unsigned long long) VMM_phys_to_hhdm(region.addr_start),
-                          (unsigned long long) VMM_phys_to_hhdm(region.addr_end),
-                          (unsigned long long) region_pages);
+            PMM_region_t region = regions[i];
+            uint64_t region_pages = 0;
+            for (uintptr_t phys = region.addr_start; phys < region.addr_end; phys += PHYS_PAGE_SIZE)
+            {
+                VMM_map_page(VMM_phys_to_hhdm(phys), phys);
+                region_pages++;
+            }
+            hhdm_total_pages += region_pages;
+            if (region_pages != 0)
+            {
+                kdebug_printf("[VMM] HHDM fallback usable[%d] phys=[0x%llX..0x%llX) virt=[0x%llX..0x%llX) pages=%llu\n",
+                              i,
+                              (unsigned long long) region.addr_start,
+                              (unsigned long long) region.addr_end,
+                              (unsigned long long) VMM_phys_to_hhdm(region.addr_start),
+                              (unsigned long long) VMM_phys_to_hhdm(region.addr_end),
+                              (unsigned long long) region_pages);
+            }
         }
     }
     kdebug_printf("[VMM] HHDM map total pages=%llu base=0x%llX\n",
                   (unsigned long long) hhdm_total_pages,
-                  (unsigned long long) VMM_HHDM_BASE);
+                  (unsigned long long) VMM_hhdm_base);
 
     VMM_map_startup_identity();
 
@@ -470,7 +546,7 @@ void VMM_map_page_flags(uintptr_t virt, uintptr_t phys, uintptr_t flags)
     PT_t* PT;
     bool is_user_mapping = (flags & USER_MODE) != 0;
     bool no_execute = (flags & NO_EXECUTE) != 0;
-    if (is_user_mapping && virt >= VMM_KERNEL_SPACE_MIN)
+    if (is_user_mapping && virt >= VMM_hhdm_base)
         panic("VMM: user mapping requested in kernel higher-half");
 
     uintptr_t cache_flags = flags & (WRITE_THROUGH | CACHE_DISABLE);

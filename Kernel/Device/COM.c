@@ -8,7 +8,7 @@ bool COM_init(uint16_t port)
 {
     IO_outb(port + COM_INTERRUPT_OFFSET, 0x00);     // Disable all interrupts.
     IO_outb(port + COM_CONTROL_OFFSET, 0x80);       // Enable DLAB (set baud rate divisor).
-    IO_outb(port + COM_DATA_OFFSET, 0x03);          // Set divisor to 3 (lo byte) 38400 baud.
+    IO_outb(port + COM_DATA_OFFSET, 0x01);          // Set divisor to 1 (lo byte) 115200 baud (matches limine.conf).
     IO_outb(port + COM_INTERRUPT_OFFSET, 0x00);     //                  (hi byte)           .
     IO_outb(port + COM_CONTROL_OFFSET, 0x03);       // 8 bits, no parity, one stop bit.
     IO_outb(port + COM_FIFO_OFFSET, 0xC7);          // Enable FIFO, clear them, with 14-byte threshold.
@@ -18,8 +18,12 @@ bool COM_init(uint16_t port)
     IO_outb(port + COM_MODEM_CTRL_OFFSET, 0x1E);    // Set in loopback mode to test the serial chip.
     IO_outb(port + COM_DATA_OFFSET, TEST_LOOPBACK_BYTE);
 
-    if (COM_read(port) != TEST_LOOPBACK_BYTE)
-        return false;
+    /*
+     * Some virtual UART implementations (notably on certain VirtualBox setups)
+     * do not emulate loopback exactly. Keep a best-effort serial path instead
+     * of treating this as fatal.
+     */
+    (void) COM_read(port);
 
     // If serial is not faulty set it in normal operation mode
     // (not-loopback with IRQs enabled and OUT#1 and OUT#2 bits enabled)
@@ -35,7 +39,12 @@ bool COM_transmit_empty(uint16_t port)
 
 void COM_putc(uint16_t port, char c)
 {
-    while(!COM_transmit_empty(port));
+    uint32_t spin = 1000000U;
+    while (!COM_transmit_empty(port) && spin-- != 0U)
+        __asm__ __volatile__("pause");
+
+    if (!COM_transmit_empty(port))
+        return;
 
     IO_outb(port, c);
 }

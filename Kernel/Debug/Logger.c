@@ -3,6 +3,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <stdio.h>
+#include <stdbool.h>
 
 #ifndef THEOS_KDEBUG_LOG_SERIAL
 #define THEOS_KDEBUG_LOG_SERIAL 1
@@ -15,11 +16,16 @@
 #endif
 
 #ifdef __USE_QEMU
+static bool logger_serial_ready = false;
+#endif
+
+#ifdef __USE_QEMU
 void logger_init(void)
 {
 #if THEOS_KDEBUG_LOG_SERIAL
-    if (!COM_init(LOGGER_COM_PORT))
-        abort();
+    logger_serial_ready = COM_init(LOGGER_COM_PORT);
+#else
+    logger_serial_ready = false;
 #endif
 }
 #else
@@ -31,6 +37,8 @@ void kputc(int level, char c)
 {
 #ifdef __USE_QEMU
 #if THEOS_KDEBUG_LOG_SERIAL
+    if (!logger_serial_ready)
+        return;
     COM_puts(LOGGER_COM_PORT, level_messages[level]);
     COM_putc(LOGGER_COM_PORT, c);
     COM_putc(LOGGER_COM_PORT, '\n');
@@ -46,6 +54,8 @@ void kputs(int level, const char* str)
 {
 #ifdef __USE_QEMU
 #if THEOS_KDEBUG_LOG_SERIAL
+    if (!logger_serial_ready)
+        return;
     COM_puts(LOGGER_COM_PORT, level_messages[level]);
     COM_puts(LOGGER_COM_PORT, str);
     COM_putc(LOGGER_COM_PORT, '\n');
@@ -74,6 +84,8 @@ void kprintf(int level, const char* restrict format, ...)
 
 #ifdef __USE_QEMU
 #if THEOS_KDEBUG_LOG_SERIAL
+    if (!logger_serial_ready)
+        return;
     COM_puts(LOGGER_COM_PORT, level_messages[level]);
     COM_puts(LOGGER_COM_PORT, buf);
 #endif

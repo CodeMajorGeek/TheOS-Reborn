@@ -1,6 +1,6 @@
-.section .text
+#include <syscall.h>
 
-.equ SYS_EXIT_NR, 9
+.section .text
 
 .globl _start
 .extern main
@@ -12,7 +12,7 @@ _start:
     leaq 16(%rsp,%rdi,8), %rdx # envp
     call main
     movq %rax, %rdi    # main return code
-    movq $SYS_EXIT_NR, %rax
+    movq $SYS_EXIT, %rax
     syscall
 
 1:
