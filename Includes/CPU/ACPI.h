@@ -32,6 +32,18 @@
 #define ACPI_GAS_SYSTEM_IO     1
 
 #define ACPI_FADT_FLAG_HW_REDUCED_ACPI (1U << 20)
+#define ACPI_PM1_CNT_SCI_EN_BIT         (1U << 0)
+#define ACPI_PM1_CNT_SLP_TYP_SHIFT      10U
+#define ACPI_PM1_CNT_SLP_TYP_MASK       (0x7U << ACPI_PM1_CNT_SLP_TYP_SHIFT)
+#define ACPI_PM1_CNT_SLP_EN_BIT         (1U << 13)
+
+#define ACPI_SLEEP_CTRL_SLP_TYP_SHIFT   2U
+#define ACPI_SLEEP_CTRL_SLP_TYP_MASK    (0x7U << ACPI_SLEEP_CTRL_SLP_TYP_SHIFT)
+#define ACPI_SLEEP_CTRL_SLP_EN_BIT      (1U << 5)
+
+#define ACPI_ENABLE_TIMEOUT_LOOPS       2000000U
+#define ACPI_TRANSITION_WAIT_LOOPS      1000000U
+#define ACPI_CF9_RESET_PORT             0xCF9U
 
 typedef enum ACPI_sleep_state
 {
@@ -42,6 +54,13 @@ typedef enum ACPI_sleep_state
     ACPI_SLEEP_S4 = 4,
     ACPI_SLEEP_S5 = 5
 } ACPI_sleep_state_t;
+
+typedef struct ACPI_sleep_type
+{
+    bool valid;
+    uint8_t typ_a;
+    uint8_t typ_b;
+} ACPI_sleep_type_t;
 
 typedef struct ACPI_RSDP_descriptor10
 {
@@ -163,6 +182,24 @@ typedef struct ACPI_FADT
     ACPI_generic_address_t sleep_control_reg;
     ACPI_generic_address_t sleep_status_reg;
 } __attribute__((__packed__)) ACPI_FADT_t;
+
+typedef struct ACPI_runtime_state
+{
+    uintptr_t rsdt_phys;
+    uintptr_t xsdt_phys;
+    bool power_initialized;
+    bool power_ready;
+    bool hw_reduced;
+    uint8_t pm1_cnt_len;
+    uint32_t smi_cmd_port;
+    uint8_t acpi_enable_value;
+    ACPI_generic_address_t pm1a_cnt;
+    ACPI_generic_address_t pm1b_cnt;
+    ACPI_generic_address_t reset_reg;
+    uint8_t reset_value;
+    ACPI_generic_address_t sleep_control_reg;
+    ACPI_sleep_type_t sleep_types[6];
+} ACPI_runtime_state_t;
 
 bool ACPI_RSDP_old_check(uint8_t* rsdt);
 bool ACPI_RSDP_new_check(uint8_t* rsdt);

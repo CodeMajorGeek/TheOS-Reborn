@@ -19,11 +19,30 @@
 #define FPU_XSAVE_CPUID_LEAF   0xDU
 #define FPU_XSAVE_ALIGN        64U
 #define FPU_XSAVE_AREA_MAX     4096U
+#define FPU_STRESS_CPU_SLOTS   256U
 
 typedef struct FPU_fx_state
 {
     uint8_t bytes[512];
 } __attribute__((aligned(16))) FPU_fx_state_t;
+
+typedef struct FPU_xsave_buffer
+{
+    uint8_t bytes[FPU_XSAVE_AREA_MAX];
+} __attribute__((aligned(FPU_XSAVE_ALIGN))) FPU_xsave_buffer_t;
+
+typedef struct FPU_runtime_state
+{
+    FPU_xsave_buffer_t initial_state;
+    bool initial_state_ready;
+    bool sse_enabled;
+    bool avx_enabled;
+    uint8_t reserved0;
+    uint32_t state_area_size;
+    uint64_t state_mask;
+    FPU_xsave_buffer_t stress_state_a[FPU_STRESS_CPU_SLOTS];
+    FPU_xsave_buffer_t stress_state_b[FPU_STRESS_CPU_SLOTS];
+} FPU_runtime_state_t;
 
 struct task; /* forward declaration for FPU context API */
 

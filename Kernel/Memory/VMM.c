@@ -1,4 +1,5 @@
 #include <Memory/VMM.h>
+#include <Memory/VMM_private.h>
 
 #include <Memory/PMM.h>
 #include <Device/VGA.h>
@@ -18,20 +19,9 @@ _Static_assert(VMM_HHDM_BASE < VMM_MMIO_BASE,
 _Static_assert(VMM_MMIO_BASE < VMM_KERNEL_VIRT_BASE,
                "VMM layout mismatch: MMIO window must stay below kernel text mapping");
 
-static PML4_t* VMM_PML4 = NULL;
-static uintptr_t VMM_PML4_phys = 0;
-static uintptr_t VMM_hhdm_base = VMM_HHDM_BASE;
-
-static uintptr_t VMM_VGA_virt = 0;
-static uintptr_t VMM_AHCI_virt = 0;
-
-static bool VMM_recursive_active = FALSE;
-static bool VMM_cr3_loaded = FALSE;
-static bool VMM_startup_identity_map_active = false;
-static bool VMM_nx_checked = false;
-static bool VMM_nx_supported = false;
-
-#define VMM_STARTUP_IDENTITY_LOW_LIMIT 0x100000ULL
+static VMM_runtime_state_t VMM_state = {
+    .hhdm_base = VMM_HHDM_BASE
+};
 
 static uintptr_t canonical_address(uintptr_t addr)
 {
@@ -54,8 +44,8 @@ static inline void VMM_cpuid_leaf(uint32_t leaf, uint32_t* eax, uint32_t* edx)
 
 static bool VMM_is_nx_supported(void)
 {
-    if (VMM_nx_checked)
-        return VMM_nx_supported;
+    if (VMM_state.nx_checked)
+        return VMM_state.nx_supported;
 
     uint32_t max_ext_leaf = 0;
     VMM_cpuid_leaf(0x80000000U, &max_ext_leaf, NULL);
@@ -63,20 +53,20 @@ static bool VMM_is_nx_supported(void)
     {
         uint32_t ext_features_edx = 0;
         VMM_cpuid_leaf(0x80000001U, NULL, &ext_features_edx);
-        VMM_nx_supported = (ext_features_edx & (1U << 20)) != 0;
+        VMM_state.nx_supported = (ext_features_edx & (1U << 20)) != 0;
     }
     else
     {
-        VMM_nx_supported = false;
+        VMM_state.nx_supported = false;
     }
 
-    VMM_nx_checked = true;
-    if (VMM_nx_supported)
+    VMM_state.nx_checked = true;
+    if (VMM_state.nx_supported)
         kdebug_puts("[VMM] NX supported\n");
     else
         kdebug_puts("[VMM] NX unsupported (PROT_EXEC enforcement unavailable)\n");
 
-    return VMM_nx_supported;
+    return VMM_state.nx_supported;
 }
 
 void VMM_enable_nx_current_cpu(void)
@@ -91,12 +81,9 @@ void VMM_enable_nx_current_cpu(void)
     MSR_set(IA32_EFER, efer | IA32_EFER_NXE);
 }
 
-static uintptr_t VMM_hhdm_to_phys(uintptr_t virt);
-static uintptr_t VMM_phys_to_hhdm(uintptr_t phys);
-
 uintptr_t VMM_get_hhdm_base(void)
 {
-    return VMM_hhdm_base;
+    return VMM_state.hhdm_base;
 }
 
 void VMM_set_hhdm_base(uintptr_t hhdm_base)
@@ -114,27 +101,27 @@ void VMM_set_hhdm_base(uintptr_t hhdm_base)
     if (hhdm_base >= VMM_MMIO_BASE)
         panic("VMM: HHDM base overlaps MMIO window");
 
-    if (VMM_hhdm_base == hhdm_base)
+    if (VMM_state.hhdm_base == hhdm_base)
         return;
 
-    if (VMM_cr3_loaded)
+    if (VMM_state.cr3_loaded)
         panic("VMM: cannot change HHDM base after CR3 load");
 
-    VMM_hhdm_base = hhdm_base;
-    kdebug_printf("[VMM] HHDM base set to 0x%llX\n", (unsigned long long) VMM_hhdm_base);
+    VMM_state.hhdm_base = hhdm_base;
+    kdebug_printf("[VMM] HHDM base set to 0x%llX\n", (unsigned long long) VMM_state.hhdm_base);
 }
 
 uintptr_t VMM_hhdm_to_phys_addr(uintptr_t virt)
 {
-    if (virt < VMM_hhdm_base)
+    if (virt < VMM_state.hhdm_base)
         panic("VMM: V2P address below HHDM base");
 
-    return virt - VMM_hhdm_base;
+    return virt - VMM_state.hhdm_base;
 }
 
 uintptr_t VMM_phys_to_hhdm_addr(uintptr_t phys)
 {
-    return VMM_hhdm_base + phys;
+    return VMM_state.hhdm_base + phys;
 }
 
 static bool VMM_is_mmio_window_addr(uintptr_t virt)
@@ -172,13 +159,13 @@ static inline uintptr_t VMM_read_cr3_phys(void)
 
 static PML4_t* VMM_get_pml4(void)
 {
-    if (VMM_recursive_active)
+    if (VMM_state.recursive_active)
         return (PML4_t*) VMM_recursive_base();
 
-    if (VMM_cr3_loaded)
+    if (VMM_state.cr3_loaded)
         return (PML4_t*) VMM_phys_to_hhdm(VMM_read_cr3_phys());
 
-    return VMM_PML4;
+    return VMM_state.pml4;
 }
 
 static PDPT_t* VMM_get_pdpt(uint16_t pml4_index)
@@ -295,7 +282,7 @@ static uint64_t VMM_map_startup_identity_range(uintptr_t start, uintptr_t end)
 
 static void VMM_map_startup_identity(void)
 {
-    if (VMM_startup_identity_map_active)
+    if (VMM_state.startup_identity_map_active)
         return;
 
     uint64_t total_pages = 0;
@@ -323,7 +310,7 @@ static void VMM_map_startup_identity(void)
         }
     }
 
-    VMM_startup_identity_map_active = true;
+    VMM_state.startup_identity_map_active = true;
     kdebug_printf("[VMM] startup identity active total_pages=%llu\n",
                   (unsigned long long) total_pages);
 }
@@ -340,17 +327,17 @@ static bool VMM_unmap_page_local(uintptr_t virt, uintptr_t* old_phys_out)
     if (!is_present(&pml4_entry))
         return false;
 
-    PDPT_t* PDPT = VMM_recursive_active ? VMM_get_pdpt(pml4_index) : (PDPT_t*) VMM_phys_to_hhdm(get_address(&pml4_entry));
+    PDPT_t* PDPT = VMM_state.recursive_active ? VMM_get_pdpt(pml4_index) : (PDPT_t*) VMM_phys_to_hhdm(get_address(&pml4_entry));
     uintptr_t pdpt_entry = PDPT->entries[pdpt_index];
     if (!is_present(&pdpt_entry))
         return false;
 
-    PDT_t* PDT = VMM_recursive_active ? VMM_get_pdt(pml4_index, pdpt_index) : (PDT_t*) VMM_phys_to_hhdm(get_address(&pdpt_entry));
+    PDT_t* PDT = VMM_state.recursive_active ? VMM_get_pdt(pml4_index, pdpt_index) : (PDT_t*) VMM_phys_to_hhdm(get_address(&pdpt_entry));
     uintptr_t pdt_entry = PDT->entries[pdt_index];
     if (!is_present(&pdt_entry))
         return false;
 
-    PT_t* PT = VMM_recursive_active ? VMM_get_pt(pml4_index, pdpt_index, pdt_index) : (PT_t*) VMM_phys_to_hhdm(get_address(&pdt_entry));
+    PT_t* PT = VMM_state.recursive_active ? VMM_get_pt(pml4_index, pdpt_index, pdt_index) : (PT_t*) VMM_phys_to_hhdm(get_address(&pdt_entry));
     uintptr_t entry = PT->entries[pt_index];
     if (!is_present(&entry))
         return false;
@@ -385,12 +372,12 @@ static uint64_t VMM_unmap_startup_identity_range(uintptr_t start, uintptr_t end)
 
 uintptr_t VMM_get_AHCI_virt(void)
 {
-    return VMM_AHCI_virt;
+    return VMM_state.ahci_virt;
 }
 
 uintptr_t VMM_get_kernel_cr3_phys(void)
 {
-    return VMM_PML4_phys;
+    return VMM_state.pml4_phys;
 }
 
 void VMM_map_kernel(void)
@@ -399,16 +386,16 @@ void VMM_map_kernel(void)
     uintptr_t kernel_phys_end = PMM_get_kernel_end();
     uintptr_t kernel_virt_start = PMM_get_kernel_virt_start();
 
-    VMM_PML4 = (PML4_t*) VMM_alloc_table();
-    if (!VMM_PML4)
+    VMM_state.pml4 = (PML4_t*) VMM_alloc_table();
+    if (!VMM_state.pml4)
         panic("VMM: failed to allocate PML4");
 
-    VMM_PML4_phys = VMM_hhdm_to_phys((uintptr_t) VMM_PML4);
+    VMM_state.pml4_phys = VMM_hhdm_to_phys((uintptr_t) VMM_state.pml4);
 
-    uintptr_t recursive_entry = VMM_PML4_phys;
+    uintptr_t recursive_entry = VMM_state.pml4_phys;
     add_attribute(&recursive_entry, PRESENT);
     add_attribute(&recursive_entry, WRITABLE);
-    VMM_PML4->entries[VMM_RECURSIVE_INDEX] = recursive_entry;
+    VMM_state.pml4->entries[VMM_RECURSIVE_INDEX] = recursive_entry;
 
     uint64_t kernel_pages = 0;
     for (uintptr_t phys = kernel_phys_start; phys < kernel_phys_end; phys += PHYS_PAGE_SIZE)
@@ -483,23 +470,23 @@ void VMM_map_kernel(void)
     }
     kdebug_printf("[VMM] HHDM map total pages=%llu base=0x%llX\n",
                   (unsigned long long) hhdm_total_pages,
-                  (unsigned long long) VMM_hhdm_base);
+                  (unsigned long long) VMM_state.hhdm_base);
 
     VMM_map_startup_identity();
 
-    VMM_VGA_virt = VMM_VGA_VIRT_BASE;
-    VMM_AHCI_virt = VMM_AHCI_VIRT_BASE;
+    VMM_state.vga_virt = VMM_VGA_VIRT_BASE;
+    VMM_state.ahci_virt = VMM_AHCI_VIRT_BASE;
 }
 
 void VMM_hardware_mapping(void)
 {
-    VMM_map_mmio_uc_pages(VMM_VGA_virt, VGA_BUFFER_ADDRESS, VGA_BUFFER_LENGTH);
-    TTY_set_buffer((uint16_t*) VMM_VGA_virt);
+    VMM_map_mmio_uc_pages(VMM_state.vga_virt, VGA_BUFFER_ADDRESS, VGA_BUFFER_LENGTH);
+    TTY_set_buffer((uint16_t*) VMM_state.vga_virt);
 }
 
 void VMM_drop_startup_identity_map(void)
 {
-    if (!VMM_startup_identity_map_active)
+    if (!VMM_state.startup_identity_map_active)
     {
         kdebug_puts("[VMM] startup identity already dropped\n");
         return;
@@ -530,10 +517,10 @@ void VMM_drop_startup_identity_map(void)
     }
 
     bool tlb_flush_ok = true;
-    if (VMM_cr3_loaded)
+    if (VMM_state.cr3_loaded)
         tlb_flush_ok = SMP_tlb_shootdown_all();
 
-    VMM_startup_identity_map_active = false;
+    VMM_state.startup_identity_map_active = false;
     kdebug_printf("[VMM] startup identity dropped total_unmapped=%llu tlb_flush=%s\n",
                   (unsigned long long) total_unmapped,
                   tlb_flush_ok ? "ok" : "failed");
@@ -546,7 +533,7 @@ void VMM_map_page_flags(uintptr_t virt, uintptr_t phys, uintptr_t flags)
     PT_t* PT;
     bool is_user_mapping = (flags & USER_MODE) != 0;
     bool no_execute = (flags & NO_EXECUTE) != 0;
-    if (is_user_mapping && virt >= VMM_hhdm_base)
+    if (is_user_mapping && virt >= VMM_state.hhdm_base)
         panic("VMM: user mapping requested in kernel higher-half");
 
     uintptr_t cache_flags = flags & (WRITE_THROUGH | CACHE_DISABLE);
@@ -584,7 +571,7 @@ void VMM_map_page_flags(uintptr_t virt, uintptr_t phys, uintptr_t flags)
             PML4_entry |= USER_MODE;
             PML4->entries[pml4_index] = PML4_entry;
         }
-        PDPT = VMM_recursive_active ? VMM_get_pdpt(pml4_index) : (PDPT_t*) VMM_phys_to_hhdm(get_address(&PML4_entry));
+        PDPT = VMM_state.recursive_active ? VMM_get_pdpt(pml4_index) : (PDPT_t*) VMM_phys_to_hhdm(get_address(&PML4_entry));
     }
     else
     {
@@ -605,7 +592,7 @@ void VMM_map_page_flags(uintptr_t virt, uintptr_t phys, uintptr_t flags)
             PDPT_entry |= USER_MODE;
             PDPT->entries[pdpt_index] = PDPT_entry;
         }
-        PDT = VMM_recursive_active ? VMM_get_pdt(pml4_index, pdpt_index) : (PDT_t*) VMM_phys_to_hhdm(get_address(&PDPT_entry));
+        PDT = VMM_state.recursive_active ? VMM_get_pdt(pml4_index, pdpt_index) : (PDT_t*) VMM_phys_to_hhdm(get_address(&PDPT_entry));
     }
     else
     {
@@ -626,7 +613,7 @@ void VMM_map_page_flags(uintptr_t virt, uintptr_t phys, uintptr_t flags)
             pdt_entry |= USER_MODE;
             PDT->entries[pdt_index] = pdt_entry;
         }
-        PT = VMM_recursive_active ? VMM_get_pt(pml4_index, pdpt_index, pdt_index) : (PT_t*) VMM_phys_to_hhdm(get_address(&pdt_entry));
+        PT = VMM_state.recursive_active ? VMM_get_pt(pml4_index, pdpt_index, pdt_index) : (PT_t*) VMM_phys_to_hhdm(get_address(&pdt_entry));
     }
     else
     {
@@ -643,7 +630,7 @@ void VMM_map_page_flags(uintptr_t virt, uintptr_t phys, uintptr_t flags)
     add_attribute(&entry, page_flags);
     PT->entries[PT_INDEX(virt)] = entry;
 
-    if (VMM_cr3_loaded)
+    if (VMM_state.cr3_loaded)
     {
         VMM_invlpg(virt);
         if (VMM_interrupts_enabled())
@@ -707,7 +694,7 @@ bool VMM_unmap_page(uintptr_t virt, uintptr_t* old_phys_out)
     if (!VMM_unmap_page_local(page, old_phys_out))
         return FALSE;
 
-    if (VMM_cr3_loaded)
+    if (VMM_state.cr3_loaded)
     {
         VMM_invlpg(page);
         if (VMM_interrupts_enabled())
@@ -729,17 +716,17 @@ bool VMM_update_page_flags(uintptr_t virt, uintptr_t set_bits, uintptr_t clear_b
     if (!is_present(&pml4_entry))
         return FALSE;
 
-    PDPT_t* PDPT = VMM_recursive_active ? VMM_get_pdpt(pml4_index) : (PDPT_t*) VMM_phys_to_hhdm(get_address(&pml4_entry));
+    PDPT_t* PDPT = VMM_state.recursive_active ? VMM_get_pdpt(pml4_index) : (PDPT_t*) VMM_phys_to_hhdm(get_address(&pml4_entry));
     uintptr_t pdpt_entry = PDPT->entries[pdpt_index];
     if (!is_present(&pdpt_entry))
         return FALSE;
 
-    PDT_t* PDT = VMM_recursive_active ? VMM_get_pdt(pml4_index, pdpt_index) : (PDT_t*) VMM_phys_to_hhdm(get_address(&pdpt_entry));
+    PDT_t* PDT = VMM_state.recursive_active ? VMM_get_pdt(pml4_index, pdpt_index) : (PDT_t*) VMM_phys_to_hhdm(get_address(&pdpt_entry));
     uintptr_t pdt_entry = PDT->entries[pdt_index];
     if (!is_present(&pdt_entry))
         return FALSE;
 
-    PT_t* PT = VMM_recursive_active ? VMM_get_pt(pml4_index, pdpt_index, pdt_index) : (PT_t*) VMM_phys_to_hhdm(get_address(&pdt_entry));
+    PT_t* PT = VMM_state.recursive_active ? VMM_get_pt(pml4_index, pdpt_index, pdt_index) : (PT_t*) VMM_phys_to_hhdm(get_address(&pdt_entry));
     uintptr_t entry = PT->entries[pt_index];
     if (!is_present(&entry))
         return FALSE;
@@ -762,7 +749,7 @@ bool VMM_update_page_flags(uintptr_t virt, uintptr_t set_bits, uintptr_t clear_b
     PT->entries[pt_index] = entry;
 
     uintptr_t page = virt & FRAME;
-    if (VMM_cr3_loaded)
+    if (VMM_state.cr3_loaded)
     {
         VMM_invlpg(page);
         if (VMM_interrupts_enabled())
@@ -774,9 +761,9 @@ bool VMM_update_page_flags(uintptr_t virt, uintptr_t set_bits, uintptr_t clear_b
 
 void VMM_load_cr3(void)
 {
-    __asm__ __volatile__("mov %0, %%cr3" : : "r"(VMM_PML4_phys) : "memory");
-    VMM_recursive_active = FALSE;
-    VMM_cr3_loaded = TRUE;
+    __asm__ __volatile__("mov %0, %%cr3" : : "r"(VMM_state.pml4_phys) : "memory");
+    VMM_state.recursive_active = FALSE;
+    VMM_state.cr3_loaded = TRUE;
     VMM_enable_nx_current_cpu();
 }
 
@@ -792,17 +779,17 @@ bool VMM_virt_to_phys(uintptr_t virt, uintptr_t* phys_out)
     if (!is_present(&pml4_entry))
         return FALSE;
 
-    PDPT_t* PDPT = VMM_recursive_active ? VMM_get_pdpt(pml4_index) : (PDPT_t*) VMM_phys_to_hhdm(get_address(&pml4_entry));
+    PDPT_t* PDPT = VMM_state.recursive_active ? VMM_get_pdpt(pml4_index) : (PDPT_t*) VMM_phys_to_hhdm(get_address(&pml4_entry));
     uintptr_t pdpt_entry = PDPT->entries[pdpt_index];
     if (!is_present(&pdpt_entry))
         return FALSE;
 
-    PDT_t* PDT = VMM_recursive_active ? VMM_get_pdt(pml4_index, pdpt_index) : (PDT_t*) VMM_phys_to_hhdm(get_address(&pdpt_entry));
+    PDT_t* PDT = VMM_state.recursive_active ? VMM_get_pdt(pml4_index, pdpt_index) : (PDT_t*) VMM_phys_to_hhdm(get_address(&pdpt_entry));
     uintptr_t pdt_entry = PDT->entries[pdt_index];
     if (!is_present(&pdt_entry))
         return FALSE;
 
-    PT_t* PT = VMM_recursive_active ? VMM_get_pt(pml4_index, pdpt_index, pdt_index) : (PT_t*) VMM_phys_to_hhdm(get_address(&pdt_entry));
+    PT_t* PT = VMM_state.recursive_active ? VMM_get_pt(pml4_index, pdpt_index, pdt_index) : (PT_t*) VMM_phys_to_hhdm(get_address(&pdt_entry));
     uintptr_t pt_entry = PT->entries[pt_index];
     if (!is_present(&pt_entry))
         return FALSE;
@@ -823,17 +810,17 @@ bool VMM_is_user_accessible(uintptr_t virt)
     if (!is_present(&pml4_entry) || (pml4_entry & USER_MODE) == 0)
         return FALSE;
 
-    PDPT_t* PDPT = VMM_recursive_active ? VMM_get_pdpt(pml4_index) : (PDPT_t*) VMM_phys_to_hhdm(get_address(&pml4_entry));
+    PDPT_t* PDPT = VMM_state.recursive_active ? VMM_get_pdpt(pml4_index) : (PDPT_t*) VMM_phys_to_hhdm(get_address(&pml4_entry));
     uintptr_t pdpt_entry = PDPT->entries[pdpt_index];
     if (!is_present(&pdpt_entry) || (pdpt_entry & USER_MODE) == 0)
         return FALSE;
 
-    PDT_t* PDT = VMM_recursive_active ? VMM_get_pdt(pml4_index, pdpt_index) : (PDT_t*) VMM_phys_to_hhdm(get_address(&pdpt_entry));
+    PDT_t* PDT = VMM_state.recursive_active ? VMM_get_pdt(pml4_index, pdpt_index) : (PDT_t*) VMM_phys_to_hhdm(get_address(&pdpt_entry));
     uintptr_t pdt_entry = PDT->entries[pdt_index];
     if (!is_present(&pdt_entry) || (pdt_entry & USER_MODE) == 0)
         return FALSE;
 
-    PT_t* PT = VMM_recursive_active ? VMM_get_pt(pml4_index, pdpt_index, pdt_index) : (PT_t*) VMM_phys_to_hhdm(get_address(&pdt_entry));
+    PT_t* PT = VMM_state.recursive_active ? VMM_get_pt(pml4_index, pdpt_index, pdt_index) : (PT_t*) VMM_phys_to_hhdm(get_address(&pdt_entry));
     uintptr_t pt_entry = PT->entries[pt_index];
     if (!is_present(&pt_entry) || (pt_entry & USER_MODE) == 0)
         return FALSE;
@@ -877,21 +864,21 @@ bool VMM_phys_to_virt(uintptr_t phys, uintptr_t* virt_out)
         if (!is_present(&pml4_entry))
             continue;
 
-        PDPT_t* PDPT = VMM_recursive_active ? VMM_get_pdpt(pml4_index) : (PDPT_t*) VMM_phys_to_hhdm(get_address(&pml4_entry));
+        PDPT_t* PDPT = VMM_state.recursive_active ? VMM_get_pdpt(pml4_index) : (PDPT_t*) VMM_phys_to_hhdm(get_address(&pml4_entry));
         for (uint16_t pdpt_index = 0; pdpt_index < 512; pdpt_index++)
         {
             uintptr_t pdpt_entry = PDPT->entries[pdpt_index];
             if (!is_present(&pdpt_entry))
                 continue;
 
-            PDT_t* PDT = VMM_recursive_active ? VMM_get_pdt(pml4_index, pdpt_index) : (PDT_t*) VMM_phys_to_hhdm(get_address(&pdpt_entry));
+            PDT_t* PDT = VMM_state.recursive_active ? VMM_get_pdt(pml4_index, pdpt_index) : (PDT_t*) VMM_phys_to_hhdm(get_address(&pdpt_entry));
             for (uint16_t pdt_index = 0; pdt_index < 512; pdt_index++)
             {
                 uintptr_t pdt_entry = PDT->entries[pdt_index];
                 if (!is_present(&pdt_entry))
                     continue;
 
-                PT_t* PT = VMM_recursive_active ? VMM_get_pt(pml4_index, pdpt_index, pdt_index) : (PT_t*) VMM_phys_to_hhdm(get_address(&pdt_entry));
+                PT_t* PT = VMM_state.recursive_active ? VMM_get_pt(pml4_index, pdpt_index, pdt_index) : (PT_t*) VMM_phys_to_hhdm(get_address(&pdt_entry));
                 for (uint16_t pt_index = 0; pt_index < 512; pt_index++)
                 {
                     uintptr_t pt_entry = PT->entries[pt_index];

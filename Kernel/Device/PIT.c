@@ -1,4 +1,5 @@
 #include <Device/PIT.h>
+#include <Device/PIT_private.h>
 
 #include <CPU/IO.h>
 #include <CPU/APIC.h>
@@ -6,10 +7,7 @@
 #include <Debug/KDebug.h>
 #include <Task/Task.h>
 
-static volatile uint64_t ticks = 0;
-static bool pit_irq_seen_with_apic = false;
-
-static void PIT_callback(interrupt_frame_t* frame);
+static PIT_runtime_state_t PIT_state;
 
 void PIT_init(void)
 {
@@ -52,12 +50,12 @@ void PIT_phase(uint16_t frequency)
 
 void PIT_reset_ticks(void)
 {
-    ticks = 0;
+    PIT_state.ticks = 0;
 }
 
 uint64_t PIT_get_ticks(void)
 {
-    return ticks;
+    return PIT_state.ticks;
 }
 
 void PIT_sleep_ms(uint32_t ms)
@@ -78,15 +76,15 @@ void PIT_sleep_ms(uint32_t ms)
 static void PIT_callback(interrupt_frame_t* frame)
 {
     (void) frame;
-    ++ticks;
+    ++PIT_state.ticks;
     TTY_on_timer_tick();
     task_scheduler_on_tick();
 
     if (APIC_is_enabled())
     {
-        if (!pit_irq_seen_with_apic)
+        if (!PIT_state.irq_seen_with_apic)
         {
-            pit_irq_seen_with_apic = true;
+            PIT_state.irq_seen_with_apic = true;
             kdebug_puts("[PIT] vec 0x20 observed with APIC enabled (delivered through IOAPIC)\n");
         }
         APIC_send_EOI();

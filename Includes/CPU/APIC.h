@@ -80,6 +80,8 @@
 #define LAPIC_TIMER_CALIBRATION_MS              50U
 #define APIC_IPI_SPIN_TIMEOUT                   1000000U
 #define APIC_IPI_DELAY_SHORT_LOOPS              200000U
+#define IA32_X2APIC_MSR_BASE                    0x800U
+#define IA32_X2APIC_MSR_ICR                     0x830U
 
 
 typedef struct APIC_MADT
@@ -97,6 +99,46 @@ typedef struct APIC_IO
     uint32_t irq_base;
     uint32_t irq_end;
 } APIC_IO_t;
+
+typedef struct APIC_topology_state
+{
+    uint8_t lapic_ids[256];
+    uint8_t num_core;
+    APIC_IO_t ioapics[256];
+    uint8_t ioapic_count;
+    uint32_t irq_overrides[256];
+    uint16_t gsi_flags[256];
+    bool gsi_flags_valid[256];
+    bool gsi_is_isa[256];
+    uint8_t bsp_lapic_id;
+    uint8_t io_route_lapic_id;
+    bool io_route_lapic_valid;
+} APIC_topology_state_t;
+
+typedef struct APIC_capability_state
+{
+    bool enabled;
+    bool supported;
+    bool x2apic_supported;
+    bool x2apic_enabled;
+    bool x2apic_smp_skip_reported;
+} APIC_capability_state_t;
+
+typedef struct APIC_timer_state
+{
+    volatile uint32_t periodic_initial_count;
+    volatile uint32_t calibrated_hz;
+    volatile uint8_t calibrated;
+} APIC_timer_state_t;
+
+typedef struct APIC_runtime_state
+{
+    APIC_topology_state_t topology;
+    APIC_capability_state_t capability;
+    APIC_timer_state_t timer;
+    uint64_t local_ptr;
+    uintptr_t local_phys;
+} APIC_runtime_state_t;
 
 bool APIC_check(void);
 

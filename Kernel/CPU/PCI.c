@@ -1,4 +1,5 @@
 #include <CPU/PCI.h>
+#include <CPU/PCI_private.h>
 
 #include <CPU/IO.h>
 #include <Debug/Assert.h>
@@ -7,21 +8,12 @@
 #include <Storage/AHCI.h>
 #include <string.h>
 
-#define PCI_LOG_BUFFER_SIZE 16384U
-
-static char PCI_log_buffer[PCI_LOG_BUFFER_SIZE];
-static size_t PCI_log_len = 0;
-
-static void PCI_try_attach(uint8_t bus, uint8_t slot, uint8_t function, uint16_t vendor, uint16_t device);
-static void PCI_attach_storage_dev(uint8_t bus, uint8_t slot, uint8_t function, uint16_t vendor, uint16_t device);
-static bool PCI_read_bar_address(uint8_t bus, uint8_t slot, uint8_t function, uint8_t bar_index, uintptr_t* phys_out, bool* is_io_out, bool* is_64_out);
-static uint16_t PCI_set_intx_disable(uint8_t bus, uint8_t slot, uint8_t function, bool disable);
-static void PCI_log_append_line(const char* line);
+static PCI_runtime_state_t PCI_state;
 
 void PCI_init(void)
 {
-    memset(PCI_log_buffer, 0, sizeof(PCI_log_buffer));
-    PCI_log_len = 0;
+    memset(PCI_state.log_buffer, 0, sizeof(PCI_state.log_buffer));
+    PCI_state.log_len = 0;
     PCI_log_append_line("[PCI] scan start\n");
     PCI_scan_bus(0);
     PCI_log_append_line("[PCI] scan done\n");
@@ -395,8 +387,8 @@ static void PCI_attach_storage_dev(uint8_t bus, uint8_t slot, uint8_t function, 
 const char* PCI_get_log_buffer(size_t* out_size)
 {
     if (out_size)
-        *out_size = PCI_log_len;
-    return PCI_log_buffer;
+        *out_size = PCI_state.log_len;
+    return PCI_state.log_buffer;
 }
 
 static void PCI_log_append_line(const char* line)
@@ -408,14 +400,14 @@ static void PCI_log_append_line(const char* line)
     if (len == 0)
         return;
 
-    if (PCI_log_len >= (PCI_LOG_BUFFER_SIZE - 1U))
+    if (PCI_state.log_len >= (PCI_LOG_BUFFER_SIZE - 1U))
         return;
 
-    size_t avail = (PCI_LOG_BUFFER_SIZE - 1U) - PCI_log_len;
+    size_t avail = (PCI_LOG_BUFFER_SIZE - 1U) - PCI_state.log_len;
     if (len > avail)
         len = avail;
 
-    memcpy(PCI_log_buffer + PCI_log_len, line, len);
-    PCI_log_len += len;
-    PCI_log_buffer[PCI_log_len] = '\0';
+    memcpy(PCI_state.log_buffer + PCI_state.log_len, line, len);
+    PCI_state.log_len += len;
+    PCI_state.log_buffer[PCI_state.log_len] = '\0';
 }

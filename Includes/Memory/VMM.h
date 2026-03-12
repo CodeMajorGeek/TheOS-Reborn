@@ -27,6 +27,7 @@
 
 #define ADDRHI(a)           (((a) >> 32) & 0xFFFFFFFFULL)
 #define ADDRLO(a)           ((a) & 0xFFFFFFFFULL)
+#define VMM_STARTUP_IDENTITY_LOW_LIMIT 0x100000ULL
 
 uintptr_t VMM_get_hhdm_base(void);
 void VMM_set_hhdm_base(uintptr_t hhdm_base);
@@ -59,6 +60,20 @@ typedef struct PT
 {
     uint64_t entries[512];
 } PT_t;
+
+typedef struct VMM_runtime_state
+{
+    PML4_t* pml4;
+    uintptr_t pml4_phys;
+    uintptr_t hhdm_base;
+    uintptr_t vga_virt;
+    uintptr_t ahci_virt;
+    bool recursive_active;
+    bool cr3_loaded;
+    bool startup_identity_map_active;
+    bool nx_checked;
+    bool nx_supported;
+} VMM_runtime_state_t;
 
 uintptr_t VMM_get_AHCI_virt(void);
 uintptr_t VMM_get_kernel_cr3_phys(void);

@@ -8,6 +8,7 @@ set(LIBC_SOURCES
     stdlib_parse.c
     stdio.c
     syscall.c
+    tls.c
     unistd.c
 )
 
@@ -22,6 +23,7 @@ add_library(UserLibC STATIC
     stdlib_parse.c
     stdio.c
     syscall.c
+    tls.c
     unistd.c
 )
 target_include_directories(UserLibC

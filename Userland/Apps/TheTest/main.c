@@ -1,6 +1,7 @@
 #include <stdbool.h>
 #include <errno.h>
 #include <fcntl.h>
+#include <libc_tls.h>
 #include <sched.h>
 #include <stddef.h>
 #include <pthread.h>
@@ -37,6 +38,7 @@
 #define TEST_COW_FORK
 // pthread API is expected to be true shared-address-space threading.
 #define TEST_PTHREAD_SHIM
+#define TEST_TLS_DYNAMIC
 // #define TEST_READ_KERNEL
 // #define TEST_WRITE_KERNEL
 
@@ -860,6 +862,156 @@ static void thetest_pthread_probe(void)
     (void) pthread_mutex_destroy(&lock);
 }
 
+typedef struct thetest_tls_dynamic_arg
+{
+    size_t module_id;
+    uint64_t expected_init;
+    uint64_t tag;
+} thetest_tls_dynamic_arg_t;
+
+static void* thetest_tls_dynamic_worker(void* arg)
+{
+    thetest_tls_dynamic_arg_t* cfg = (thetest_tls_dynamic_arg_t*) arg;
+    libc_tls_index_t index = {
+        .module_id = (uint64_t) cfg->module_id,
+        .offset = 0
+    };
+
+    uint64_t* slot = (uint64_t*) __tls_get_addr(&index);
+    if (!slot)
+        return (void*) (uintptr_t) 1U;
+    if (*slot != cfg->expected_init)
+        return (void*) (uintptr_t) 2U;
+
+    *slot = cfg->tag;
+    for (uint32_t i = 0; i < 10000U; i++)
+        (void) sched_yield();
+
+    return (*slot == cfg->tag) ? (void*) (uintptr_t) 0U : (void*) (uintptr_t) 3U;
+}
+
+static void thetest_tls_dynamic_probe(void)
+{
+    const uint64_t init_value = 0x1122334455667788ULL;
+    const uint64_t main_value = 0xAABBCCDDEEFF0011ULL;
+    size_t module_id = 0;
+
+    if (__libc_tls_module_register(&init_value,
+                                   sizeof(init_value),
+                                   sizeof(init_value),
+                                   16U,
+                                   &module_id) < 0)
+    {
+        printf("[TheTest] tls dynamic register failed errno=%d\n", errno);
+        return;
+    }
+
+    libc_tls_index_t index = {
+        .module_id = (uint64_t) module_id,
+        .offset = 0
+    };
+    uint64_t* main_slot = (uint64_t*) __tls_get_addr(&index);
+    if (!main_slot)
+    {
+        printf("[TheTest] tls dynamic main slot failed\n");
+        (void) __libc_tls_module_unregister(module_id);
+        return;
+    }
+    if (*main_slot != init_value)
+    {
+        printf("[TheTest] tls dynamic init mismatch got=0x%llx expected=0x%llx\n",
+               (unsigned long long) *main_slot,
+               (unsigned long long) init_value);
+        (void) __libc_tls_module_unregister(module_id);
+        return;
+    }
+    *main_slot = main_value;
+
+    const int worker_count = 4;
+    pthread_t threads[4];
+    thetest_tls_dynamic_arg_t args[4];
+    int created = 0;
+    bool ok = true;
+
+    for (int i = 0; i < worker_count; i++)
+    {
+        args[i].module_id = module_id;
+        args[i].expected_init = init_value;
+        args[i].tag = 0xABC00000ULL + (uint64_t) i;
+
+        int rc = pthread_create(&threads[i], NULL, thetest_tls_dynamic_worker, &args[i]);
+        if (rc != 0)
+        {
+            printf("[TheTest] tls dynamic pthread_create failed idx=%d rc=%d\n", i, rc);
+            ok = false;
+            break;
+        }
+        created++;
+    }
+
+    for (int i = 0; i < created; i++)
+    {
+        void* retval = NULL;
+        int rc = pthread_join(threads[i], &retval);
+        if (rc != 0 || (uintptr_t) retval != 0U)
+        {
+            printf("[TheTest] tls dynamic worker failed idx=%d rc=%d retval=%llu\n",
+                   i,
+                   rc,
+                   (unsigned long long) (uintptr_t) retval);
+            ok = false;
+        }
+    }
+
+    if (*main_slot != main_value)
+    {
+        printf("[TheTest] tls dynamic main contamination got=0x%llx expected=0x%llx\n",
+               (unsigned long long) *main_slot,
+               (unsigned long long) main_value);
+        ok = false;
+    }
+
+    if (__libc_tls_module_unregister(module_id) < 0)
+    {
+        printf("[TheTest] tls dynamic unregister failed errno=%d\n", errno);
+        ok = false;
+    }
+
+    for (uint32_t i = 0; i < (LIBC_TLS_MAX_MODULES * 4U); i++)
+    {
+        size_t churn_id = 0;
+        if (__libc_tls_module_register(&init_value,
+                                       sizeof(init_value),
+                                       sizeof(init_value),
+                                       16U,
+                                       &churn_id) < 0)
+        {
+            printf("[TheTest] tls dynamic churn register failed iter=%u errno=%d\n",
+                   i,
+                   errno);
+            ok = false;
+            break;
+        }
+
+        if (__libc_tls_module_unregister(churn_id) < 0)
+        {
+            printf("[TheTest] tls dynamic churn unregister failed iter=%u errno=%d\n",
+                   i,
+                   errno);
+            ok = false;
+            break;
+        }
+    }
+
+    if (ok && created == worker_count)
+        printf("[TheTest] tls dynamic module test: OK (module=%llu)\n",
+               (unsigned long long) module_id);
+    else
+        printf("[TheTest] tls dynamic module test: FAILED (module=%llu created=%d)\n",
+               (unsigned long long) module_id,
+               created);
+}
+
 int main(int argc, char** argv, char** envp)
 {
     (void) argc;
@@ -924,6 +1076,10 @@ int main(int argc, char** argv, char** envp)
 
 #ifdef TEST_PTHREAD_SHIM
     thetest_pthread_probe();
+#endif
+
+#ifdef TEST_TLS_DYNAMIC
+    thetest_tls_dynamic_probe();
 #endif
 
     volatile uint64_t* kernel_ptr = (volatile uint64_t*) (uintptr_t) KERNEL_TEST_ADDR;

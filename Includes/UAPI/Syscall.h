@@ -36,6 +36,8 @@
 #define SYS_THREAD_JOIN       29
 #define SYS_THREAD_EXIT       30
 #define SYS_THREAD_SELF       31
+#define SYS_THREAD_SET_FSBASE 32
+#define SYS_THREAD_GET_FSBASE 33
 
 #define SYS_PROT_READ    (1ULL << 0)
 #define SYS_PROT_WRITE   (1ULL << 1)

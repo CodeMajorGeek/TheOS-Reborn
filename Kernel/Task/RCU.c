@@ -7,18 +7,14 @@
 #include <Memory/KMem.h>
 #include <Task/Task.h>
 
-static spinlock_t rcu_lock;
-static rcu_cpu_state_t rcu_cpu[TASK_MAX_CPUS];
-static uint64_t rcu_gp_seq = 0;
-static uint64_t rcu_gp_target = 0;
-static rcu_callback_node_t* rcu_cb_head = NULL;
-static rcu_callback_node_t* rcu_cb_tail = NULL;
-static uint64_t rcu_cb_pending = 0;
-static bool rcu_ready = false;
+_Static_assert(RCU_CPU_SLOTS == TASK_MAX_CPUS,
+               "RCU layout mismatch: CPU slot count must match scheduler CPU count");
+
+static rcu_runtime_state_t rcu_state;
 
 static bool rcu_cpu_online(uint32_t cpu_index)
 {
-    if (cpu_index >= TASK_MAX_CPUS)
+    if (cpu_index >= RCU_CPU_SLOTS)
         return false;
 
     if (!APIC_is_enabled())
@@ -34,17 +30,17 @@ static bool rcu_cpu_online(uint32_t cpu_index)
 static uint32_t rcu_online_cpu_limit(void)
 {
     uint32_t max_cpu = APIC_get_core_count();
-    if (max_cpu == 0 || max_cpu > TASK_MAX_CPUS)
-        max_cpu = TASK_MAX_CPUS;
+    if (max_cpu == 0 || max_cpu > RCU_CPU_SLOTS)
+        max_cpu = RCU_CPU_SLOTS;
     return max_cpu;
 }
 
 static bool rcu_can_report_qs(uint32_t cpu_index)
 {
-    if (cpu_index >= TASK_MAX_CPUS)
+    if (cpu_index >= RCU_CPU_SLOTS)
         return false;
 
-    if (__atomic_load_n(&rcu_cpu[cpu_index].read_depth, __ATOMIC_ACQUIRE) != 0)
+    if (__atomic_load_n(&rcu_state.cpu[cpu_index].read_depth, __ATOMIC_ACQUIRE) != 0)
         return false;
 
     if (task_get_preempt_count_cpu(cpu_index) != 0)
@@ -55,11 +51,11 @@ static bool rcu_can_report_qs(uint32_t cpu_index)
 
 static uint64_t rcu_start_gp_locked(void)
 {
-    if (rcu_gp_target != 0)
-        return rcu_gp_target;
+    if (rcu_state.gp_target != 0)
+        return rcu_state.gp_target;
 
-    uint64_t target = rcu_gp_seq + 1;
-    rcu_gp_target = target;
+    uint64_t target = rcu_state.gp_seq + 1;
+    rcu_state.gp_target = target;
 
     uint32_t max_cpu = rcu_online_cpu_limit();
     for (uint32_t cpu = 0; cpu < max_cpu; cpu++)
@@ -68,7 +64,7 @@ static uint64_t rcu_start_gp_locked(void)
             continue;
 
         if (rcu_can_report_qs(cpu))
-            rcu_cpu[cpu].seen_gp = target;
+            rcu_state.cpu[cpu].seen_gp = target;
     }
 
     return target;
@@ -76,10 +72,10 @@ static uint64_t rcu_start_gp_locked(void)
 
 static uint64_t rcu_try_complete_gp_locked(void)
 {
-    if (rcu_gp_target == 0)
+    if (rcu_state.gp_target == 0)
         return 0;
 
-    uint64_t target = rcu_gp_target;
+    uint64_t target = rcu_state.gp_target;
     uint32_t max_cpu = rcu_online_cpu_limit();
 
     for (uint32_t cpu = 0; cpu < max_cpu; cpu++)
@@ -87,27 +83,27 @@ static uint64_t rcu_try_complete_gp_locked(void)
         if (!rcu_cpu_online(cpu))
             continue;
 
-        if (rcu_cpu[cpu].seen_gp < target)
+        if (rcu_state.cpu[cpu].seen_gp < target)
             return 0;
     }
 
-    rcu_gp_seq = target;
-    rcu_gp_target = 0;
+    rcu_state.gp_seq = target;
+    rcu_state.gp_target = 0;
     return target;
 }
 
 static rcu_callback_node_t* rcu_detach_ready_callbacks_locked(uint64_t completed_gp)
 {
-    if (completed_gp == 0 || !rcu_cb_head)
+    if (completed_gp == 0 || !rcu_state.cb_head)
         return NULL;
 
     rcu_callback_node_t* ready_head = NULL;
     rcu_callback_node_t* ready_tail = NULL;
 
-    while (rcu_cb_head && rcu_cb_head->target_gp <= completed_gp)
+    while (rcu_state.cb_head && rcu_state.cb_head->target_gp <= completed_gp)
     {
-        rcu_callback_node_t* node = rcu_cb_head;
-        rcu_cb_head = node->next;
+        rcu_callback_node_t* node = rcu_state.cb_head;
+        rcu_state.cb_head = node->next;
         node->next = NULL;
 
         if (!ready_head)
@@ -116,12 +112,12 @@ static rcu_callback_node_t* rcu_detach_ready_callbacks_locked(uint64_t completed
             ready_tail->next = node;
 
         ready_tail = node;
-        if (rcu_cb_pending != 0)
-            rcu_cb_pending--;
+        if (rcu_state.cb_pending != 0)
+            rcu_state.cb_pending--;
     }
 
-    if (!rcu_cb_head)
-        rcu_cb_tail = NULL;
+    if (!rcu_state.cb_head)
+        rcu_state.cb_tail = NULL;
 
     return ready_head;
 }
@@ -140,28 +136,28 @@ static void rcu_run_callback_list(rcu_callback_node_t* list)
 
 void RCU_init(void)
 {
-    spinlock_init(&rcu_lock);
-    for (uint32_t cpu = 0; cpu < TASK_MAX_CPUS; cpu++)
+    spinlock_init(&rcu_state.lock);
+    for (uint32_t cpu = 0; cpu < RCU_CPU_SLOTS; cpu++)
     {
-        rcu_cpu[cpu].read_depth = 0;
-        rcu_cpu[cpu].seen_gp = 0;
+        rcu_state.cpu[cpu].read_depth = 0;
+        rcu_state.cpu[cpu].seen_gp = 0;
     }
 
-    rcu_gp_seq = 0;
-    rcu_gp_target = 0;
-    rcu_cb_head = NULL;
-    rcu_cb_tail = NULL;
-    rcu_cb_pending = 0;
-    rcu_ready = true;
+    rcu_state.gp_seq = 0;
+    rcu_state.gp_target = 0;
+    rcu_state.cb_head = NULL;
+    rcu_state.cb_tail = NULL;
+    rcu_state.cb_pending = 0;
+    rcu_state.ready = true;
 }
 
 void RCU_note_quiescent_state(void)
 {
-    if (!rcu_ready)
+    if (!rcu_state.ready)
         return;
 
     uint32_t cpu_index = task_get_current_cpu_index();
-    if (cpu_index >= TASK_MAX_CPUS)
+    if (cpu_index >= RCU_CPU_SLOTS)
         return;
 
     if (!rcu_can_report_qs(cpu_index))
@@ -170,13 +166,13 @@ void RCU_note_quiescent_state(void)
     uint64_t completed_gp = 0;
     rcu_callback_node_t* ready = NULL;
 
-    uint64_t flags = spin_lock_irqsave(&rcu_lock);
-    if (rcu_gp_target != 0 && rcu_cpu[cpu_index].seen_gp < rcu_gp_target)
-        rcu_cpu[cpu_index].seen_gp = rcu_gp_target;
+    uint64_t flags = spin_lock_irqsave(&rcu_state.lock);
+    if (rcu_state.gp_target != 0 && rcu_state.cpu[cpu_index].seen_gp < rcu_state.gp_target)
+        rcu_state.cpu[cpu_index].seen_gp = rcu_state.gp_target;
 
     completed_gp = rcu_try_complete_gp_locked();
     ready = rcu_detach_ready_callbacks_locked(completed_gp);
-    spin_unlock_irqrestore(&rcu_lock, flags);
+    spin_unlock_irqrestore(&rcu_state.lock, flags);
 
     if (ready)
         rcu_run_callback_list(ready);
@@ -184,29 +180,29 @@ void RCU_note_quiescent_state(void)
 
 void RCU_read_lock(void)
 {
-    if (!rcu_ready)
+    if (!rcu_state.ready)
         return;
 
     task_preempt_disable();
 
     uint32_t cpu_index = task_get_current_cpu_index();
-    if (cpu_index >= TASK_MAX_CPUS)
+    if (cpu_index >= RCU_CPU_SLOTS)
         return;
 
-    __atomic_add_fetch(&rcu_cpu[cpu_index].read_depth, 1, __ATOMIC_ACQ_REL);
+    __atomic_add_fetch(&rcu_state.cpu[cpu_index].read_depth, 1, __ATOMIC_ACQ_REL);
 }
 
 void RCU_read_unlock(void)
 {
-    if (!rcu_ready)
+    if (!rcu_state.ready)
         return;
 
     uint32_t cpu_index = task_get_current_cpu_index();
-    if (cpu_index < TASK_MAX_CPUS)
+    if (cpu_index < RCU_CPU_SLOTS)
     {
-        uint32_t depth = __atomic_load_n(&rcu_cpu[cpu_index].read_depth, __ATOMIC_RELAXED);
+        uint32_t depth = __atomic_load_n(&rcu_state.cpu[cpu_index].read_depth, __ATOMIC_RELAXED);
         if (depth != 0)
-            __atomic_sub_fetch(&rcu_cpu[cpu_index].read_depth, 1, __ATOMIC_ACQ_REL);
+            __atomic_sub_fetch(&rcu_state.cpu[cpu_index].read_depth, 1, __ATOMIC_ACQ_REL);
     }
 
     task_preempt_enable();
@@ -214,7 +210,7 @@ void RCU_read_unlock(void)
 
 bool RCU_call(rcu_callback_fn_t fn, void* context)
 {
-    if (!rcu_ready || !fn)
+    if (!rcu_state.ready || !fn)
         return false;
 
     rcu_callback_node_t* node = (rcu_callback_node_t*) kmalloc(sizeof(*node));
@@ -226,18 +222,18 @@ bool RCU_call(rcu_callback_fn_t fn, void* context)
     node->context = context;
     node->target_gp = 0;
 
-    uint64_t flags = spin_lock_irqsave(&rcu_lock);
+    uint64_t flags = spin_lock_irqsave(&rcu_state.lock);
     uint64_t target = rcu_start_gp_locked();
     node->target_gp = target;
 
-    if (rcu_cb_tail)
-        rcu_cb_tail->next = node;
+    if (rcu_state.cb_tail)
+        rcu_state.cb_tail->next = node;
     else
-        rcu_cb_head = node;
+        rcu_state.cb_head = node;
 
-    rcu_cb_tail = node;
-    rcu_cb_pending++;
-    spin_unlock_irqrestore(&rcu_lock, flags);
+    rcu_state.cb_tail = node;
+    rcu_state.cb_pending++;
+    spin_unlock_irqrestore(&rcu_state.lock, flags);
 
     RCU_note_quiescent_state();
     return true;
@@ -245,13 +241,13 @@ bool RCU_call(rcu_callback_fn_t fn, void* context)
 
 bool RCU_synchronize(void)
 {
-    if (!rcu_ready)
+    if (!rcu_state.ready)
         return false;
 
     uint64_t target = 0;
-    uint64_t flags = spin_lock_irqsave(&rcu_lock);
+    uint64_t flags = spin_lock_irqsave(&rcu_state.lock);
     target = rcu_start_gp_locked();
-    spin_unlock_irqrestore(&rcu_lock, flags);
+    spin_unlock_irqrestore(&rcu_state.lock, flags);
 
     if (target == 0)
         return true;
@@ -259,7 +255,7 @@ bool RCU_synchronize(void)
     uint64_t start_ticks = ISR_get_timer_ticks();
     while (true)
     {
-        uint64_t observed = __atomic_load_n(&rcu_gp_seq, __ATOMIC_ACQUIRE);
+        uint64_t observed = __atomic_load_n(&rcu_state.gp_seq, __ATOMIC_ACQUIRE);
         if (observed >= target)
             return true;
 
@@ -277,14 +273,14 @@ void RCU_get_stats(rcu_stats_t* out_stats)
         return;
 
     uint32_t cpu_index = task_get_current_cpu_index();
-    if (cpu_index >= TASK_MAX_CPUS)
+    if (cpu_index >= RCU_CPU_SLOTS)
         cpu_index = 0;
 
-    uint64_t flags = spin_lock_irqsave(&rcu_lock);
-    out_stats->gp_seq = rcu_gp_seq;
-    out_stats->gp_target = rcu_gp_target;
-    out_stats->callbacks_pending = rcu_cb_pending;
-    out_stats->local_read_depth = __atomic_load_n(&rcu_cpu[cpu_index].read_depth, __ATOMIC_RELAXED);
+    uint64_t flags = spin_lock_irqsave(&rcu_state.lock);
+    out_stats->gp_seq = rcu_state.gp_seq;
+    out_stats->gp_target = rcu_state.gp_target;
+    out_stats->callbacks_pending = rcu_state.cb_pending;
+    out_stats->local_read_depth = __atomic_load_n(&rcu_state.cpu[cpu_index].read_depth, __ATOMIC_RELAXED);
     out_stats->local_preempt_count = task_get_preempt_count_cpu(cpu_index);
-    spin_unlock_irqrestore(&rcu_lock, flags);
+    spin_unlock_irqrestore(&rcu_state.lock, flags);
 }

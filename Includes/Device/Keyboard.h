@@ -15,6 +15,18 @@
 
 #define SCANCODE_BUFFER_SIZE    8
 
+typedef struct Keyboard_runtime_state
+{
+    uint8_t scancode_buffer[SCANCODE_BUFFER_SIZE];
+    uint8_t scancode_buffer_length;
+    uint8_t write_pos;
+    uint8_t read_pos;
+    volatile uint32_t lock;
+    bool is_shifting;
+    bool is_caplocked;
+    bool is_vernum;
+} Keyboard_runtime_state_t;
+
 void Keyboard_init(void);
 
 void Keyboard_wait_ack(void);
@@ -22,7 +34,5 @@ void Keyboard_update_leds(uint8_t);
 
 uint8_t Keyboard_get_scancode(void);
 bool Keyboard_is_uppercase(void);
-
-static void Keyboard_callback(interrupt_frame_t*);
 
 #endif

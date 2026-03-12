@@ -1,4 +1,5 @@
 #include <Task/Task.h>
+#include <Task/Task_private.h>
 
 #include <CPU/APIC.h>
 #include <CPU/FPU.h>
@@ -16,32 +17,10 @@
 
 // TSS must be aligned on 16 bytes for x86-64.
 __attribute__((aligned(16))) static TSS_t tss_per_cpu[TASK_MAX_CPUS];
-static task_cpu_local_t task_cpu_local_per_apic[TASK_MAX_CPUS];
-static task_runqueue_t task_runqueues[TASK_MAX_CPUS];
-static uint32_t task_steal_cursor[TASK_MAX_CPUS];
-static uint64_t task_exec_runs[TASK_MAX_CPUS];
-static uint64_t task_exec_runs_total = 0;
-static uint64_t task_steal_runs[TASK_MAX_CPUS];
-static uint64_t task_steal_batch_total[TASK_MAX_CPUS];
-static uint64_t task_steal_fail_runs[TASK_MAX_CPUS];
-static uint64_t task_steal_from_cpu[TASK_MAX_CPUS];
-static uint64_t task_idle_hlt_runs[TASK_MAX_CPUS];
-static uint64_t task_rq_lock_contended[TASK_MAX_CPUS];
-static uint32_t task_last_steal_victim[TASK_MAX_CPUS];
-static uint32_t task_preempt_count[TASK_MAX_CPUS];
-static uint8_t task_need_resched[TASK_MAX_CPUS];
-static uint8_t task_resched_active[TASK_MAX_CPUS];
-static uint64_t task_stats_log_epoch = 0;
-static uint8_t task_push_balance_enabled = 1;
-static uint8_t task_work_stealing_enabled = 1;
-static volatile uint64_t task_sched_tick_kicks = 0;
-static task_wait_queue_t task_sleep_waitq;
-
+static task_scheduler_state_t task_scheduler_state;
 static task_t kernel_task;
-
 static task_t* current_task;
 static task_t* next_task;
-static bool task_cpu_is_online(uint32_t cpu_index);
 
 static inline void task_copy_work_item(task_work_item_t* dst, const task_work_item_t* src)
 {
@@ -71,10 +50,10 @@ static void task_maybe_log_cpu_stats(uint64_t total_runs_trigger)
         return;
 
     uint64_t epoch = total_runs_trigger / TASK_STATS_LOG_INTERVAL;
-    uint64_t observed = __atomic_load_n(&task_stats_log_epoch, __ATOMIC_RELAXED);
+    uint64_t observed = __atomic_load_n(&task_scheduler_state.stats.stats_log_epoch, __ATOMIC_RELAXED);
     while (epoch > observed)
     {
-        if (!__atomic_compare_exchange_n(&task_stats_log_epoch,
+        if (!__atomic_compare_exchange_n(&task_scheduler_state.stats.stats_log_epoch,
                                          &observed,
                                          epoch,
                                          false,
@@ -92,17 +71,17 @@ static void task_maybe_log_cpu_stats(uint64_t total_runs_trigger)
             if (!task_cpu_is_online(cpu_index))
                 continue;
 
-            uint32_t victim = __atomic_load_n(&task_last_steal_victim[cpu_index], __ATOMIC_RELAXED);
-            uint64_t runs = __atomic_load_n(&task_exec_runs[cpu_index], __ATOMIC_RELAXED);
-            uint64_t steals = __atomic_load_n(&task_steal_runs[cpu_index], __ATOMIC_RELAXED);
-            uint64_t steal_batch_total = __atomic_load_n(&task_steal_batch_total[cpu_index], __ATOMIC_RELAXED);
-            uint64_t steal_fails = __atomic_load_n(&task_steal_fail_runs[cpu_index], __ATOMIC_RELAXED);
-            uint64_t idle_hlt = __atomic_load_n(&task_idle_hlt_runs[cpu_index], __ATOMIC_RELAXED);
-            uint64_t lock_contended = __atomic_load_n(&task_rq_lock_contended[cpu_index], __ATOMIC_RELAXED);
+            uint32_t victim = __atomic_load_n(&task_scheduler_state.stats.last_steal_victim[cpu_index], __ATOMIC_RELAXED);
+            uint64_t runs = __atomic_load_n(&task_scheduler_state.stats.exec_runs[cpu_index], __ATOMIC_RELAXED);
+            uint64_t steals = __atomic_load_n(&task_scheduler_state.stats.steal_runs[cpu_index], __ATOMIC_RELAXED);
+            uint64_t steal_batch_total = __atomic_load_n(&task_scheduler_state.stats.steal_batch_total[cpu_index], __ATOMIC_RELAXED);
+            uint64_t steal_fails = __atomic_load_n(&task_scheduler_state.stats.steal_fail_runs[cpu_index], __ATOMIC_RELAXED);
+            uint64_t idle_hlt = __atomic_load_n(&task_scheduler_state.stats.idle_hlt_runs[cpu_index], __ATOMIC_RELAXED);
+            uint64_t lock_contended = __atomic_load_n(&task_scheduler_state.stats.rq_lock_contended[cpu_index], __ATOMIC_RELAXED);
             uint64_t kick_recv = SMP_get_sched_kick_count(cpu_index);
             if (victim < TASK_MAX_CPUS)
             {
-                uint64_t victim_hits = __atomic_load_n(&task_steal_from_cpu[victim], __ATOMIC_RELAXED);
+                uint64_t victim_hits = __atomic_load_n(&task_scheduler_state.stats.steal_from_cpu[victim], __ATOMIC_RELAXED);
                 kdebug_printf("[SCHED] cpu=%u runs=%llu rq_len=%u steals=%llu steal_batch_total=%llu steal_fail=%llu victim=%u victim_hits=%llu kick_recv=%llu rq_lock_contended=%llu idle_hlt=%llu\n",
                               cpu_index,
                               (unsigned long long) runs,
@@ -140,22 +119,22 @@ static void task_try_resched_now(uint32_t cpu_index)
     if (cpu_index >= TASK_MAX_CPUS)
         return;
 
-    if (__atomic_load_n(&task_preempt_count[cpu_index], __ATOMIC_ACQUIRE) != 0)
+    if (__atomic_load_n(&task_scheduler_state.control.preempt_count[cpu_index], __ATOMIC_ACQUIRE) != 0)
         return;
 
-    if (__atomic_load_n(&task_need_resched[cpu_index], __ATOMIC_ACQUIRE) == 0)
+    if (__atomic_load_n(&task_scheduler_state.control.need_resched[cpu_index], __ATOMIC_ACQUIRE) == 0)
         return;
 
-    if (__atomic_exchange_n(&task_resched_active[cpu_index], 1, __ATOMIC_ACQ_REL) != 0)
+    if (__atomic_exchange_n(&task_scheduler_state.control.resched_active[cpu_index], 1, __ATOMIC_ACQ_REL) != 0)
         return;
 
-    if (__atomic_exchange_n(&task_need_resched[cpu_index], 0, __ATOMIC_ACQ_REL) != 0)
+    if (__atomic_exchange_n(&task_scheduler_state.control.need_resched[cpu_index], 0, __ATOMIC_ACQ_REL) != 0)
         (void) task_run_next_work_on_cpu(cpu_index);
 
-    if (__atomic_load_n(&task_runqueues[cpu_index].count, __ATOMIC_RELAXED) != 0)
-        __atomic_store_n(&task_need_resched[cpu_index], 1, __ATOMIC_RELEASE);
+    if (__atomic_load_n(&task_scheduler_state.runqueues[cpu_index].count, __ATOMIC_RELAXED) != 0)
+        __atomic_store_n(&task_scheduler_state.control.need_resched[cpu_index], 1, __ATOMIC_RELEASE);
 
-    __atomic_store_n(&task_resched_active[cpu_index], 0, __ATOMIC_RELEASE);
+    __atomic_store_n(&task_scheduler_state.control.resched_active[cpu_index], 0, __ATOMIC_RELEASE);
 }
 
 static bool task_cpu_local_is_valid(const task_cpu_local_t* cpu_local)
@@ -186,7 +165,7 @@ task_cpu_local_t* task_get_cpu_local(void)
         uint8_t apic_id = APIC_get_current_lapic_id();
         if (apic_id < TASK_MAX_CPUS)
         {
-            task_cpu_local_t* cpu_local = &task_cpu_local_per_apic[apic_id];
+            task_cpu_local_t* cpu_local = &task_scheduler_state.cpu_local_per_apic[apic_id];
             if (task_cpu_local_is_valid(cpu_local))
                 return cpu_local;
         }
@@ -416,6 +395,7 @@ bool task_wait_queue_wait_event(task_wait_queue_t* queue,
         task_wait_queue_enqueue_locked(queue, waiter);
         spin_unlock_irqrestore(&queue->lock, flags);
 
+        // Re-check the condition after publishing the waiter to close the wakeup race.
         if (!predicate(context))
         {
             task_wait_queue_cancel(queue, waiter);
@@ -542,7 +522,7 @@ bool task_sleep_ms(uint32_t ms)
     }
 
     task_waiter_t waiter = { 0 };
-    return task_wait_queue_wait_event(&task_sleep_waitq,
+    return task_wait_queue_wait_event(&task_scheduler_state.sleep_waitq,
                                       &waiter,
                                       task_sleep_wait_predicate,
                                       &sleep_ctx,
@@ -554,7 +534,7 @@ static inline uint64_t task_runqueue_lock(uint32_t cpu_index, task_runqueue_t* r
     if (cpu_index < TASK_MAX_CPUS &&
         __atomic_load_n(&rq->lock.locked, __ATOMIC_RELAXED) != 0)
     {
-        __atomic_fetch_add(&task_rq_lock_contended[cpu_index], 1, __ATOMIC_RELAXED);
+        __atomic_fetch_add(&task_scheduler_state.stats.rq_lock_contended[cpu_index], 1, __ATOMIC_RELAXED);
     }
 
     return spin_lock_irqsave(&rq->lock);
@@ -566,7 +546,7 @@ static bool task_runqueue_enqueue_item(uint32_t cpu_index, const task_work_item_
         return false;
 
     bool queued = false;
-    task_runqueue_t* rq = &task_runqueues[cpu_index];
+    task_runqueue_t* rq = &task_scheduler_state.runqueues[cpu_index];
 
     uint64_t flags = task_runqueue_lock(cpu_index, rq);
     if (rq->count < TASK_RUNQUEUE_CAPACITY)
@@ -618,7 +598,7 @@ static void task_maybe_kick_stealer(uint32_t source_cpu, uint32_t depth)
     if (max_cpu == 0 || max_cpu > TASK_MAX_CPUS)
         max_cpu = TASK_MAX_CPUS;
 
-    uint32_t cursor = __atomic_load_n(&task_steal_cursor[source_cpu], __ATOMIC_RELAXED);
+    uint32_t cursor = __atomic_load_n(&task_scheduler_state.steal_cursor[source_cpu], __ATOMIC_RELAXED);
     if (cursor >= max_cpu)
         cursor = 0;
 
@@ -630,12 +610,12 @@ static void task_maybe_kick_stealer(uint32_t source_cpu, uint32_t depth)
         if (cpu == source_cpu || !task_cpu_is_online(cpu))
             continue;
 
-        __atomic_store_n(&task_steal_cursor[source_cpu], cursor, __ATOMIC_RELAXED);
+        __atomic_store_n(&task_scheduler_state.steal_cursor[source_cpu], cursor, __ATOMIC_RELAXED);
         task_kick_cpu(cpu);
         return;
     }
 
-    __atomic_store_n(&task_steal_cursor[source_cpu], cursor, __ATOMIC_RELAXED);
+    __atomic_store_n(&task_scheduler_state.steal_cursor[source_cpu], cursor, __ATOMIC_RELAXED);
 }
 
 static uint32_t task_pick_push_target(uint32_t source_cpu)
@@ -685,7 +665,7 @@ static uint32_t task_runqueue_steal_batch_from_cpu(uint32_t victim_cpu, task_wor
         return 0;
 
     uint32_t stolen = 0;
-    task_runqueue_t* rq = &task_runqueues[victim_cpu];
+    task_runqueue_t* rq = &task_scheduler_state.runqueues[victim_cpu];
 
     uint64_t flags = task_runqueue_lock(victim_cpu, rq);
     while (rq->count != 0 && stolen < max_items)
@@ -701,6 +681,7 @@ static uint32_t task_runqueue_steal_batch_from_cpu(uint32_t victim_cpu, task_wor
                 task_copy_work_item(&out[stolen], item);
                 stolen++;
 
+                // Compact the ring buffer in place after extracting a middle entry.
                 uint32_t cursor = slot;
                 while (cursor != rq->tail)
                 {
@@ -748,7 +729,7 @@ static bool task_try_steal_work(uint32_t thief_cpu, task_work_item_t* out)
     if (max_cpu == 0 || max_cpu > TASK_MAX_CPUS)
         max_cpu = TASK_MAX_CPUS;
 
-    uint32_t cursor = __atomic_load_n(&task_steal_cursor[thief_cpu], __ATOMIC_RELAXED);
+    uint32_t cursor = __atomic_load_n(&task_scheduler_state.steal_cursor[thief_cpu], __ATOMIC_RELAXED);
     if (cursor >= max_cpu)
         cursor = 0;
 
@@ -790,23 +771,23 @@ static bool task_try_steal_work(uint32_t thief_cpu, task_work_item_t* out)
                 if (!task_runqueue_enqueue_item(thief_cpu, &stolen_items[i], false))
                 {
                     stolen_items[i].fn(stolen_items[i].arg);
-                    __atomic_add_fetch(&task_exec_runs[thief_cpu], 1, __ATOMIC_RELAXED);
-                    uint64_t total_runs = __atomic_add_fetch(&task_exec_runs_total, 1, __ATOMIC_RELAXED);
+                    __atomic_add_fetch(&task_scheduler_state.stats.exec_runs[thief_cpu], 1, __ATOMIC_RELAXED);
+                    uint64_t total_runs = __atomic_add_fetch(&task_scheduler_state.stats.exec_runs_total, 1, __ATOMIC_RELAXED);
                     task_maybe_log_cpu_stats(total_runs);
                 }
             }
 
-            __atomic_store_n(&task_last_steal_victim[thief_cpu], victim_cpu, __ATOMIC_RELAXED);
-            __atomic_fetch_add(&task_steal_runs[thief_cpu], 1, __ATOMIC_RELAXED);
-            __atomic_fetch_add(&task_steal_batch_total[thief_cpu], stolen_count, __ATOMIC_RELAXED);
-            __atomic_fetch_add(&task_steal_from_cpu[victim_cpu], 1, __ATOMIC_RELAXED);
-            __atomic_store_n(&task_steal_cursor[thief_cpu], cursor, __ATOMIC_RELAXED);
+            __atomic_store_n(&task_scheduler_state.stats.last_steal_victim[thief_cpu], victim_cpu, __ATOMIC_RELAXED);
+            __atomic_fetch_add(&task_scheduler_state.stats.steal_runs[thief_cpu], 1, __ATOMIC_RELAXED);
+            __atomic_fetch_add(&task_scheduler_state.stats.steal_batch_total[thief_cpu], stolen_count, __ATOMIC_RELAXED);
+            __atomic_fetch_add(&task_scheduler_state.stats.steal_from_cpu[victim_cpu], 1, __ATOMIC_RELAXED);
+            __atomic_store_n(&task_scheduler_state.steal_cursor[thief_cpu], cursor, __ATOMIC_RELAXED);
             return true;
         }
     }
 
-    __atomic_store_n(&task_steal_cursor[thief_cpu], cursor, __ATOMIC_RELAXED);
-    __atomic_fetch_add(&task_steal_fail_runs[thief_cpu], 1, __ATOMIC_RELAXED);
+    __atomic_store_n(&task_scheduler_state.steal_cursor[thief_cpu], cursor, __ATOMIC_RELAXED);
+    __atomic_fetch_add(&task_scheduler_state.stats.steal_fail_runs[thief_cpu], 1, __ATOMIC_RELAXED);
     return false;
 }
 
@@ -816,7 +797,7 @@ static bool task_runqueue_pop_cpu(uint32_t cpu_index, task_work_item_t* out)
         return false;
 
     bool has_item = false;
-    task_runqueue_t* rq = &task_runqueues[cpu_index];
+    task_runqueue_t* rq = &task_scheduler_state.runqueues[cpu_index];
 
     uint64_t flags = task_runqueue_lock(cpu_index, rq);
     if (rq->count != 0)
@@ -835,22 +816,9 @@ static bool task_runqueue_pop_cpu(uint32_t cpu_index, task_work_item_t* out)
 
 void task_init(uintptr_t kernel_stack)
 {
-    memset(&kernel_task, 0, sizeof (kernel_task));
-    memset(task_cpu_local_per_apic, 0, sizeof(task_cpu_local_per_apic));
-    memset(task_runqueues, 0, sizeof(task_runqueues));
-    memset(task_steal_cursor, 0, sizeof(task_steal_cursor));
-    memset(task_exec_runs, 0, sizeof(task_exec_runs));
-    __atomic_store_n(&task_exec_runs_total, 0, __ATOMIC_RELAXED);
-    memset(task_steal_runs, 0, sizeof(task_steal_runs));
-    memset(task_steal_batch_total, 0, sizeof(task_steal_batch_total));
-    memset(task_steal_fail_runs, 0, sizeof(task_steal_fail_runs));
-    memset(task_steal_from_cpu, 0, sizeof(task_steal_from_cpu));
-    memset(task_idle_hlt_runs, 0, sizeof(task_idle_hlt_runs));
-    memset(task_rq_lock_contended, 0, sizeof(task_rq_lock_contended));
-    memset(task_last_steal_victim, 0xFF, sizeof(task_last_steal_victim));
-    memset(task_preempt_count, 0, sizeof(task_preempt_count));
-    memset(task_need_resched, 0, sizeof(task_need_resched));
-    memset(task_resched_active, 0, sizeof(task_resched_active));
+    memset(&task_scheduler_state, 0, sizeof(task_scheduler_state));
+    memset(&kernel_task, 0, sizeof(kernel_task));
+    memset(task_scheduler_state.stats.last_steal_victim, 0xFF, sizeof(task_scheduler_state.stats.last_steal_victim));
 
     kernel_task.pid = 0;
     kernel_task.ppid = 0;
@@ -861,17 +829,15 @@ void task_init(uintptr_t kernel_stack)
 
     for (uint32_t cpu = 0; cpu < TASK_MAX_CPUS; cpu++)
     {
-        spinlock_init(&task_runqueues[cpu].lock);
-        task_runqueues[cpu].head = 0;
-        task_runqueues[cpu].tail = 0;
-        task_runqueues[cpu].count = 0;
-        task_steal_cursor[cpu] = 0;
+        spinlock_init(&task_scheduler_state.runqueues[cpu].lock);
+        task_scheduler_state.runqueues[cpu].head = 0;
+        task_scheduler_state.runqueues[cpu].tail = 0;
+        task_scheduler_state.runqueues[cpu].count = 0;
+        task_scheduler_state.steal_cursor[cpu] = 0;
     }
-    task_sched_tick_kicks = 0;
-    __atomic_store_n(&task_stats_log_epoch, 0, __ATOMIC_RELAXED);
-    __atomic_store_n(&task_push_balance_enabled, 1, __ATOMIC_RELAXED);
-    __atomic_store_n(&task_work_stealing_enabled, 1, __ATOMIC_RELAXED);
-    task_wait_queue_init(&task_sleep_waitq);
+    __atomic_store_n(&task_scheduler_state.control.push_balance_enabled, 1, __ATOMIC_RELAXED);
+    __atomic_store_n(&task_scheduler_state.control.work_stealing_enabled, 1, __ATOMIC_RELAXED);
+    task_wait_queue_init(&task_scheduler_state.sleep_waitq);
     RCU_init();
 
     (void) task_init_cpu(0, kernel_stack, APIC_get_bsp_lapic_id());
@@ -913,7 +879,7 @@ bool task_init_cpu(uint32_t cpu_index, uintptr_t kernel_stack, uint8_t apic_id)
         apic_id = APIC_get_current_lapic_id();
     if (apic_id < TASK_MAX_CPUS)
     {
-        task_cpu_local_t* cpu_local = &task_cpu_local_per_apic[apic_id];
+        task_cpu_local_t* cpu_local = &task_scheduler_state.cpu_local_per_apic[apic_id];
         memset(cpu_local, 0, sizeof(*cpu_local));
         cpu_local->syscall_rsp0 = tss->rsp0;
         cpu_local->cpu_index = cpu_index;
@@ -971,8 +937,8 @@ bool task_run_next_work_on_cpu(uint32_t cpu_index)
         return false;
 
     work.fn(work.arg);
-    __atomic_add_fetch(&task_exec_runs[cpu_index], 1, __ATOMIC_RELAXED);
-    uint64_t total_runs = __atomic_add_fetch(&task_exec_runs_total, 1, __ATOMIC_RELAXED);
+    __atomic_add_fetch(&task_scheduler_state.stats.exec_runs[cpu_index], 1, __ATOMIC_RELAXED);
+    uint64_t total_runs = __atomic_add_fetch(&task_scheduler_state.stats.exec_runs_total, 1, __ATOMIC_RELAXED);
     task_maybe_log_cpu_stats(total_runs);
     return true;
 }
@@ -980,7 +946,7 @@ bool task_run_next_work_on_cpu(uint32_t cpu_index)
 void task_scheduler_on_tick(void)
 {
     // Sleep waiters are driven by periodic timer IRQs (LAPIC or PIT fallback).
-    task_wait_queue_wake_all_internal(&task_sleep_waitq, false);
+    task_wait_queue_wake_all_internal(&task_scheduler_state.sleep_waitq, false);
     RCU_note_quiescent_state();
 
     if (!APIC_is_enabled())
@@ -990,31 +956,31 @@ void task_scheduler_on_tick(void)
     if (cpu_index >= TASK_MAX_CPUS)
         return;
 
-    if (__atomic_load_n(&task_runqueues[cpu_index].count, __ATOMIC_RELAXED) == 0)
+    if (__atomic_load_n(&task_scheduler_state.runqueues[cpu_index].count, __ATOMIC_RELAXED) == 0)
         return;
 
-    __atomic_store_n(&task_need_resched[cpu_index], 1, __ATOMIC_RELEASE);
-    __atomic_add_fetch(&task_sched_tick_kicks, 1, __ATOMIC_RELAXED);
+    __atomic_store_n(&task_scheduler_state.control.need_resched[cpu_index], 1, __ATOMIC_RELEASE);
+    __atomic_add_fetch(&task_scheduler_state.stats.sched_tick_kicks, 1, __ATOMIC_RELAXED);
 }
 
 void task_set_push_balance(bool enabled)
 {
-    __atomic_store_n(&task_push_balance_enabled, enabled ? 1 : 0, __ATOMIC_RELEASE);
+    __atomic_store_n(&task_scheduler_state.control.push_balance_enabled, enabled ? 1 : 0, __ATOMIC_RELEASE);
 }
 
 bool task_is_push_balance_enabled(void)
 {
-    return __atomic_load_n(&task_push_balance_enabled, __ATOMIC_ACQUIRE) != 0;
+    return __atomic_load_n(&task_scheduler_state.control.push_balance_enabled, __ATOMIC_ACQUIRE) != 0;
 }
 
 void task_set_work_stealing(bool enabled)
 {
-    __atomic_store_n(&task_work_stealing_enabled, enabled ? 1 : 0, __ATOMIC_RELEASE);
+    __atomic_store_n(&task_scheduler_state.control.work_stealing_enabled, enabled ? 1 : 0, __ATOMIC_RELEASE);
 }
 
 bool task_is_work_stealing_enabled(void)
 {
-    return __atomic_load_n(&task_work_stealing_enabled, __ATOMIC_ACQUIRE) != 0;
+    return __atomic_load_n(&task_scheduler_state.control.work_stealing_enabled, __ATOMIC_ACQUIRE) != 0;
 }
 
 void task_preempt_disable(void)
@@ -1023,7 +989,7 @@ void task_preempt_disable(void)
     if (cpu_index >= TASK_MAX_CPUS)
         return;
 
-    __atomic_add_fetch(&task_preempt_count[cpu_index], 1, __ATOMIC_ACQ_REL);
+    __atomic_add_fetch(&task_scheduler_state.control.preempt_count[cpu_index], 1, __ATOMIC_ACQ_REL);
 }
 
 void task_preempt_enable(void)
@@ -1032,11 +998,11 @@ void task_preempt_enable(void)
     if (cpu_index >= TASK_MAX_CPUS)
         return;
 
-    uint32_t previous = __atomic_load_n(&task_preempt_count[cpu_index], __ATOMIC_RELAXED);
+    uint32_t previous = __atomic_load_n(&task_scheduler_state.control.preempt_count[cpu_index], __ATOMIC_RELAXED);
     if (previous == 0)
         return;
 
-    uint32_t current = __atomic_sub_fetch(&task_preempt_count[cpu_index], 1, __ATOMIC_ACQ_REL);
+    uint32_t current = __atomic_sub_fetch(&task_scheduler_state.control.preempt_count[cpu_index], 1, __ATOMIC_ACQ_REL);
     if (current == 0)
     {
         if (task_interrupts_enabled())
@@ -1054,7 +1020,7 @@ uint32_t task_get_preempt_count_cpu(uint32_t cpu_index)
     if (cpu_index >= TASK_MAX_CPUS)
         return 0;
 
-    return __atomic_load_n(&task_preempt_count[cpu_index], __ATOMIC_ACQUIRE);
+    return __atomic_load_n(&task_scheduler_state.control.preempt_count[cpu_index], __ATOMIC_ACQUIRE);
 }
 
 void task_irq_exit(void)
@@ -1076,14 +1042,14 @@ uint32_t task_runqueue_depth_cpu(uint32_t cpu_index)
     if (cpu_index >= TASK_MAX_CPUS)
         return 0;
 
-    return __atomic_load_n(&task_runqueues[cpu_index].count, __ATOMIC_RELAXED);
+    return __atomic_load_n(&task_scheduler_state.runqueues[cpu_index].count, __ATOMIC_RELAXED);
 }
 
 uint32_t task_runqueue_depth_total(void)
 {
     uint32_t total = 0;
     for (uint32_t cpu = 0; cpu < TASK_MAX_CPUS; cpu++)
-        total += __atomic_load_n(&task_runqueues[cpu].count, __ATOMIC_RELAXED);
+        total += __atomic_load_n(&task_scheduler_state.runqueues[cpu].count, __ATOMIC_RELAXED);
 
     return total;
 }
@@ -1113,8 +1079,8 @@ __attribute__((__noreturn__)) void task_idle_loop(void)
         if (task_try_steal_work(current_cpu, &stolen))
         {
             stolen.fn(stolen.arg);
-            __atomic_add_fetch(&task_exec_runs[current_cpu], 1, __ATOMIC_RELAXED);
-            uint64_t total_runs = __atomic_add_fetch(&task_exec_runs_total, 1, __ATOMIC_RELAXED);
+            __atomic_add_fetch(&task_scheduler_state.stats.exec_runs[current_cpu], 1, __ATOMIC_RELAXED);
+            uint64_t total_runs = __atomic_add_fetch(&task_scheduler_state.stats.exec_runs_total, 1, __ATOMIC_RELAXED);
             task_maybe_log_cpu_stats(total_runs);
             steal_backoff = TASK_STEAL_BACKOFF_MIN;
             continue;
@@ -1125,7 +1091,7 @@ __attribute__((__noreturn__)) void task_idle_loop(void)
         if (steal_backoff < TASK_STEAL_BACKOFF_MAX)
             steal_backoff <<= 1U;
 
-        __atomic_fetch_add(&task_idle_hlt_runs[current_cpu], 1, __ATOMIC_RELAXED);
+        __atomic_fetch_add(&task_scheduler_state.stats.idle_hlt_runs[current_cpu], 1, __ATOMIC_RELAXED);
         __asm__ __volatile__("sti\nhlt");
     }
 }

@@ -2,18 +2,11 @@
 #define _TTY_BACKEND_H
 
 #include <Device/TTY.h>
+#include <Device/TTYVGA.h>
 
 #include <stdbool.h>
 #include <stddef.h>
 #include <stdint.h>
-
-void TTYVGA_set_buffer(uint16_t* buffer);
-void TTYVGA_init(uint8_t color);
-void TTYVGA_clear(uint8_t color);
-void TTYVGA_put_entry_at(char c, uint8_t color, size_t x, size_t y);
-void TTYVGA_scroll_one_line(uint8_t color);
-void TTYVGA_enable_cursor(bool enabled);
-void TTYVGA_update_cursor(uint8_t x, uint8_t y);
 
 bool TTYFB_load_psf2(const uint8_t* data, size_t size);
 bool TTYFB_init(const TTY_framebuffer_info_t* info, uint8_t color);

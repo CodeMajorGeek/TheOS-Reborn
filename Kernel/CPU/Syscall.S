@@ -3,7 +3,7 @@
 .globl enable_syscall_ext
 .globl syscall_handler_stub
 
-.extern Syscall_interupt_handler
+.extern Syscall_interrupt_handler
 .extern Syscall_post_handler
 
 .set TASK_CPU_LOCAL_SYSCALL_RSP0_OFF, 0
@@ -86,7 +86,7 @@ syscall_handler_stub:
     movq %rsp, %rsi          # RSI = pointer to syscall_frame_t
     movl %gs:TASK_CPU_LOCAL_CPU_INDEX_OFF, %edx # RDX = cpu_index (per-CPU via GS after SWAPGS)
     sti
-    callq Syscall_interupt_handler
+    callq Syscall_interrupt_handler
     movq %rax, %rdi          # RDI = syscall return value
     movq %rsp, %rsi          # RSI = pointer to syscall_frame_t
     movl %gs:TASK_CPU_LOCAL_CPU_INDEX_OFF, %edx # RDX = cpu_index

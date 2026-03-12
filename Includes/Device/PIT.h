@@ -3,6 +3,7 @@
 
 #include <CPU/ISR.h>
 
+#include <stdbool.h>
 #include <stdint.h>
 
 #define PIT_BASE_FREQUENCY  1193180 // The 1.193182 MHz input signal.
@@ -27,6 +28,11 @@
 #define PIT_NULL_COUNT_FLAG         0b01000000
 #define PIT_OUTPUT_PIN_HIGH         0b10000000        
 
+typedef struct PIT_runtime_state
+{
+    volatile uint64_t ticks;
+    bool irq_seen_with_apic;
+} PIT_runtime_state_t;
 
 void PIT_init(void);
 void PIT_stop(void);

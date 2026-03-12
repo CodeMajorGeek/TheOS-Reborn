@@ -13,6 +13,7 @@
 #define NUMA_APIC_ID_MAP_SIZE           1024U
 #define NUMA_DISTANCE_LOCAL_DEFAULT     10U
 #define NUMA_DISTANCE_REMOTE_DEFAULT    20U
+#define NUMA_CPU_MAP_SIZE               256U
 
 #define ACPI_SRAT_TYPE_CPU_AFFINITY     0U
 #define ACPI_SRAT_TYPE_MEMORY_AFFINITY  1U
@@ -89,6 +90,19 @@ typedef struct ACPI_SLIT
     uint64_t locality_count;
     uint8_t matrix[];
 } __attribute__((__packed__)) ACPI_SLIT_t;
+
+typedef struct NUMA_runtime_state
+{
+    bool ready;
+    bool available;
+    uint32_t node_count;
+    uint32_t node_domain[NUMA_MAX_NODES];
+    uint32_t cpu_node[NUMA_CPU_MAP_SIZE];
+    uint32_t apic_node[NUMA_APIC_ID_MAP_SIZE];
+    uint8_t distance[NUMA_MAX_NODES][NUMA_MAX_NODES];
+    NUMA_memory_range_t mem_ranges[NUMA_MAX_MEM_RANGES];
+    uint32_t mem_range_count;
+} NUMA_runtime_state_t;
 
 void NUMA_init(void);
 bool NUMA_is_available(void);

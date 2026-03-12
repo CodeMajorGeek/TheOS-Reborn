@@ -6,6 +6,22 @@
 #include <stdbool.h>
 #include <stdint.h>
 
+#define LIMINE_HELPER_CMDLINE_SIZE 256U
+
+typedef struct LimineHelper_runtime_state
+{
+    TTY_framebuffer_info_t boot_framebuffer;
+    bool boot_framebuffer_available;
+    char boot_cmdline[LIMINE_HELPER_CMDLINE_SIZE];
+    uint64_t boot_hhdm_offset;
+    uintptr_t boot_rsdp_addr;
+    bool boot_mbr_disk_id_hint_present;
+    uint32_t boot_mbr_disk_id_hint;
+    bool boot_slice_hint_present;
+    int32_t boot_slice_hint;
+    bool bootloader_reclaimable_promoted;
+} LimineHelper_runtime_state_t;
+
 bool LimineHelper_base_revision_supported(void);
 
 void LimineHelper_resolve_runtime_kernel_bases(uintptr_t linked_phys_start,

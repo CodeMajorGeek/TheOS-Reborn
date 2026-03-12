@@ -6,13 +6,7 @@
 #include <stdio.h>
 #include <stdint.h>
 
-static ext4_fs_t* ext4_active_fs;
-
-#define EXT4_INODE_MODE_TYPE_MASK    0xF000U
-#define EXT4_INODE_MODE_DIRECTORY    0x4000U
-#define EXT4_INODE_MODE_REGULAR      0x8000U
-#define EXT4_PATH_MAX_COMPONENTS     32U
-#define EXT4_PATH_COMPONENT_MAX      255U
+static ext4_runtime_state_t ext4_state;
 
 static uint16_t ext4_dir_ideal_len(uint8_t name_len)
 {
@@ -691,12 +685,12 @@ bool ext4_mount_lba(ext4_fs_t* fs, HBA_PORT_t* port, uint64_t lba_base)
 
 void ext4_set_active(ext4_fs_t* fs)
 {
-    ext4_active_fs = fs;
+    ext4_state.active_fs = fs;
 }
 
 ext4_fs_t* ext4_get_active(void)
 {
-    return ext4_active_fs;
+    return ext4_state.active_fs;
 }
 
 bool ext4_list_root(ext4_fs_t* fs)

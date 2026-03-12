@@ -1,6 +1,12 @@
 #ifndef _LOGGER_H
 #define _LOGGER_H
 
+#include <stdbool.h>
+
+#ifndef THEOS_KDEBUG_LOG_SERIAL
+#define THEOS_KDEBUG_LOG_SERIAL 1
+#endif
+
 #define LEVEL_COUNT 4
 
 #ifdef __USE_QEMU
@@ -14,13 +20,12 @@ enum level {
     KPANIC  = 3
 };
 
-static const char* level_messages[LEVEL_COUNT] =
+typedef struct logger_runtime_state
 {
-    "[DEBUG] ",
-    "[INFO] ",
-    "[WARNING] ",
-    "[PANIC] "
-};
+    bool serial_ready;
+} logger_runtime_state_t;
+
+extern const char* const logger_level_messages[LEVEL_COUNT];
 
 void logger_init(void);
 

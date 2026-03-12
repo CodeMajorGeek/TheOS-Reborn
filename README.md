@@ -8,7 +8,7 @@
 
 TheOS-Reborn is a freestanding x86_64 operating system project with a Limine boot path, custom PMM/VMM, SMP, ACPI/APIC, AHCI/ext4, ring3 userland, a minimal libc, and a MicroPython port (validated on both QEMU and VirtualBox with AHCI SATA/ATAPI storage).
 
-> This README reflects repository behavior as of **March 10, 2026**.
+> This README reflects repository behavior as of **March 12, 2026**.
 
 ---
 
@@ -100,7 +100,12 @@ Core features currently implemented:
   - optional double buffering.
 - Userland/runtime:
   - ring3 ELF launch,
-  - process syscalls (`fork/execve/waitpid/kill`),
+  - process syscalls (`fork/execve/waitpid/kill`) with COW fork handling,
+  - timer-driven userland preemption hook (experimental/tuning),
+  - libc UNIX-style wrappers (`read/write/open/close/lseek`, `execv/execvp/execl/execlp`, `access/stat/mkdir`, `waitpid/kill`, `mmap/munmap/mprotect`, `brk/sbrk`, `opendir/readdir/closedir`),
+  - thread-safe userland heap (`malloc/calloc/realloc/free`, `posix_memalign`, `aligned_alloc`),
+  - TLS-backed `errno` and dynamic TLS module plumbing (`__libc_tls_module_register`, `__tls_get_addr`, unregister),
+  - `pthread` layer backed by shared-address-space kernel threads (no `fork/waitpid` emulation),
   - shell, tests, power manager, and MicroPython app.
 
 ---
@@ -247,7 +252,8 @@ flowchart TD
 - `fork/execve/waitpid/kill/yield` path implemented.
 - Copy-on-write (COW) clone path for writable user pages on `fork`.
 - Timer-driven userland reschedule hook is present (still experimental/tuning in progress).
-- libc provides a `pthread` layer backed by shared-address-space user threads.
+- libc provides a `pthread` layer backed by shared-address-space user threads (kernel thread syscalls + FS-base TLS activation).
+- libc `errno` is TLS-backed, and dynamic TLS modules can be registered/unregistered at runtime.
 - Shell-centric workflow with additional user apps (`TheTest`, `ThePowerManager`, `TheMicroPython`).
 
 ---
@@ -369,6 +375,7 @@ Runtime resources:
 - COW fork probe
 - timer preemption probe (experimental)
 - pthread shared-memory probe
+- dynamic TLS module probe (`__libc_tls_module_register` / `__tls_get_addr` / unregister, including register/unregister churn)
 
 ### Root filesystem selection policy
 
@@ -381,7 +388,7 @@ At boot, root mount does:
 
 ## Syscalls
 
-Current public syscall IDs are `1..31` (`Includes/UAPI/Syscall.h`).
+Current public syscall IDs are `1..33` (`Includes/UAPI/Syscall.h`).
 
 - `1` `SYS_SLEEP_MS`
 - `2` `SYS_TICK_GET`
@@ -414,6 +421,8 @@ Current public syscall IDs are `1..31` (`Includes/UAPI/Syscall.h`).
 - `29` `SYS_THREAD_JOIN`
 - `30` `SYS_THREAD_EXIT`
 - `31` `SYS_THREAD_SELF`
+- `32` `SYS_THREAD_SET_FSBASE`
+- `33` `SYS_THREAD_GET_FSBASE`
 
 ---
 
@@ -443,9 +452,16 @@ Current public syscall IDs are `1..31` (`Includes/UAPI/Syscall.h`).
 ## Known Gaps
 
 - ext4 implementation remains intentionally limited (not full production ext4 feature set).
-- libc is partial and targeted to current apps/ports.
+- libc remains partial and targeted to current apps/ports.
+- `stat(2)` metadata is currently synthetic/approximated for several fields (`st_ino` path-hash, fixed owner/timestamps/device defaults) and not full ext4 inode metadata passthrough yet.
+- `access(2)` currently checks exposed mode bits only; no full POSIX credential/ACL model yet.
+- Filesystem/POSIX coverage is still incomplete (`fstat/lstat`, richer open flags, links/rename/chmod/chown, etc. are not fully implemented).
+- `mmap(2)` currently supports anonymous mappings only (file-backed mappings are not implemented).
+- Userland heap allocator is thread-safe but uses a single global lock and is not optimized for high contention workloads.
 - Userland timer preemption fairness is still being tuned/validated.
-- `pthread` coverage remains partial (focus on create/join/exit/self + basic mutex).
+- `pthread` coverage remains partial (focus on create/join/exit/self + basic mutex; no condvars/rwlocks/detach/cancel yet).
+- Dynamic TLS removes monotonic module-ID exhaustion, but runtime still has compile-time ceilings (`LIBC_TLS_MAX_MODULES`, `LIBC_TLS_MAX_THREADS`, `LIBC_PTHREAD_MAX_TRACKED`).
+- Dynamic TLS module unregister eagerly unmaps per-thread module blocks; pointers into an unregistered module become invalid immediately.
 - Signal model is still minimal.
 - Legacy IDE/PIIX storage path is not implemented; storage discovery currently targets AHCI-class controllers.
 - Some components (x2APIC SMP mode, parts of scheduler stress paths) are experimental.

@@ -21,6 +21,7 @@
 #define LIBC_STAT_BLKSIZE  512L
 #define LIBC_BRK_PAGE_SIZE 0x1000UL
 #define LIBC_BRK_GROW_MIN  (64UL * 1024UL)
+#define LIBC_UNISTD_SPIN_BEFORE_YIELD 256U
 
 typedef struct libc_fd_slot
 {
@@ -32,6 +33,29 @@ static libc_fd_slot_t LibC_fd_slots[LIBC_FD_SLOTS];
 static uintptr_t LibC_brk_base = 0;
 static uintptr_t LibC_brk_curr = 0;
 static uintptr_t LibC_brk_mapped_end = 0;
+static volatile uint8_t LibC_unistd_lock = 0;
+
+static void unistd_lock(void)
+{
+    unsigned int spins = 0U;
+    while (__atomic_test_and_set(&LibC_unistd_lock, __ATOMIC_ACQUIRE))
+    {
+        while (__atomic_load_n(&LibC_unistd_lock, __ATOMIC_RELAXED) != 0U)
+        {
+            spins++;
+            if (spins >= LIBC_UNISTD_SPIN_BEFORE_YIELD)
+            {
+                spins = 0U;
+                (void) sys_yield();
+            }
+        }
+    }
+}
+
+static void unistd_unlock(void)
+{
+    __atomic_clear(&LibC_unistd_lock, __ATOMIC_RELEASE);
+}
 
 static uintptr_t unistd_align_up_uintptr(uintptr_t value, uintptr_t align)
 {
@@ -105,6 +129,9 @@ static int unistd_brk_ensure_initialized(void)
 
 static int unistd_fd_alloc_slot(int kernel_fd)
 {
+    int fd = -1;
+
+    unistd_lock();
     for (size_t i = 0; i < LIBC_FD_SLOTS; i++)
     {
         if (LibC_fd_slots[i].used)
@@ -112,35 +139,48 @@ static int unistd_fd_alloc_slot(int kernel_fd)
 
         LibC_fd_slots[i].used = true;
         LibC_fd_slots[i].kernel_fd = kernel_fd;
-        return (int) i + LIBC_FD_BASE;
+        fd = (int) i + LIBC_FD_BASE;
+        break;
     }
+    unistd_unlock();
 
-    return -1;
+    return fd;
 }
 
 static int unistd_fd_get_kernel(int fd)
 {
+    int kernel_fd = -1;
+
+    unistd_lock();
     int slot = fd - LIBC_FD_BASE;
-    if (slot < 0 || (size_t) slot >= LIBC_FD_SLOTS)
-        return -1;
-    if (!LibC_fd_slots[(size_t) slot].used)
-        return -1;
-    return LibC_fd_slots[(size_t) slot].kernel_fd;
+    if (slot >= 0 && (size_t) slot < LIBC_FD_SLOTS &&
+        LibC_fd_slots[(size_t) slot].used)
+    {
+        kernel_fd = LibC_fd_slots[(size_t) slot].kernel_fd;
+    }
+    unistd_unlock();
+
+    return kernel_fd;
 }
 
 static bool unistd_fd_release_slot(int fd, int* out_kernel_fd)
 {
-    int slot = fd - LIBC_FD_BASE;
-    if (slot < 0 || (size_t) slot >= LIBC_FD_SLOTS)
-        return false;
-    if (!LibC_fd_slots[(size_t) slot].used)
-        return false;
+    bool released = false;
 
-    if (out_kernel_fd)
-        *out_kernel_fd = LibC_fd_slots[(size_t) slot].kernel_fd;
-    LibC_fd_slots[(size_t) slot].used = false;
-    LibC_fd_slots[(size_t) slot].kernel_fd = -1;
-    return true;
+    unistd_lock();
+    int slot = fd - LIBC_FD_BASE;
+    if (slot >= 0 && (size_t) slot < LIBC_FD_SLOTS &&
+        LibC_fd_slots[(size_t) slot].used)
+    {
+        if (out_kernel_fd)
+            *out_kernel_fd = LibC_fd_slots[(size_t) slot].kernel_fd;
+        LibC_fd_slots[(size_t) slot].used = false;
+        LibC_fd_slots[(size_t) slot].kernel_fd = -1;
+        released = true;
+    }
+    unistd_unlock();
+
+    return released;
 }
 
 static bool unistd_exec_has_slash(const char* file)
@@ -215,6 +255,9 @@ static ino_t unistd_inode_from_path(const char* path)
 
 ssize_t read(int fd, void* buf, size_t count)
 {
+    if (count == 0U)
+        return 0;
+
     if (!buf)
     {
         errno = EINVAL;
@@ -223,8 +266,29 @@ ssize_t read(int fd, void* buf, size_t count)
 
     if (fd == STDIN_FILENO)
     {
-        errno = ENOSYS;
-        return -1;
+        uint8_t* out = (uint8_t*) buf;
+        size_t total = 0U;
+        while (total < count)
+        {
+            int ch = getchar();
+            if (ch == EOF)
+            {
+                if (total == 0U)
+                {
+                    errno = EIO;
+                    return -1;
+                }
+                break;
+            }
+
+            if (ch < 0 || ch > 255)
+                continue;
+
+            out[total++] = (uint8_t) ch;
+            break;
+        }
+
+        return (ssize_t) total;
     }
     if (fd == STDOUT_FILENO || fd == STDERR_FILENO)
     {
@@ -334,7 +398,7 @@ int open(const char* path, int flags, ...)
     int kernel_fd = sys_open(path, sys_flags);
     if (kernel_fd < 0)
     {
-        errno = EIO;
+        errno = ((flags & O_CREAT) != 0) ? EIO : ENOENT;
         return -1;
     }
 
@@ -364,7 +428,7 @@ int close(int fd)
     int rc = sys_close(kernel_fd);
     if (rc < 0)
     {
-        errno = EBADF;
+        errno = EIO;
         return -1;
     }
 
@@ -373,6 +437,12 @@ int close(int fd)
 
 off_t lseek(int fd, off_t offset, int whence)
 {
+    if (whence != SEEK_SET && whence != SEEK_CUR && whence != SEEK_END)
+    {
+        errno = EINVAL;
+        return (off_t) -1;
+    }
+
     int kernel_fd = unistd_fd_get_kernel(fd);
     if (kernel_fd < 0)
     {
@@ -403,31 +473,47 @@ int brk(void* addr)
         return -1;
     }
 
+    unistd_lock();
     if (unistd_brk_ensure_initialized() < 0)
+    {
+        unistd_unlock();
         return -1;
+    }
 
     uintptr_t requested = (uintptr_t) addr;
     if (requested < LibC_brk_base)
     {
+        unistd_unlock();
         errno = EINVAL;
         return -1;
     }
 
     if (requested > LibC_brk_mapped_end && unistd_brk_grow_to(requested) < 0)
+    {
+        unistd_unlock();
         return -1;
+    }
 
     LibC_brk_curr = requested;
+    unistd_unlock();
     return 0;
 }
 
 void* sbrk(intptr_t increment)
 {
+    unistd_lock();
     if (unistd_brk_ensure_initialized() < 0)
+    {
+        unistd_unlock();
         return (void*) -1;
+    }
 
     uintptr_t old_break = LibC_brk_curr;
     if (increment == 0)
+    {
+        unistd_unlock();
         return (void*) old_break;
+    }
 
     uintptr_t new_break = old_break;
     if (increment > 0)
@@ -435,18 +521,23 @@ void* sbrk(intptr_t increment)
         uintptr_t delta = (uintptr_t) increment;
         if (old_break > UINTPTR_MAX - delta)
         {
+            unistd_unlock();
             errno = ENOMEM;
             return (void*) -1;
         }
         new_break = old_break + delta;
         if (new_break > LibC_brk_mapped_end && unistd_brk_grow_to(new_break) < 0)
+        {
+            unistd_unlock();
             return (void*) -1;
+        }
     }
     else
     {
         uintptr_t delta = (uintptr_t) (-(increment + 1)) + 1U;
         if (delta > (old_break - LibC_brk_base))
         {
+            unistd_unlock();
             errno = ENOMEM;
             return (void*) -1;
         }
@@ -454,6 +545,7 @@ void* sbrk(intptr_t increment)
     }
 
     LibC_brk_curr = new_break;
+    unistd_unlock();
     return (void*) old_break;
 }
 
@@ -596,7 +688,7 @@ int kill(pid_t pid, int sig)
     int rc = sys_kill((int) pid, sig);
     if (rc < 0)
     {
-        errno = (sig == SIGKILL) ? ESRCH : EINVAL;
+        errno = ESRCH;
         return -1;
     }
 
@@ -737,8 +829,20 @@ void* mmap(void* addr, size_t len, int prot, int flags, int fd, off_t offset)
         return MAP_FAILED;
     }
 
-    int supported_flags = MAP_PRIVATE | MAP_ANONYMOUS;
-    if ((flags & ~supported_flags) != 0 || (flags & MAP_PRIVATE) == 0 || (flags & MAP_ANONYMOUS) == 0)
+    int supported_flags = MAP_PRIVATE | MAP_SHARED | MAP_ANONYMOUS;
+    bool is_private = (flags & MAP_PRIVATE) != 0;
+    bool is_shared = (flags & MAP_SHARED) != 0;
+    if ((flags & ~supported_flags) != 0)
+    {
+        errno = ENOTSUP;
+        return MAP_FAILED;
+    }
+    if (is_private == is_shared)
+    {
+        errno = EINVAL;
+        return MAP_FAILED;
+    }
+    if ((flags & MAP_ANONYMOUS) == 0)
     {
         errno = ENOTSUP;
         return MAP_FAILED;
@@ -750,9 +854,15 @@ void* mmap(void* addr, size_t len, int prot, int flags, int fd, off_t offset)
         return MAP_FAILED;
     }
 
+    if (addr && (((uintptr_t) addr & (LIBC_BRK_PAGE_SIZE - 1U)) != 0U))
+    {
+        errno = EINVAL;
+        return MAP_FAILED;
+    }
+
     uint64_t sys_prot = 0;
     int supported_prot = PROT_READ | PROT_WRITE | PROT_EXEC;
-    if ((prot & ~supported_prot) != 0 || (prot & PROT_READ) == 0)
+    if ((prot & ~supported_prot) != 0)
     {
         errno = EINVAL;
         return MAP_FAILED;
@@ -781,6 +891,11 @@ int munmap(void* addr, size_t len)
         errno = EINVAL;
         return -1;
     }
+    if (((uintptr_t) addr & (LIBC_BRK_PAGE_SIZE - 1U)) != 0U)
+    {
+        errno = EINVAL;
+        return -1;
+    }
 
     if (sys_unmap(addr, len) < 0)
     {
@@ -798,10 +913,15 @@ int mprotect(void* addr, size_t len, int prot)
         errno = EINVAL;
         return -1;
     }
+    if (((uintptr_t) addr & (LIBC_BRK_PAGE_SIZE - 1U)) != 0U)
+    {
+        errno = EINVAL;
+        return -1;
+    }
 
     uint64_t sys_prot = 0;
     int supported_prot = PROT_READ | PROT_WRITE | PROT_EXEC;
-    if ((prot & ~supported_prot) != 0 || (prot & PROT_READ) == 0)
+    if ((prot & ~supported_prot) != 0)
     {
         errno = EINVAL;
         return -1;
@@ -815,7 +935,7 @@ int mprotect(void* addr, size_t len, int prot)
 
     if (sys_mprotect(addr, len, sys_prot) < 0)
     {
-        errno = EINVAL;
+        errno = EACCES;
         return -1;
     }
 

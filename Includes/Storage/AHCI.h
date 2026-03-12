@@ -3,6 +3,7 @@
 
 #include <stdint.h>
 #include <stdbool.h>
+#include <Task/Task.h>
 
 #define AHCI_MEM_LENGTH         (1024 * 32)
 #define AHCI_SECTOR_SIZE        0x200       // 512 bytes.
@@ -183,6 +184,26 @@ typedef struct AHCI_cmd_context
     uint32_t slot_mask;
     uint32_t port_index;
 } AHCI_cmd_context_t;
+
+typedef struct AHCI_runtime_state
+{
+    HBA_MEM_t* base_address;
+    uintptr_t base_phys;
+    uint8_t irq_mode;
+    uint64_t irq_count;
+    bool irq_vector_registered;
+    bool write_guard_armed;
+    HBA_PORT_t* write_guard_port;
+    uint64_t write_guard_lba_start;
+    uint64_t write_guard_lba_end;
+    uint32_t device_count;
+    HBA_PORT_t* block_devices[AHCI_MAX_SLOT];
+    uint64_t port_sector_capacity[AHCI_MAX_SLOT];
+    bool port_capacity_valid[AHCI_MAX_SLOT];
+    task_wait_queue_t port_waitq[AHCI_MAX_SLOT];
+    uint32_t port_irq_error[AHCI_MAX_SLOT];
+    bool waitq_ready;
+} AHCI_runtime_state_t;
 
 void AHCI_try_setup_device(uint16_t bus, uint32_t slot, uint16_t function, uint16_t vendor, uint16_t device);
 void AHCI_try_setup_known_device(char* name, HBA_MEM_t* AHCI_base, uint16_t bus, uint16_t slot, uint16_t func);

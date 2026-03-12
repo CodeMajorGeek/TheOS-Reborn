@@ -1,4 +1,5 @@
 #include <Storage/AHCI.h>
+#include <Storage/AHCI_private.h>
 
 #include <FileSystem/ext4.h>
 #include <Storage/SATA.h>
@@ -31,45 +32,18 @@ static const AHCI_device_t AHCI_devices[] =
     { 0, 0, "" } // Terminal node.
 };
 
-static HBA_MEM_t* AHCI_base_address;
-static uintptr_t AHCI_base_phys = 0;
-static uint8_t AHCI_irq_mode = AHCI_IRQ_MODE_POLL;
-static uint64_t AHCI_irq_count = 0;
-static bool AHCI_irq_vector_registered = false;
-static bool AHCI_write_guard_armed = false;
-static HBA_PORT_t* AHCI_write_guard_port = NULL;
-static uint64_t AHCI_write_guard_lba_start = 0;
-static uint64_t AHCI_write_guard_lba_end = 0; // Exclusive.
-
-static uint32_t AHCI_device_count = 0;
-static HBA_PORT_t* AHCI_block_devices[AHCI_MAX_SLOT];
-static uint64_t AHCI_port_sector_capacity[AHCI_MAX_SLOT];
-static bool AHCI_port_capacity_valid[AHCI_MAX_SLOT];
+static AHCI_runtime_state_t AHCI_state = {
+    .irq_mode = AHCI_IRQ_MODE_POLL
+};
 
 extern uintptr_t ROOT_DEV;
 
-static void AHCI_irq_handler(interrupt_frame_t* frame);
-static void AHCI_setup_interrupts(uint16_t bus, uint32_t slot, uint16_t function);
-static void AHCI_init_wait_queues(void);
-static int AHCI_prepare_cmd(HBA_PORT_t* port, uint32_t byte_count, uint8_t* buf, AHCI_cmd_context_t* out_ctx);
-static int AHCI_submit_cmd(HBA_PORT_t* port, const AHCI_cmd_context_t* cmd_ctx);
-static bool AHCI_register_device(HBA_PORT_t* port, const char* kind, uint32_t* out_device_num);
-static bool AHCI_identify_capacity_sectors(HBA_PORT_t* port, uint64_t* out_sector_count);
-static bool AHCI_get_cached_capacity_sectors(HBA_PORT_t* port, uint64_t* out_sector_count);
-static int AHCI_atapi_read_blocks(HBA_PORT_t* port, uint32_t lba, uint32_t count, uint8_t* buf);
-static int AHCI_atapi_read_512(HBA_PORT_t* port, uint32_t startl, uint32_t starth, uint32_t count, uint8_t* buf);
-static void AHCI_ATAPI_init(HBA_PORT_t* port, int num);
-
-static task_wait_queue_t AHCI_port_waitq[AHCI_MAX_SLOT];
-static uint32_t AHCI_port_irq_error[AHCI_MAX_SLOT];
-static bool AHCI_waitq_ready = false;
-
 static int AHCI_port_index(HBA_PORT_t* port)
 {
-    if (!AHCI_base_address || !port)
+    if (!AHCI_state.base_address || !port)
         return -1;
 
-    uintptr_t ports_base = (uintptr_t) &AHCI_base_address->ports[0];
+    uintptr_t ports_base = (uintptr_t) &AHCI_state.base_address->ports[0];
     uintptr_t port_addr = (uintptr_t) port;
     if (port_addr < ports_base)
         return -1;
@@ -92,7 +66,7 @@ static bool AHCI_wait_slot_pending(void* context)
         return false;
 
     if (wait_ctx->port_index < AHCI_MAX_SLOT &&
-        __atomic_load_n(&AHCI_port_irq_error[wait_ctx->port_index], __ATOMIC_ACQUIRE) != 0)
+        __atomic_load_n(&AHCI_state.port_irq_error[wait_ctx->port_index], __ATOMIC_ACQUIRE) != 0)
     {
         return false;
     }
@@ -107,7 +81,7 @@ static bool AHCI_wait_for_slot_poll(HBA_PORT_t* port, uint32_t slot_mask, uint32
     {
         if ((port->is & HBA_PxIS_TFES) ||
             (port_index < AHCI_MAX_SLOT &&
-             __atomic_load_n(&AHCI_port_irq_error[port_index], __ATOMIC_ACQUIRE) != 0))
+             __atomic_load_n(&AHCI_state.port_irq_error[port_index], __ATOMIC_ACQUIRE) != 0))
         {
             return false;
         }
@@ -121,7 +95,7 @@ static bool AHCI_wait_for_slot_poll(HBA_PORT_t* port, uint32_t slot_mask, uint32
 
 static bool AHCI_wait_for_slot_irq(HBA_PORT_t* port, uint32_t slot_mask, uint32_t port_index)
 {
-    if (!AHCI_waitq_ready || port_index >= AHCI_MAX_SLOT || AHCI_get_irq_mode() == AHCI_IRQ_MODE_POLL)
+    if (!AHCI_state.waitq_ready || port_index >= AHCI_MAX_SLOT || AHCI_get_irq_mode() == AHCI_IRQ_MODE_POLL)
         return false;
 
     AHCI_wait_slot_ctx_t wait_ctx = {
@@ -135,7 +109,7 @@ static bool AHCI_wait_for_slot_irq(HBA_PORT_t* port, uint32_t slot_mask, uint32_
     if (timeout_ticks == 0)
         timeout_ticks = 1;
 
-    return task_wait_queue_wait_event(&AHCI_port_waitq[port_index],
+    return task_wait_queue_wait_event(&AHCI_state.port_waitq[port_index],
                                       &waiter,
                                       AHCI_wait_slot_pending,
                                       &wait_ctx,
@@ -152,18 +126,18 @@ static bool AHCI_wait_for_slot_completion(HBA_PORT_t* port, uint32_t slot_mask, 
 
 static void AHCI_init_wait_queues(void)
 {
-    if (AHCI_waitq_ready)
+    if (AHCI_state.waitq_ready)
         return;
 
     for (uint32_t port = 0; port < AHCI_MAX_SLOT; port++)
     {
-        task_wait_queue_init(&AHCI_port_waitq[port]);
-        __atomic_store_n(&AHCI_port_irq_error[port], 0, __ATOMIC_RELAXED);
-        AHCI_port_sector_capacity[port] = 0;
-        AHCI_port_capacity_valid[port] = false;
+        task_wait_queue_init(&AHCI_state.port_waitq[port]);
+        __atomic_store_n(&AHCI_state.port_irq_error[port], 0, __ATOMIC_RELAXED);
+        AHCI_state.port_sector_capacity[port] = 0;
+        AHCI_state.port_capacity_valid[port] = false;
     }
 
-    AHCI_waitq_ready = true;
+    AHCI_state.waitq_ready = true;
 }
 
 static int AHCI_build_prdt(HBA_CMD_TBL_t* cmd_tbl, uintptr_t buf, uint32_t byte_count, uint16_t* prdt_out)
@@ -214,7 +188,7 @@ static int AHCI_prepare_cmd(HBA_PORT_t* port, uint32_t byte_count, uint8_t* buf,
     int port_index = AHCI_port_index(port);
     uint32_t port_index_u = (port_index >= 0) ? (uint32_t) port_index : AHCI_MAX_SLOT;
     if (port_index_u < AHCI_MAX_SLOT)
-        __atomic_store_n(&AHCI_port_irq_error[port_index_u], 0, __ATOMIC_RELEASE);
+        __atomic_store_n(&AHCI_state.port_irq_error[port_index_u], 0, __ATOMIC_RELEASE);
 
     uintptr_t clb_phys = HILO2ADDR(port->clbu, port->clb);
     uintptr_t clb_virt = 0;
@@ -276,7 +250,7 @@ static int AHCI_submit_cmd(HBA_PORT_t* port, const AHCI_cmd_context_t* cmd_ctx)
 
     if ((port->is & HBA_PxIS_TFES) ||
         (cmd_ctx->port_index < AHCI_MAX_SLOT &&
-         __atomic_load_n(&AHCI_port_irq_error[cmd_ctx->port_index], __ATOMIC_ACQUIRE) != 0))
+         __atomic_load_n(&AHCI_state.port_irq_error[cmd_ctx->port_index], __ATOMIC_ACQUIRE) != 0))
     {
         return SATA_IO_ERROR_HUNG_PORT;
     }
@@ -289,14 +263,14 @@ static bool AHCI_register_device(HBA_PORT_t* port, const char* kind, uint32_t* o
     if (!port)
         return false;
 
-    if (AHCI_device_count >= AHCI_MAX_SLOT)
+    if (AHCI_state.device_count >= AHCI_MAX_SLOT)
     {
         printf("\tInit failure: AHCI device table is full.\n");
         return false;
     }
 
-    uint32_t dev_num = AHCI_device_count++;
-    AHCI_block_devices[dev_num] = port;
+    uint32_t dev_num = AHCI_state.device_count++;
+    AHCI_state.block_devices[dev_num] = port;
     if (dev_num == 0)
         ROOT_DEV = TODEVNUM(DEV_SATA, 0);
 
@@ -360,9 +334,9 @@ static bool AHCI_get_cached_capacity_sectors(HBA_PORT_t* port, uint64_t* out_sec
         return false;
 
     uint32_t idx = (uint32_t) port_index;
-    if (AHCI_port_capacity_valid[idx])
+    if (AHCI_state.port_capacity_valid[idx])
     {
-        *out_sector_count = AHCI_port_sector_capacity[idx];
+        *out_sector_count = AHCI_state.port_sector_capacity[idx];
         return true;
     }
 
@@ -370,8 +344,8 @@ static bool AHCI_get_cached_capacity_sectors(HBA_PORT_t* port, uint64_t* out_sec
     if (!AHCI_identify_capacity_sectors(port, &sectors) || sectors == 0)
         return false;
 
-    AHCI_port_sector_capacity[idx] = sectors;
-    AHCI_port_capacity_valid[idx] = true;
+    AHCI_state.port_sector_capacity[idx] = sectors;
+    AHCI_state.port_capacity_valid[idx] = true;
     *out_sector_count = sectors;
     return true;
 }
@@ -491,35 +465,35 @@ void AHCI_try_setup_device(uint16_t bus, uint32_t slot, uint16_t function, uint1
 
     if (identified)
     {
-        AHCI_base_phys = AHCI_base;
-        AHCI_base_address = (HBA_MEM_t*) VMM_get_AHCI_virt();
-        VMM_map_mmio_uc_pages((uintptr_t) AHCI_base_address, AHCI_base, AHCI_MEM_LENGTH);
+        AHCI_state.base_phys = AHCI_base;
+        AHCI_state.base_address = (HBA_MEM_t*) VMM_get_AHCI_virt();
+        VMM_map_mmio_uc_pages((uintptr_t) AHCI_state.base_address, AHCI_base, AHCI_MEM_LENGTH);
         AHCI_init_wait_queues();
         AHCI_setup_interrupts(bus, slot, function);
-        AHCI_try_setup_known_device((char*) name, AHCI_base_address, bus, slot, function);
+        AHCI_try_setup_known_device((char*) name, AHCI_state.base_address, bus, slot, function);
     }
 }
 
 int AHCI_get_device_count(void)
 {
-    return (int) AHCI_device_count;
+    return (int) AHCI_state.device_count;
 }
 
 HBA_PORT_t* AHCI_get_device(int index)
 {
-    if (index < 0 || index >= (int) AHCI_device_count)
+    if (index < 0 || index >= (int) AHCI_state.device_count)
         return NULL;
-    return AHCI_block_devices[index];
+    return AHCI_state.block_devices[index];
 }
 
 uint8_t AHCI_get_irq_mode(void)
 {
-    return __atomic_load_n(&AHCI_irq_mode, __ATOMIC_ACQUIRE);
+    return __atomic_load_n(&AHCI_state.irq_mode, __ATOMIC_ACQUIRE);
 }
 
 uint64_t AHCI_get_irq_count(void)
 {
-    return __atomic_load_n(&AHCI_irq_count, __ATOMIC_ACQUIRE);
+    return __atomic_load_n(&AHCI_state.irq_count, __ATOMIC_ACQUIRE);
 }
 
 const char* AHCI_get_irq_mode_name(void)
@@ -537,10 +511,10 @@ const char* AHCI_get_irq_mode_name(void)
 
 void AHCI_write_guard_disallow_all(void)
 {
-    AHCI_write_guard_armed = false;
-    AHCI_write_guard_port = NULL;
-    AHCI_write_guard_lba_start = 0;
-    AHCI_write_guard_lba_end = 0;
+    AHCI_state.write_guard_armed = false;
+    AHCI_state.write_guard_port = NULL;
+    AHCI_state.write_guard_lba_start = 0;
+    AHCI_state.write_guard_lba_end = 0;
     kdebug_puts("[AHCI] write guard: disallow all writes\n");
 }
 
@@ -553,10 +527,10 @@ bool AHCI_write_guard_allow_region(HBA_PORT_t* port, uint64_t lba_start, uint64_
     if (lba_end <= lba_start)
         return false;
 
-    AHCI_write_guard_port = port;
-    AHCI_write_guard_lba_start = lba_start;
-    AHCI_write_guard_lba_end = lba_end;
-    AHCI_write_guard_armed = true;
+    AHCI_state.write_guard_port = port;
+    AHCI_state.write_guard_lba_start = lba_start;
+    AHCI_state.write_guard_lba_end = lba_end;
+    AHCI_state.write_guard_armed = true;
 
     kdebug_printf("[AHCI] write guard: allow port=%d lba=[0x%llX..0x%llX)\n",
                   AHCI_port_index(port),
@@ -569,11 +543,11 @@ static void AHCI_irq_handler(interrupt_frame_t* frame)
 {
     (void) frame;
 
-    if (!AHCI_base_address)
+    if (!AHCI_state.base_address)
         goto out_eoi;
 
-    uint32_t hba_is = AHCI_base_address->is;
-    uint32_t pi = AHCI_base_address->pi;
+    uint32_t hba_is = AHCI_state.base_address->is;
+    uint32_t pi = AHCI_state.base_address->pi;
     uint32_t active = hba_is & pi;
     uint32_t port_stuck_mask = 0;
     if (active != 0)
@@ -584,37 +558,37 @@ static void AHCI_irq_handler(interrupt_frame_t* frame)
             if ((active & bit) == 0)
                 continue;
 
-            HBA_PORT_t* hba_port = (HBA_PORT_t*) &AHCI_base_address->ports[port];
+            HBA_PORT_t* hba_port = (HBA_PORT_t*) &AHCI_state.base_address->ports[port];
             uint32_t port_is = hba_port->is;
             if (port_is != 0)
             {
                 if ((port_is & HBA_PxIS_TFES) != 0 && port < AHCI_MAX_SLOT)
-                    __atomic_store_n(&AHCI_port_irq_error[port], port_is, __ATOMIC_RELEASE);
+                    __atomic_store_n(&AHCI_state.port_irq_error[port], port_is, __ATOMIC_RELEASE);
 
                 hba_port->is = port_is;
                 if (hba_port->is != 0)
                     port_stuck_mask |= bit;
             }
 
-            if (AHCI_waitq_ready && port < AHCI_MAX_SLOT)
-                task_wait_queue_wake_all(&AHCI_port_waitq[port]);
+            if (AHCI_state.waitq_ready && port < AHCI_MAX_SLOT)
+                task_wait_queue_wake_all(&AHCI_state.port_waitq[port]);
         }
     }
 
     uint32_t hba_is_after = 0;
     if (hba_is != 0)
     {
-        AHCI_base_address->is = hba_is;
-        hba_is_after = AHCI_base_address->is;
+        AHCI_state.base_address->is = hba_is;
+        hba_is_after = AHCI_state.base_address->is;
         if (hba_is_after != 0)
         {
             // Retry once if status is still pending after first W1C.
-            AHCI_base_address->is = hba_is_after;
-            hba_is_after = AHCI_base_address->is;
+            AHCI_state.base_address->is = hba_is_after;
+            hba_is_after = AHCI_state.base_address->is;
         }
     }
 
-    uint64_t irq_count = __atomic_add_fetch(&AHCI_irq_count, 1, __ATOMIC_RELAXED);
+    uint64_t irq_count = __atomic_add_fetch(&AHCI_state.irq_count, 1, __ATOMIC_RELAXED);
     if ((irq_count == 1 || (irq_count % 512ULL) == 0) &&
         (hba_is != 0 || hba_is_after != 0 || port_stuck_mask != 0))
     {
@@ -634,26 +608,26 @@ out_eoi:
 
 static void AHCI_setup_interrupts(uint16_t bus, uint32_t slot, uint16_t function)
 {
-    if (!AHCI_base_address || !APIC_is_enabled())
+    if (!AHCI_state.base_address || !APIC_is_enabled())
         return;
 
     AHCI_init_wait_queues();
 
-    if (!AHCI_irq_vector_registered)
+    if (!AHCI_state.irq_vector_registered)
     {
         ISR_register_vector(AHCI_IRQ_VECTOR, AHCI_irq_handler);
-        AHCI_irq_vector_registered = true;
+        AHCI_state.irq_vector_registered = true;
     }
 
-    uint32_t pi = AHCI_base_address->pi;
-    AHCI_base_address->is = (uint32_t) -1;
+    uint32_t pi = AHCI_state.base_address->pi;
+    AHCI_state.base_address->is = (uint32_t) -1;
     for (uint8_t port = 0; port < 32; port++)
     {
         if ((pi & (1U << port)) == 0)
             continue;
-        AHCI_base_address->ports[port].is = (uint32_t) -1;
+        AHCI_state.base_address->ports[port].is = (uint32_t) -1;
         if (port < AHCI_MAX_SLOT)
-            __atomic_store_n(&AHCI_port_irq_error[port], 0, __ATOMIC_RELAXED);
+            __atomic_store_n(&AHCI_state.port_irq_error[port], 0, __ATOMIC_RELAXED);
     }
 
     uint8_t bsp_apic = APIC_get_bsp_lapic_id();
@@ -661,13 +635,13 @@ static void AHCI_setup_interrupts(uint16_t bus, uint32_t slot, uint16_t function
     if (PCI_enable_msix((uint8_t) bus,
                         (uint8_t) slot,
                         (uint8_t) function,
-                        AHCI_base_phys,
-                        (uintptr_t) AHCI_base_address,
+                        AHCI_state.base_phys,
+                        (uintptr_t) AHCI_state.base_address,
                         AHCI_MEM_LENGTH,
                         AHCI_IRQ_VECTOR,
                         bsp_apic))
     {
-        __atomic_store_n(&AHCI_irq_mode, AHCI_IRQ_MODE_MSIX, __ATOMIC_RELEASE);
+        __atomic_store_n(&AHCI_state.irq_mode, AHCI_IRQ_MODE_MSIX, __ATOMIC_RELEASE);
         enabled = true;
     }
     else if (PCI_enable_msi((uint8_t) bus,
@@ -676,12 +650,12 @@ static void AHCI_setup_interrupts(uint16_t bus, uint32_t slot, uint16_t function
                             AHCI_IRQ_VECTOR,
                             bsp_apic))
     {
-        __atomic_store_n(&AHCI_irq_mode, AHCI_IRQ_MODE_MSI, __ATOMIC_RELEASE);
+        __atomic_store_n(&AHCI_state.irq_mode, AHCI_IRQ_MODE_MSI, __ATOMIC_RELEASE);
         enabled = true;
     }
     else
     {
-        __atomic_store_n(&AHCI_irq_mode, AHCI_IRQ_MODE_POLL, __ATOMIC_RELEASE);
+        __atomic_store_n(&AHCI_state.irq_mode, AHCI_IRQ_MODE_POLL, __ATOMIC_RELEASE);
     }
 
     if (enabled)
@@ -694,7 +668,7 @@ static void AHCI_setup_interrupts(uint16_t bus, uint32_t slot, uint16_t function
             command = PCI_config_readw((uint8_t) bus, (uint8_t) slot, (uint8_t) function, PCI_COMMAND_REG);
         }
 
-        AHCI_base_address->ghc |= HBA_GHC_IE;
+        AHCI_state.base_address->ghc |= HBA_GHC_IE;
         kdebug_printf("[AHCI] irq configured mode=%s vec=0x%X b=%u s=%u f=%u pci_cmd=0x%X intx=%s\n",
                       AHCI_get_irq_mode_name(),
                       AHCI_IRQ_VECTOR,
@@ -706,7 +680,7 @@ static void AHCI_setup_interrupts(uint16_t bus, uint32_t slot, uint16_t function
     }
     else
     {
-        AHCI_base_address->ghc &= ~HBA_GHC_IE;
+        AHCI_state.base_address->ghc &= ~HBA_GHC_IE;
         kdebug_printf("[AHCI] irq fallback mode=%s b=%u s=%u f=%u\n",
                       AHCI_get_irq_mode_name(),
                       (unsigned) bus,
@@ -949,7 +923,7 @@ int AHCI_SATA_write(HBA_PORT_t* port, uint32_t startl, uint32_t starth, uint32_t
     if (write_lba_end <= write_lba)
         return SATA_IO_ERROR_HUNG_PORT;
 
-    if (!AHCI_write_guard_armed)
+    if (!AHCI_state.write_guard_armed)
     {
         kdebug_printf("[AHCI] write blocked: guard not armed (port=%d lba=%llu count=%u)\n",
                       AHCI_port_index(port),
@@ -958,16 +932,16 @@ int AHCI_SATA_write(HBA_PORT_t* port, uint32_t startl, uint32_t starth, uint32_t
         return SATA_IO_ERROR_UNSUPPORTED;
     }
 
-    if (port != AHCI_write_guard_port ||
-        write_lba < AHCI_write_guard_lba_start ||
-        write_lba_end > AHCI_write_guard_lba_end)
+    if (port != AHCI_state.write_guard_port ||
+        write_lba < AHCI_state.write_guard_lba_start ||
+        write_lba_end > AHCI_state.write_guard_lba_end)
     {
         kdebug_printf("[AHCI] write blocked by region guard: port=%d lba=[%llu..%llu) allowed=[0x%llX..0x%llX)\n",
                       AHCI_port_index(port),
                       (unsigned long long) write_lba,
                       (unsigned long long) write_lba_end,
-                      (unsigned long long) AHCI_write_guard_lba_start,
-                      (unsigned long long) AHCI_write_guard_lba_end);
+                      (unsigned long long) AHCI_state.write_guard_lba_start,
+                      (unsigned long long) AHCI_state.write_guard_lba_end);
         return SATA_IO_ERROR_UNSUPPORTED;
     }
 

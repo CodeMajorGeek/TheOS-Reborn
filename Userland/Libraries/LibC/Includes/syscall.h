@@ -40,10 +40,13 @@ int sys_power(uint32_t cmd, uint32_t arg);
 int sys_shutdown(void);
 int sys_sleep(uint32_t state);
 int sys_reboot(void);
+int sys_thread_create_ex(uintptr_t start_rip, uintptr_t arg, uintptr_t stack_top, uintptr_t fs_base);
 int sys_thread_create(uintptr_t start_rip, uintptr_t arg, uintptr_t stack_top);
 int sys_thread_join(int tid, uint64_t* out_retval);
 __attribute__((__noreturn__)) void sys_thread_exit(uint64_t retval);
 int sys_thread_self(void);
+int sys_thread_set_fsbase(uintptr_t fs_base);
+uintptr_t sys_thread_get_fsbase(void);
 #endif
 
 #endif

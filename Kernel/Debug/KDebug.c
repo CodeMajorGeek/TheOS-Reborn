@@ -1,4 +1,5 @@
 #include <Debug/KDebug.h>
+#include <Debug/KDebug_private.h>
 
 #ifdef THEOS_ENABLE_KDEBUG
 #include <Device/COM.h>
@@ -12,43 +13,20 @@
 #include <string.h>
 #include <stddef.h>
 
-#ifndef THEOS_KDEBUG_LOG_SERIAL
-#define THEOS_KDEBUG_LOG_SERIAL 1
-#endif
-
-#ifndef THEOS_KDEBUG_LOG_FILE
-#define THEOS_KDEBUG_LOG_FILE 0
-#endif
-
-#define KDEBUG_FILE_RAM_BUFFER_SIZE (1024U * 1024U)
-#define KDEBUG_FILE_NAME_MAX 64U
-#define KDEBUG_FILE_CHUNK_STACK_MAX 4096U
-
-static bool kdebug_initialized = false;
-static bool kdebug_serial_ready = false;
-static spinlock_t kdebug_lock = { 0 };
-
-#if THEOS_KDEBUG_LOG_FILE
-static char kdebug_file_ram[KDEBUG_FILE_RAM_BUFFER_SIZE];
-static size_t kdebug_file_len = 0;
-static size_t kdebug_file_dropped = 0;
-static bool kdebug_file_fs_ready = false;
-#endif
-
-static void kdebug_itoa(uint64_t value, char* buf, size_t length, unsigned int base, bool uppercase);
+static kdebug_runtime_state_t kdebug_state;
 
 static inline void kdebug_sink_putc(char c)
 {
 #if THEOS_KDEBUG_LOG_SERIAL
-    if (kdebug_serial_ready)
+    if (kdebug_state.serial_ready)
         COM_putc(KDEBUG_COM_PORT, c);
 #endif
 
 #if THEOS_KDEBUG_LOG_FILE
-    if (kdebug_file_len < KDEBUG_FILE_RAM_BUFFER_SIZE)
-        kdebug_file_ram[kdebug_file_len++] = c;
+    if (kdebug_state.file_len < KDEBUG_FILE_RAM_BUFFER_SIZE)
+        kdebug_state.file_ram[kdebug_state.file_len++] = c;
     else
-        kdebug_file_dropped++;
+        kdebug_state.file_dropped++;
 #endif
 }
 
@@ -90,15 +68,15 @@ static void kdebug_move_bytes(char* dest, const char* src, size_t len)
 
 void kdebug_init(void)
 {
-    spinlock_init(&kdebug_lock);
-    kdebug_initialized = true;
+    spinlock_init(&kdebug_state.lock);
+    kdebug_state.initialized = true;
 
 #if THEOS_KDEBUG_LOG_SERIAL
-    kdebug_serial_ready = COM_init(KDEBUG_COM_PORT);
+    kdebug_state.serial_ready = COM_init(KDEBUG_COM_PORT);
 #endif
 
 #if THEOS_KDEBUG_LOG_SERIAL
-    if (kdebug_serial_ready)
+    if (kdebug_state.serial_ready)
         kdebug_puts("[KDEBUG] Serial debug initialized\n");
 #endif
 #if THEOS_KDEBUG_LOG_FILE
@@ -108,22 +86,22 @@ void kdebug_init(void)
 
 void kdebug_putc(char c)
 {
-    if (!kdebug_initialized)
+    if (!kdebug_state.initialized)
         return;
 
-    uint64_t flags = spin_lock_irqsave(&kdebug_lock);
+    uint64_t flags = spin_lock_irqsave(&kdebug_state.lock);
     kdebug_putc_raw(c);
-    spin_unlock_irqrestore(&kdebug_lock, flags);
+    spin_unlock_irqrestore(&kdebug_state.lock, flags);
 }
 
 void kdebug_puts(const char* str)
 {
-    if (!kdebug_initialized)
+    if (!kdebug_state.initialized)
         return;
 
-    uint64_t flags = spin_lock_irqsave(&kdebug_lock);
+    uint64_t flags = spin_lock_irqsave(&kdebug_state.lock);
     kdebug_puts_raw(str);
-    spin_unlock_irqrestore(&kdebug_lock, flags);
+    spin_unlock_irqrestore(&kdebug_state.lock, flags);
 }
 
 static void kdebug_itoa(uint64_t value, char* buf, size_t length, unsigned int base, bool uppercase)
@@ -192,19 +170,19 @@ static bool kdebug_make_file_chunk_name(uint32_t chunk_index, char* out, size_t 
 
 void kdebug_file_sink_ready(void)
 {
-    if (!kdebug_initialized)
+    if (!kdebug_state.initialized)
         return;
 
-    uint64_t flags = spin_lock_irqsave(&kdebug_lock);
-    kdebug_file_fs_ready = true;
-    spin_unlock_irqrestore(&kdebug_lock, flags);
+    uint64_t flags = spin_lock_irqsave(&kdebug_state.lock);
+    kdebug_state.file_fs_ready = true;
+    spin_unlock_irqrestore(&kdebug_state.lock, flags);
 
     kdebug_file_flush();
 }
 
 void kdebug_file_flush(void)
 {
-    if (!kdebug_initialized)
+    if (!kdebug_state.initialized)
         return;
 
     ext4_fs_t* fs = ext4_get_active();
@@ -215,11 +193,11 @@ void kdebug_file_flush(void)
     size_t snapshot_dropped = 0;
     bool can_flush = false;
 
-    uint64_t flags = spin_lock_irqsave(&kdebug_lock);
-    can_flush = kdebug_file_fs_ready;
-    snapshot_len = kdebug_file_len;
-    snapshot_dropped = kdebug_file_dropped;
-    spin_unlock_irqrestore(&kdebug_lock, flags);
+    uint64_t flags = spin_lock_irqsave(&kdebug_state.lock);
+    can_flush = kdebug_state.file_fs_ready;
+    snapshot_len = kdebug_state.file_len;
+    snapshot_dropped = kdebug_state.file_dropped;
+    spin_unlock_irqrestore(&kdebug_state.lock, flags);
 
     if (!can_flush)
         return;
@@ -274,9 +252,9 @@ void kdebug_file_flush(void)
         if (part > chunk_size)
             part = chunk_size;
 
-        flags = spin_lock_irqsave(&kdebug_lock);
-        memcpy(chunk, &kdebug_file_ram[offset], part);
-        spin_unlock_irqrestore(&kdebug_lock, flags);
+        flags = spin_lock_irqsave(&kdebug_state.lock);
+        memcpy(chunk, &kdebug_state.file_ram[offset], part);
+        spin_unlock_irqrestore(&kdebug_state.lock, flags);
 
         char file_name[KDEBUG_FILE_NAME_MAX];
         if (!kdebug_make_file_chunk_name(chunk_index, file_name, sizeof(file_name)))
@@ -299,34 +277,34 @@ void kdebug_file_flush(void)
     if (!success)
     {
 #if THEOS_KDEBUG_LOG_SERIAL
-        if (kdebug_serial_ready)
+        if (kdebug_state.serial_ready)
             COM_puts(KDEBUG_COM_PORT, "[KDEBUG] file flush failed\n");
 #endif
         return;
     }
 
-    flags = spin_lock_irqsave(&kdebug_lock);
-    if (kdebug_file_len >= snapshot_len)
+    flags = spin_lock_irqsave(&kdebug_state.lock);
+    if (kdebug_state.file_len >= snapshot_len)
     {
-        size_t remaining = kdebug_file_len - snapshot_len;
+        size_t remaining = kdebug_state.file_len - snapshot_len;
         if (remaining != 0)
-            kdebug_move_bytes(kdebug_file_ram, kdebug_file_ram + snapshot_len, remaining);
-        kdebug_file_len = remaining;
+            kdebug_move_bytes(kdebug_state.file_ram, kdebug_state.file_ram + snapshot_len, remaining);
+        kdebug_state.file_len = remaining;
     }
     else
     {
-        kdebug_file_len = 0;
+        kdebug_state.file_len = 0;
     }
 
-    if (kdebug_file_dropped >= snapshot_dropped)
-        kdebug_file_dropped -= snapshot_dropped;
+    if (kdebug_state.file_dropped >= snapshot_dropped)
+        kdebug_state.file_dropped -= snapshot_dropped;
     else
-        kdebug_file_dropped = 0;
+        kdebug_state.file_dropped = 0;
 
-    spin_unlock_irqrestore(&kdebug_lock, flags);
+    spin_unlock_irqrestore(&kdebug_state.lock, flags);
 
 #if THEOS_KDEBUG_LOG_SERIAL
-    if (kdebug_serial_ready)
+    if (kdebug_state.serial_ready)
     {
         char bytes_buf[32];
         char chunks_buf[16];
@@ -376,30 +354,30 @@ static void kdebug_dec_raw(uint64_t value)
 
 void kdebug_hex(uint64_t value, int width)
 {
-    if (!kdebug_initialized)
+    if (!kdebug_state.initialized)
         return;
 
-    uint64_t flags = spin_lock_irqsave(&kdebug_lock);
+    uint64_t flags = spin_lock_irqsave(&kdebug_state.lock);
     kdebug_hex_raw(value, width);
-    spin_unlock_irqrestore(&kdebug_lock, flags);
+    spin_unlock_irqrestore(&kdebug_state.lock, flags);
 }
 
 void kdebug_dec(uint64_t value)
 {
-    if (!kdebug_initialized)
+    if (!kdebug_state.initialized)
         return;
 
-    uint64_t flags = spin_lock_irqsave(&kdebug_lock);
+    uint64_t flags = spin_lock_irqsave(&kdebug_state.lock);
     kdebug_dec_raw(value);
-    spin_unlock_irqrestore(&kdebug_lock, flags);
+    spin_unlock_irqrestore(&kdebug_state.lock, flags);
 }
 
 void kdebug_printf(const char* format, ...)
 {
-    if (!kdebug_initialized)
+    if (!kdebug_state.initialized)
         return;
 
-    uint64_t flags = spin_lock_irqsave(&kdebug_lock);
+    uint64_t flags = spin_lock_irqsave(&kdebug_state.lock);
     va_list parameters;
     va_start(parameters, format);
 
@@ -509,7 +487,7 @@ void kdebug_printf(const char* format, ...)
     }
 
     va_end(parameters);
-    spin_unlock_irqrestore(&kdebug_lock, flags);
+    spin_unlock_irqrestore(&kdebug_state.lock, flags);
 }
 #else
 void kdebug_init(void)

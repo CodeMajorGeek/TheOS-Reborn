@@ -17,6 +17,15 @@
 #define HPET_MAX_PERIOD_FS               100000000ULL
 #define HPET_WAIT_SPIN_GUARD             1000000000ULL
 
+typedef struct HPET_runtime_state
+{
+    volatile uint8_t* regs;
+    uint64_t period_fs;
+    uint64_t frequency_hz;
+    bool counter_64bit;
+    bool ready;
+} HPET_runtime_state_t;
+
 bool HPET_init(void);
 bool HPET_is_available(void);
 bool HPET_wait_ms(uint32_t ms, uint64_t* elapsed_ticks);

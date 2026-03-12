@@ -10,65 +10,53 @@
 #include <stdio.h>
 #include <stdlib.h>
 
-static PMM_region_t PMM_regions_store[PMM_MAX_REGIONS];
-static PMM_region_t* PMM_regions = PMM_regions_store;
-static PMM_boot_entry_t PMM_boot_entries_store[PMM_MAX_BOOT_ENTRIES];
-
-static int PMM_num_regions = 0;
-static int PMM_boot_entry_count = 0;
-
-static uintptr_t PMM_kernel_phys_start;
-static uintptr_t PMM_kernel_phys_end;
-static uintptr_t PMM_kernel_virt_start;
-static uintptr_t PMM_kernel_virt_end;
-
-static bool is_kmem_initialized = FALSE;
+static PMM_runtime_state_t PMM_state;
 
 void PMM_init(uintptr_t kernel_phys_start,
               uintptr_t kernel_phys_end,
               uintptr_t kernel_virt_start,
               uintptr_t kernel_virt_end)
 {
-    PMM_kernel_phys_start = kernel_phys_start;
-    PMM_kernel_phys_end = kernel_phys_end;
-    PMM_kernel_virt_start = kernel_virt_start;
-    PMM_kernel_virt_end = kernel_virt_end;
+    PMM_state.kernel_phys_start = kernel_phys_start;
+    PMM_state.kernel_phys_end = kernel_phys_end;
+    PMM_state.kernel_virt_start = kernel_virt_start;
+    PMM_state.kernel_virt_end = kernel_virt_end;
 }
 
 uintptr_t PMM_get_kernel_start(void)
 {
-    return PMM_kernel_phys_start;
+    return PMM_state.kernel_phys_start;
 }
 
 uintptr_t PMM_get_kernel_end(void)
 {
-    return PMM_kernel_phys_end;
+    return PMM_state.kernel_phys_end;
 }
 
 uintptr_t PMM_get_kernel_virt_start(void)
 {
-    return PMM_kernel_virt_start;
+    return PMM_state.kernel_virt_start;
 }
 
 uintptr_t PMM_get_kernel_virt_end(void)
 {
-    return PMM_kernel_virt_end;
+    return PMM_state.kernel_virt_end;
 }
 
 PMM_region_t* PMM_get_regions(void)
 {
-    return PMM_regions;
+    return PMM_state.regions;
 }
 
 int PMM_get_num_regions(void)
 {
-    return PMM_num_regions;
+    return PMM_state.num_regions;
 }
 
 void PMM_boot_entries_reset(void)
 {
-    PMM_boot_entry_count = 0;
-    memset(PMM_boot_entries_store, 0, sizeof(PMM_boot_entries_store));
+    PMM_state.boot_entry_count = 0;
+    memset(PMM_state.boot_entries, 0, sizeof(PMM_state.boot_entries));
 }
 
 bool PMM_boot_entry_add(uintptr_t addr,
@@ -80,7 +68,7 @@ bool PMM_boot_entry_add(uintptr_t addr,
     if (len == 0)
         return false;
 
-    if (PMM_boot_entry_count >= PMM_MAX_BOOT_ENTRIES)
+    if (PMM_state.boot_entry_count >= PMM_MAX_BOOT_ENTRIES)
         return false;
 
     uintptr_t end = addr + len;
@@ -92,7 +80,7 @@ bool PMM_boot_entry_add(uintptr_t addr,
     if (aligned_end <= aligned_start)
         return false;
 
-    PMM_boot_entry_t* entry = &PMM_boot_entries_store[PMM_boot_entry_count++];
+    PMM_boot_entry_t* entry = &PMM_state.boot_entries[PMM_state.boot_entry_count++];
     entry->addr_start = aligned_start;
     entry->addr_end = aligned_end;
     entry->type = type;
@@ -107,12 +95,12 @@ bool PMM_boot_entry_add(uintptr_t addr,
 
 const PMM_boot_entry_t* PMM_get_boot_entries(void)
 {
-    return PMM_boot_entries_store;
+    return PMM_state.boot_entries;
 }
 
 int PMM_get_boot_entry_count(void)
 {
-    return PMM_boot_entry_count;
+    return PMM_state.boot_entry_count;
 }
 
 bool PMM_promote_boot_entries_to_allocatable(uint64_t type,
@@ -122,23 +110,23 @@ bool PMM_promote_boot_entries_to_allocatable(uint64_t type,
     uint64_t regions_added = 0;
     uint64_t pages_added = 0;
 
-    for (int i = 0; i < PMM_boot_entry_count; i++)
+    for (int i = 0; i < PMM_state.boot_entry_count; i++)
     {
-        PMM_boot_entry_t* entry = &PMM_boot_entries_store[i];
+        PMM_boot_entry_t* entry = &PMM_state.boot_entries[i];
         if (entry->type != type)
             continue;
         if ((entry->flags & PMM_BOOT_ENTRY_ALLOCATABLE) != 0)
             continue;
 
         uintptr_t len = entry->addr_end - entry->addr_start;
-        int regions_before = PMM_num_regions;
+        int regions_before = PMM_state.num_regions;
         PMM_init_region(entry->addr_start, len);
-        if (PMM_num_regions <= regions_before)
+        if (PMM_state.num_regions <= regions_before)
             continue;
         entry->flags |= PMM_BOOT_ENTRY_ALLOCATABLE;
 
         regions_added++;
-        pages_added += (uint64_t) (PMM_regions[PMM_num_regions - 1].len / PHYS_PAGE_SIZE);
+        pages_added += (uint64_t) (PMM_state.regions[PMM_state.num_regions - 1].len / PHYS_PAGE_SIZE);
     }
 
     if (regions_added_out)
@@ -179,14 +167,14 @@ void PMM_init_region(uintptr_t addr, uintptr_t len)
 
     for (uint64_t i = region.addr_start; i < region.addr_end; i += PHYS_PAGE_SIZE)
     {
-        if (i >= PMM_kernel_phys_start && i < PMM_kernel_phys_end)
+        if (i >= PMM_state.kernel_phys_start && i < PMM_state.kernel_phys_end)
             continue; // Kernel pages !
         else if (region.addr_mmap_start == (uintptr_t) -1)
         {
             region.addr_mmap_start = i;
-            memset((void*) P2V(region.addr_mmap_start), PMM_MEM_NOTAVALIABLE, mmap_num_pages * PHYS_PAGE_SIZE);
+            memset((void*) P2V(region.addr_mmap_start), PMM_MEM_NOTAVAILABLE, mmap_num_pages * PHYS_PAGE_SIZE);
             i += mmap_num_pages * PHYS_PAGE_SIZE;
-            if (!is_kmem_initialized)
+            if (!PMM_state.kmem_initialized)
             {
                 uintptr_t heap_available = (region.addr_end > i) ? (region.addr_end - i) : 0;
                 size_t heap_size = (size_t) (heap_available & ~(uintptr_t) (PHYS_PAGE_SIZE - 1));
@@ -198,7 +186,7 @@ void PMM_init_region(uintptr_t addr, uintptr_t len)
                     kmem_init(P2V(i), heap_size);
                     kmem_reserved_start = i;
                     kmem_reserved_end = kmem_reserved_start + heap_size;
-                    is_kmem_initialized = TRUE;
+                    PMM_state.kmem_initialized = TRUE;
                     i += heap_size;
                 }
             }
@@ -217,13 +205,13 @@ void PMM_init_region(uintptr_t addr, uintptr_t len)
     if (region.addr_mmap_start == (uintptr_t) -1)
         return;
 
-    if (!is_kmem_initialized)
+    if (!PMM_state.kmem_initialized)
         panic("PMM: failed to initialize kernel heap");
 
-    if (PMM_num_regions >= PMM_MAX_REGIONS)
+    if (PMM_state.num_regions >= PMM_MAX_REGIONS)
         panic("PMM: too many memory regions");
 
-    memcpy(&PMM_regions[PMM_num_regions++], &region, sizeof (region)); // Store the current region.
+    memcpy(&PMM_state.regions[PMM_state.num_regions++], &region, sizeof (region)); // Store the current region.
 }
 
 void PMM_mmap_unset(PMM_region_t* region, int bit)
@@ -267,9 +255,9 @@ uint32_t PMM_get_index_of_free_page(PMM_region_t region)
 
 void* PMM_alloc_page(void)
 {
-    for (int i = 0; i < PMM_num_regions; i++)
+    for (int i = 0; i < PMM_state.num_regions; i++)
     {
-        PMM_region_t* region = &PMM_regions[i];
+        PMM_region_t* region = &PMM_state.regions[i];
         while (TRUE)
         {
             uint32_t index = PMM_get_index_of_free_page(*region);
@@ -281,7 +269,7 @@ void* PMM_alloc_page(void)
 
             // Hard guard: never return low-memory or kernel image pages.
             // TODO : maybe find a clever way instead of hard guard.
-            if (page < 0x100000 || (page >= PMM_kernel_phys_start && page < PMM_kernel_phys_end))
+            if (page < 0x100000 || (page >= PMM_state.kernel_phys_start && page < PMM_state.kernel_phys_end))
                 continue;
 
             return (void*) page;

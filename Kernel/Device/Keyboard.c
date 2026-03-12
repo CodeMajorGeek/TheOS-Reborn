@@ -1,30 +1,23 @@
 #include <Device/Keyboard.h>
+#include <Device/Keyboard_private.h>
 #include <CPU/IO.h>
 
 #include <stdio.h>
 
-static uint8_t scancode_buffer[SCANCODE_BUFFER_SIZE];
-static uint8_t scancode_buffer_length = 0;
-static uint8_t write_pos = 0;
-static uint8_t read_pos = 0;
-static volatile uint32_t keyboard_lock = 0;
-
-static bool is_shifting = FALSE;
-static bool is_caplocked = FALSE;
-static bool is_vernum = FALSE;
+static Keyboard_runtime_state_t Keyboard_state;
 
 static inline void Keyboard_lock(void)
 {
-    while (__atomic_test_and_set(&keyboard_lock, __ATOMIC_ACQUIRE))
+    while (__atomic_test_and_set(&Keyboard_state.lock, __ATOMIC_ACQUIRE))
     {
-        while (__atomic_load_n(&keyboard_lock, __ATOMIC_RELAXED))
+        while (__atomic_load_n(&Keyboard_state.lock, __ATOMIC_RELAXED))
             __asm__ __volatile__("pause");
     }
 }
 
 static inline void Keyboard_unlock(void)
 {
-    __atomic_clear(&keyboard_lock, __ATOMIC_RELEASE);
+    __atomic_clear(&Keyboard_state.lock, __ATOMIC_RELEASE);
 }
 
 void Keyboard_init(void)
@@ -48,17 +41,17 @@ void Keyboard_update_leds(uint8_t status)
 uint8_t Keyboard_get_scancode(void)
 {
     Keyboard_lock();
-    if (scancode_buffer_length == 0)
+    if (Keyboard_state.scancode_buffer_length == 0)
     {
         Keyboard_unlock();
         return 0;
     }
 
-    uint8_t sc = scancode_buffer[read_pos++];
-    scancode_buffer_length--;
+    uint8_t sc = Keyboard_state.scancode_buffer[Keyboard_state.read_pos++];
+    Keyboard_state.scancode_buffer_length--;
 
-    if (read_pos == SCANCODE_BUFFER_SIZE)
-        read_pos = 0;
+    if (Keyboard_state.read_pos == SCANCODE_BUFFER_SIZE)
+        Keyboard_state.read_pos = 0;
 
     Keyboard_unlock();
     return sc;
@@ -66,7 +59,7 @@ uint8_t Keyboard_get_scancode(void)
 
 bool Keyboard_is_uppercase(void)
 {
-    return is_shifting || is_caplocked;
+    return Keyboard_state.is_shifting || Keyboard_state.is_caplocked;
 }
 
 static void Keyboard_callback(interrupt_frame_t* frame)
@@ -84,18 +77,18 @@ static void Keyboard_callback(interrupt_frame_t* frame)
         {
             case 0x2A:
             case 0x36:
-                is_shifting = TRUE;
+                Keyboard_state.is_shifting = TRUE;
                 break;
             case 0xAA:
             case 0xB6:
-                is_shifting = FALSE;
+                Keyboard_state.is_shifting = FALSE;
                 break;
             case 0x3A:
-                is_caplocked = !is_caplocked;
+                Keyboard_state.is_caplocked = !Keyboard_state.is_caplocked;
                 refresh_leds = true;
                 break;
             case 0x45:
-                is_vernum = !is_vernum;
+                Keyboard_state.is_vernum = !Keyboard_state.is_vernum;
                 refresh_leds = true;
                 break;
             default:
@@ -103,11 +96,11 @@ static void Keyboard_callback(interrupt_frame_t* frame)
         }
 
         if (refresh_leds)
-            leds = (uint8_t) ((is_vernum << 1) | (is_caplocked << 2));
+            leds = (uint8_t) ((Keyboard_state.is_vernum << 1) | (Keyboard_state.is_caplocked << 2));
 
         // Keep raw scancode stream available to userland (Shift/Caps included),
         // so libc can apply layout + modifiers consistently.
-        if (scancode_buffer_length == SCANCODE_BUFFER_SIZE) // The scancode buffer is full.
+        if (Keyboard_state.scancode_buffer_length == SCANCODE_BUFFER_SIZE) // The scancode buffer is full.
         {
             Keyboard_unlock();
             if (refresh_leds)
@@ -115,11 +108,11 @@ static void Keyboard_callback(interrupt_frame_t* frame)
             return;
         }
 
-        scancode_buffer[write_pos++] = scancode;
-        scancode_buffer_length++;
+        Keyboard_state.scancode_buffer[Keyboard_state.write_pos++] = scancode;
+        Keyboard_state.scancode_buffer_length++;
 
-        if (write_pos == SCANCODE_BUFFER_SIZE)
-            write_pos = 0;
+        if (Keyboard_state.write_pos == SCANCODE_BUFFER_SIZE)
+            Keyboard_state.write_pos = 0;
         Keyboard_unlock();
         if (refresh_leds)
             Keyboard_update_leds(leds);

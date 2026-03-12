@@ -9,14 +9,13 @@
 #include <cpuid.h>
 #include <string.h>
 
-static uint8_t FPU_initial_state[FPU_XSAVE_AREA_MAX] __attribute__((aligned(FPU_XSAVE_ALIGN)));
-static bool FPU_initial_state_ready = false;
-static bool FPU_sse_enabled = false;
-static bool FPU_avx_enabled = false;
-static uint32_t FPU_state_area_size = sizeof(FPU_fx_state_t);
-static uint64_t FPU_state_mask = FPU_XCR0_X87 | FPU_XCR0_SSE;
-static uint8_t FPU_stress_state_a[TASK_MAX_CPUS][FPU_XSAVE_AREA_MAX] __attribute__((aligned(FPU_XSAVE_ALIGN)));
-static uint8_t FPU_stress_state_b[TASK_MAX_CPUS][FPU_XSAVE_AREA_MAX] __attribute__((aligned(FPU_XSAVE_ALIGN)));
+_Static_assert(FPU_STRESS_CPU_SLOTS == TASK_MAX_CPUS,
+               "FPU stress slots must match scheduler CPU slots");
+
+static FPU_runtime_state_t FPU_state = {
+    .state_area_size = sizeof(FPU_fx_state_t),
+    .state_mask = FPU_XCR0_X87 | FPU_XCR0_SSE
+};
 
 static inline void FPU_cpuid_full(uint32_t leaf,
                                   uint32_t subleaf,
@@ -54,21 +53,21 @@ static inline void FPU_fxrstor_from(const FPU_fx_state_t* state)
 
 static inline void FPU_xsave_to(void* state)
 {
-    uint32_t eax = (uint32_t) (FPU_state_mask & 0xFFFFFFFFULL);
-    uint32_t edx = (uint32_t) ((FPU_state_mask >> 32) & 0xFFFFFFFFULL);
+    uint32_t eax = (uint32_t) (FPU_state.state_mask & 0xFFFFFFFFULL);
+    uint32_t edx = (uint32_t) ((FPU_state.state_mask >> 32) & 0xFFFFFFFFULL);
     __asm__ __volatile__("xsave (%0)" : : "r"(state), "a"(eax), "d"(edx) : "memory");
 }
 
 static inline void FPU_xrstor_from(const void* state)
 {
-    uint32_t eax = (uint32_t) (FPU_state_mask & 0xFFFFFFFFULL);
-    uint32_t edx = (uint32_t) ((FPU_state_mask >> 32) & 0xFFFFFFFFULL);
+    uint32_t eax = (uint32_t) (FPU_state.state_mask & 0xFFFFFFFFULL);
+    uint32_t edx = (uint32_t) ((FPU_state.state_mask >> 32) & 0xFFFFFFFFULL);
     __asm__ __volatile__("xrstor (%0)" : : "r"(state), "a"(eax), "d"(edx) : "memory");
 }
 
 static inline void FPU_save_state(void* state)
 {
-    if (FPU_avx_enabled)
+    if (FPU_state.avx_enabled)
         FPU_xsave_to(state);
     else
         FPU_fxsave_to((FPU_fx_state_t*) state);
@@ -76,7 +75,7 @@ static inline void FPU_save_state(void* state)
 
 static inline void FPU_restore_state(const void* state)
 {
-    if (FPU_avx_enabled)
+    if (FPU_state.avx_enabled)
         FPU_xrstor_from(state);
     else
         FPU_fxrstor_from((const FPU_fx_state_t*) state);
@@ -93,7 +92,7 @@ static bool FPU_ensure_task_state(task_t* task)
         return false;
 
     if (task->fpu_state_ptr != 0 &&
-        task->fpu_state_size >= FPU_state_area_size &&
+        task->fpu_state_size >= FPU_state.state_area_size &&
         (task->fpu_state_ptr & (FPU_XSAVE_ALIGN - 1U)) == 0)
     {
         return true;
@@ -107,7 +106,7 @@ static bool FPU_ensure_task_state(task_t* task)
         task->fpu_state_size = 0;
     }
 
-    size_t alloc_size = (size_t) FPU_state_area_size + (size_t) FPU_XSAVE_ALIGN - 1U;
+    size_t alloc_size = (size_t) FPU_state.state_area_size + (size_t) FPU_XSAVE_ALIGN - 1U;
     void* raw = kmalloc(alloc_size);
     if (!raw)
         return false;
@@ -115,8 +114,8 @@ static bool FPU_ensure_task_state(task_t* task)
     uintptr_t aligned = FPU_align_up_uintptr((uintptr_t) raw, (uintptr_t) FPU_XSAVE_ALIGN);
     task->fpu_state_alloc = (uintptr_t) raw;
     task->fpu_state_ptr = aligned;
-    task->fpu_state_size = FPU_state_area_size;
-    memset((void*) aligned, 0, FPU_state_area_size);
+    task->fpu_state_size = FPU_state.state_area_size;
+    memset((void*) aligned, 0, FPU_state.state_area_size);
     return true;
 }
 
@@ -151,7 +150,7 @@ static inline bool FPU_restore_task(task_t* task)
 
 void FPU_switch_task(task_t* prev, task_t* next)
 {
-    if (!FPU_sse_enabled)
+    if (!FPU_state.sse_enabled)
         return;
 
     /* Save previous task FPU state if it was ever initialized. */
@@ -172,8 +171,8 @@ void FPU_switch_task(task_t* prev, task_t* next)
             return;
         }
 
-        if (FPU_initial_state_ready)
-            FPU_restore_state(FPU_initial_state);
+        if (FPU_state.initial_state_ready)
+            FPU_restore_state(FPU_state.initial_state.bytes);
         else
             __asm__ __volatile__("fninit");
 
@@ -237,9 +236,9 @@ bool FPU_init_cpu(uint32_t cpu_index)
         FPU_cpuid_full(FPU_XSAVE_CPUID_LEAF, 0, &xsave_size, NULL, NULL, NULL);
         if (xsave_size >= sizeof(FPU_fx_state_t) && xsave_size <= FPU_XSAVE_AREA_MAX)
         {
-            FPU_state_area_size = xsave_size;
-            FPU_state_mask = x86_xgetbv(0);
-            FPU_avx_enabled = true;
+            FPU_state.state_area_size = xsave_size;
+            FPU_state.state_mask = x86_xgetbv(0);
+            FPU_state.avx_enabled = true;
         }
         else
         {
@@ -248,65 +247,65 @@ bool FPU_init_cpu(uint32_t cpu_index)
             fallback_mask |= (FPU_XCR0_X87 | FPU_XCR0_SSE);
             x86_xsetbv(0, fallback_mask);
 
-            FPU_state_area_size = sizeof(FPU_fx_state_t);
-            FPU_state_mask = FPU_XCR0_X87 | FPU_XCR0_SSE;
-            FPU_avx_enabled = false;
+            FPU_state.state_area_size = sizeof(FPU_fx_state_t);
+            FPU_state.state_mask = FPU_XCR0_X87 | FPU_XCR0_SSE;
+            FPU_state.avx_enabled = false;
         }
     }
 
-    if (!FPU_avx_enabled)
+    if (!FPU_state.avx_enabled)
     {
-        FPU_state_area_size = sizeof(FPU_fx_state_t);
-        FPU_state_mask = FPU_XCR0_X87 | FPU_XCR0_SSE;
+        FPU_state.state_area_size = sizeof(FPU_fx_state_t);
+        FPU_state.state_mask = FPU_XCR0_X87 | FPU_XCR0_SSE;
     }
 
     x86_clear_ts();
 
-    if (!FPU_initial_state_ready)
+    if (!FPU_state.initial_state_ready)
     {
         __asm__ __volatile__("fninit");
-        memset(FPU_initial_state, 0, sizeof(FPU_initial_state));
-        FPU_save_state(FPU_initial_state);
-        FPU_initial_state_ready = true;
+        memset(FPU_state.initial_state.bytes, 0, sizeof(FPU_state.initial_state.bytes));
+        FPU_save_state(FPU_state.initial_state.bytes);
+        FPU_state.initial_state_ready = true;
     }
 
-    FPU_sse_enabled = true;
+    FPU_state.sse_enabled = true;
 
     kdebug_printf("[FPU] cpu=%u init sse=on avx=%s state=%uB mode=%s\n",
                   cpu_index,
-                  FPU_avx_enabled ? "on" : "off",
-                  FPU_state_area_size,
-                  FPU_avx_enabled ? "xsave" : "fxsave");
+                  FPU_state.avx_enabled ? "on" : "off",
+                  FPU_state.state_area_size,
+                  FPU_state.avx_enabled ? "xsave" : "fxsave");
     return true;
 }
 
 bool FPU_is_sse_enabled(void)
 {
-    return FPU_sse_enabled;
+    return FPU_state.sse_enabled;
 }
 
 bool FPU_is_avx_enabled(void)
 {
-    return FPU_avx_enabled;
+    return FPU_state.avx_enabled;
 }
 
 bool FPU_stress_ymm_local(uint32_t iterations, uint64_t* signature_out)
 {
-    if (!FPU_sse_enabled || !FPU_avx_enabled || FPU_state_area_size == 0)
+    if (!FPU_state.sse_enabled || !FPU_state.avx_enabled || FPU_state.state_area_size == 0)
         return false;
 
     if (iterations == 0)
         iterations = 1;
 
     uint32_t cpu_index = task_get_current_cpu_index();
-    if (cpu_index >= TASK_MAX_CPUS)
+    if (cpu_index >= FPU_STRESS_CPU_SLOTS)
         cpu_index = 0;
 
-    void* state_a = (void*) &FPU_stress_state_a[cpu_index][0];
-    void* state_b = (void*) &FPU_stress_state_b[cpu_index][0];
+    void* state_a = (void*) FPU_state.stress_state_a[cpu_index].bytes;
+    void* state_b = (void*) FPU_state.stress_state_b[cpu_index].bytes;
 
-    memset(state_a, 0, FPU_state_area_size);
-    memset(state_b, 0, FPU_state_area_size);
+    memset(state_a, 0, FPU_state.state_area_size);
+    memset(state_b, 0, FPU_state.state_area_size);
 
     uint8_t pattern_a[32] __attribute__((aligned(32)));
     uint8_t pattern_b[32] __attribute__((aligned(32)));

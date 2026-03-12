@@ -30,6 +30,28 @@ typedef struct TTY_framebuffer_info
     uint8_t blue_mask_size;
 } TTY_framebuffer_info_t;
 
+typedef enum TTY_ansi_state
+{
+    TTY_ANSI_IDLE = 0,
+    TTY_ANSI_ESC,
+    TTY_ANSI_CSI
+} TTY_ansi_state_t;
+
+typedef struct TTY_runtime_state
+{
+    uint32_t row;
+    uint32_t col;
+    uint8_t color;
+    bool cursor_enabled;
+    bool use_framebuffer;
+    bool output_enabled;
+    uint32_t cols;
+    uint32_t rows;
+    TTY_ansi_state_t ansi_state;
+    uint32_t ansi_param;
+    bool ansi_has_param;
+} TTY_runtime_state_t;
+
 void TTY_set_buffer(uint16_t* buffer);
 
 void TTY_init(void);

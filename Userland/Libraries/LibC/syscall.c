@@ -174,9 +174,20 @@ int sys_reboot(void)
     return sys_power(SYS_POWER_CMD_REBOOT, 0);
 }
 
+int sys_thread_create_ex(uintptr_t start_rip, uintptr_t arg, uintptr_t stack_top, uintptr_t fs_base)
+{
+    return (int) syscall(SYS_THREAD_CREATE,
+                         (long) start_rip,
+                         (long) arg,
+                         (long) stack_top,
+                         (long) fs_base,
+                         0,
+                         0);
+}
+
 int sys_thread_create(uintptr_t start_rip, uintptr_t arg, uintptr_t stack_top)
 {
-    return (int) syscall(SYS_THREAD_CREATE, (long) start_rip, (long) arg, (long) stack_top, 0, 0, 0);
+    return sys_thread_create_ex(start_rip, arg, stack_top, 0);
 }
 
 int sys_thread_join(int tid, uint64_t* out_retval)
@@ -194,4 +205,17 @@ __attribute__((__noreturn__)) void sys_thread_exit(uint64_t retval)
 int sys_thread_self(void)
 {
     return (int) syscall(SYS_THREAD_SELF, 0, 0, 0, 0, 0, 0);
+}
+
+int sys_thread_set_fsbase(uintptr_t fs_base)
+{
+    return (int) syscall(SYS_THREAD_SET_FSBASE, (long) fs_base, 0, 0, 0, 0, 0);
+}
+
+uintptr_t sys_thread_get_fsbase(void)
+{
+    long ret = syscall(SYS_THREAD_GET_FSBASE, 0, 0, 0, 0, 0, 0);
+    if (ret < 0)
+        return 0;
+    return (uintptr_t) ret;
 }

@@ -18,16 +18,9 @@ extern volatile struct limine_hhdm_request limine_hhdm_request;
 extern volatile struct limine_framebuffer_request limine_framebuffer_request;
 extern volatile struct limine_rsdp_request limine_rsdp_request;
 
-static TTY_framebuffer_info_t limine_boot_framebuffer = { 0 };
-static bool limine_boot_framebuffer_available = false;
-static char limine_boot_cmdline[256] = { 0 };
-static uint64_t limine_boot_hhdm_offset = 0;
-static uintptr_t limine_boot_rsdp_addr = 0;
-static bool limine_boot_mbr_disk_id_hint_present = false;
-static uint32_t limine_boot_mbr_disk_id_hint = 0;
-static bool limine_boot_slice_hint_present = false;
-static int32_t limine_boot_slice_hint = -1;
-static bool limine_bootloader_reclaimable_promoted = false;
+static LimineHelper_runtime_state_t LimineHelper_state = {
+    .boot_slice_hint = -1
+};
 
 static uintptr_t limine_addr_to_phys(uintptr_t addr)
 {
@@ -207,32 +200,32 @@ void LimineHelper_read_boot_info(void)
 {
     if (limine_hhdm_request.response)
     {
-        limine_boot_hhdm_offset = limine_hhdm_request.response->offset;
-        VMM_set_hhdm_base((uintptr_t) limine_boot_hhdm_offset);
+        LimineHelper_state.boot_hhdm_offset = limine_hhdm_request.response->offset;
+        VMM_set_hhdm_base((uintptr_t) LimineHelper_state.boot_hhdm_offset);
         kdebug_printf("[BOOT] Limine HHDM offset=0x%llX\n",
-                      (unsigned long long) limine_boot_hhdm_offset);
+                      (unsigned long long) LimineHelper_state.boot_hhdm_offset);
     }
     else
     {
-        limine_boot_hhdm_offset = (uint64_t) VMM_get_hhdm_base();
+        LimineHelper_state.boot_hhdm_offset = (uint64_t) VMM_get_hhdm_base();
         kdebug_printf("[BOOT] Limine HHDM unavailable, fallback offset=0x%llX\n",
-                      (unsigned long long) limine_boot_hhdm_offset);
+                      (unsigned long long) LimineHelper_state.boot_hhdm_offset);
     }
 
     if (limine_cmdline_request.response && limine_cmdline_request.response->cmdline)
     {
         const char* cmdline = limine_cmdline_request.response->cmdline;
         size_t len = strlen(cmdline);
-        if (len >= sizeof(limine_boot_cmdline))
-            len = sizeof(limine_boot_cmdline) - 1U;
-        memcpy(limine_boot_cmdline, cmdline, len);
-        limine_boot_cmdline[len] = '\0';
+        if (len >= sizeof(LimineHelper_state.boot_cmdline))
+            len = sizeof(LimineHelper_state.boot_cmdline) - 1U;
+        memcpy(LimineHelper_state.boot_cmdline, cmdline, len);
+        LimineHelper_state.boot_cmdline[len] = '\0';
 
-        kdebug_printf("[BOOT] Limine cmdline: %s\n", limine_boot_cmdline);
+        kdebug_printf("[BOOT] Limine cmdline: %s\n", LimineHelper_state.boot_cmdline);
     }
     else
     {
-        limine_boot_cmdline[0] = '\0';
+        LimineHelper_state.boot_cmdline[0] = '\0';
         kdebug_puts("[BOOT] Limine cmdline unavailable\n");
     }
 
@@ -291,16 +284,16 @@ void LimineHelper_read_boot_info(void)
     if (limine_rsdp_request.response && limine_rsdp_request.response->address)
     {
         uintptr_t rsdp_raw = (uintptr_t) limine_rsdp_request.response->address;
-        limine_boot_rsdp_addr = limine_addr_to_phys(rsdp_raw);
+        LimineHelper_state.boot_rsdp_addr = limine_addr_to_phys(rsdp_raw);
         kdebug_printf("[BOOT] Limine RSDP deferred raw=0x%llX phys=0x%llX\n",
                       (unsigned long long) rsdp_raw,
-                      (unsigned long long) limine_boot_rsdp_addr);
+                      (unsigned long long) LimineHelper_state.boot_rsdp_addr);
     }
 
-    limine_boot_mbr_disk_id_hint_present = false;
-    limine_boot_mbr_disk_id_hint = 0;
-    limine_boot_slice_hint_present = false;
-    limine_boot_slice_hint = -1;
+    LimineHelper_state.boot_mbr_disk_id_hint_present = false;
+    LimineHelper_state.boot_mbr_disk_id_hint = 0;
+    LimineHelper_state.boot_slice_hint_present = false;
+    LimineHelper_state.boot_slice_hint = -1;
 
     if (limine_executable_file_request.response &&
         limine_executable_file_request.response->executable_file)
@@ -308,13 +301,13 @@ void LimineHelper_read_boot_info(void)
         struct limine_file* executable = limine_executable_file_request.response->executable_file;
         if (executable->mbr_disk_id != 0)
         {
-            limine_boot_mbr_disk_id_hint_present = true;
-            limine_boot_mbr_disk_id_hint = executable->mbr_disk_id;
+            LimineHelper_state.boot_mbr_disk_id_hint_present = true;
+            LimineHelper_state.boot_mbr_disk_id_hint = executable->mbr_disk_id;
         }
         if (executable->partition_index != 0)
         {
-            limine_boot_slice_hint_present = true;
-            limine_boot_slice_hint = (int32_t) executable->partition_index - 1;
+            LimineHelper_state.boot_slice_hint_present = true;
+            LimineHelper_state.boot_slice_hint = (int32_t) executable->partition_index - 1;
         }
 
         kdebug_printf("[BOOT] Limine executable source media=%u mbr_disk_id=0x%X part_index=%u\n",
@@ -323,7 +316,7 @@ void LimineHelper_read_boot_info(void)
                       executable->partition_index);
     }
 
-    limine_boot_framebuffer_available = false;
+    LimineHelper_state.boot_framebuffer_available = false;
     if (limine_framebuffer_request.response &&
         limine_framebuffer_request.response->framebuffer_count > 0 &&
         limine_framebuffer_request.response->framebuffers)
@@ -400,28 +393,28 @@ void LimineHelper_read_boot_info(void)
                           (unsigned long long) selected_best_bpp);
 
             uintptr_t fb_addr = (uintptr_t) selected_fb->address;
-            limine_boot_framebuffer.phys_addr = limine_addr_to_phys(fb_addr);
-            limine_boot_framebuffer.pitch = (uint32_t) selected_fb->pitch;
-            limine_boot_framebuffer.width = (uint32_t) selected_fb->width;
-            limine_boot_framebuffer.height = (uint32_t) selected_fb->height;
-            limine_boot_framebuffer.bpp = (uint8_t) selected_fb->bpp;
-            limine_boot_framebuffer.type = TTY_FRAMEBUFFER_TYPE_RGB;
-            limine_boot_framebuffer.red_field_position = selected_fb->red_mask_shift;
-            limine_boot_framebuffer.red_mask_size = selected_fb->red_mask_size;
-            limine_boot_framebuffer.green_field_position = selected_fb->green_mask_shift;
-            limine_boot_framebuffer.green_mask_size = selected_fb->green_mask_size;
-            limine_boot_framebuffer.blue_field_position = selected_fb->blue_mask_shift;
-            limine_boot_framebuffer.blue_mask_size = selected_fb->blue_mask_size;
-            limine_boot_framebuffer_available = true;
+            LimineHelper_state.boot_framebuffer.phys_addr = limine_addr_to_phys(fb_addr);
+            LimineHelper_state.boot_framebuffer.pitch = (uint32_t) selected_fb->pitch;
+            LimineHelper_state.boot_framebuffer.width = (uint32_t) selected_fb->width;
+            LimineHelper_state.boot_framebuffer.height = (uint32_t) selected_fb->height;
+            LimineHelper_state.boot_framebuffer.bpp = (uint8_t) selected_fb->bpp;
+            LimineHelper_state.boot_framebuffer.type = TTY_FRAMEBUFFER_TYPE_RGB;
+            LimineHelper_state.boot_framebuffer.red_field_position = selected_fb->red_mask_shift;
+            LimineHelper_state.boot_framebuffer.red_mask_size = selected_fb->red_mask_size;
+            LimineHelper_state.boot_framebuffer.green_field_position = selected_fb->green_mask_shift;
+            LimineHelper_state.boot_framebuffer.green_mask_size = selected_fb->green_mask_size;
+            LimineHelper_state.boot_framebuffer.blue_field_position = selected_fb->blue_mask_shift;
+            LimineHelper_state.boot_framebuffer.blue_mask_size = selected_fb->blue_mask_size;
+            LimineHelper_state.boot_framebuffer_available = true;
             kdebug_printf("[BOOT] Limine framebuffer selected fb[%llu]%s raw=0x%llX phys=0x%llX %ux%u pitch=%u bpp=%u\n",
                           (unsigned long long) selected_index,
                           primary_fb ? " PRIMARY" : "",
                           (unsigned long long) fb_addr,
-                          (unsigned long long) limine_boot_framebuffer.phys_addr,
-                          (unsigned int) limine_boot_framebuffer.width,
-                          (unsigned int) limine_boot_framebuffer.height,
-                          (unsigned int) limine_boot_framebuffer.pitch,
-                          (unsigned int) limine_boot_framebuffer.bpp);
+                          (unsigned long long) LimineHelper_state.boot_framebuffer.phys_addr,
+                          (unsigned int) LimineHelper_state.boot_framebuffer.width,
+                          (unsigned int) LimineHelper_state.boot_framebuffer.height,
+                          (unsigned int) LimineHelper_state.boot_framebuffer.pitch,
+                          (unsigned int) LimineHelper_state.boot_framebuffer.bpp);
         }
         else
         {
@@ -436,10 +429,10 @@ void LimineHelper_read_boot_info(void)
 
 bool LimineHelper_init_acpi_from_rsdp_if_needed(void)
 {
-    if (limine_boot_rsdp_addr == 0)
+    if (LimineHelper_state.boot_rsdp_addr == 0)
         return false;
 
-    uintptr_t rsdp_phys = limine_boot_rsdp_addr;
+    uintptr_t rsdp_phys = LimineHelper_state.boot_rsdp_addr;
     uintptr_t rsdp_page_phys = rsdp_phys & FRAME;
     VMM_map_page(P2V(rsdp_page_phys), rsdp_page_phys);
 
@@ -476,7 +469,7 @@ bool LimineHelper_init_acpi_from_rsdp_if_needed(void)
 
 void LimineHelper_promote_bootloader_reclaimable(void)
 {
-    if (limine_bootloader_reclaimable_promoted)
+    if (LimineHelper_state.bootloader_reclaimable_promoted)
     {
         kdebug_puts("[BOOT] Limine bootloader reclaimable promotion already done\n");
         return;
@@ -487,7 +480,7 @@ void LimineHelper_promote_bootloader_reclaimable(void)
     bool promoted = PMM_promote_boot_entries_to_allocatable(LIMINE_MEMMAP_BOOTLOADER_RECLAIMABLE,
                                                             &regions_added,
                                                             &pages_added);
-    limine_bootloader_reclaimable_promoted = true;
+    LimineHelper_state.bootloader_reclaimable_promoted = true;
 
     if (promoted)
     {
@@ -503,27 +496,27 @@ void LimineHelper_promote_bootloader_reclaimable(void)
 
 bool LimineHelper_get_framebuffer(TTY_framebuffer_info_t* out_info)
 {
-    if (!limine_boot_framebuffer_available || !out_info)
+    if (!LimineHelper_state.boot_framebuffer_available || !out_info)
         return false;
 
-    *out_info = limine_boot_framebuffer;
+    *out_info = LimineHelper_state.boot_framebuffer;
     return true;
 }
 
 bool LimineHelper_get_mbr_disk_id_hint(uint32_t* out_disk_id)
 {
-    if (!limine_boot_mbr_disk_id_hint_present || !out_disk_id)
+    if (!LimineHelper_state.boot_mbr_disk_id_hint_present || !out_disk_id)
         return false;
 
-    *out_disk_id = limine_boot_mbr_disk_id_hint;
+    *out_disk_id = LimineHelper_state.boot_mbr_disk_id_hint;
     return true;
 }
 
 bool LimineHelper_get_slice_hint(int32_t* out_slice_hint)
 {
-    if (!limine_boot_slice_hint_present || !out_slice_hint)
+    if (!LimineHelper_state.boot_slice_hint_present || !out_slice_hint)
         return false;
 
-    *out_slice_hint = limine_boot_slice_hint;
+    *out_slice_hint = LimineHelper_state.boot_slice_hint;
     return true;
 }

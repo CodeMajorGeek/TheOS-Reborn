@@ -54,6 +54,7 @@ typedef volatile struct PCI_msix_entry
 
 #define PCI_MSI_ADDR_BASE                0xFEE00000U
 #define PCI_MSIX_SCRATCH_VIRT_BASE       0xFFFFC00000300000ULL
+#define PCI_LOG_BUFFER_SIZE              16384U
 
 typedef enum PCI_irq_mode
 {
@@ -61,6 +62,12 @@ typedef enum PCI_irq_mode
     PCI_IRQ_MODE_MSI = 1,
     PCI_IRQ_MODE_MSIX = 2
 } PCI_irq_mode_t;
+
+typedef struct PCI_runtime_state
+{
+    char log_buffer[PCI_LOG_BUFFER_SIZE];
+    size_t log_len;
+} PCI_runtime_state_t;
 
 typedef struct PCI_bus PCI_bus_t;
 
@@ -82,8 +89,5 @@ void PCI_check_function(uint8_t bus, uint8_t slot, uint8_t function);
 
 void PCI_scan_bus(uint8_t bus);
 const char* PCI_get_log_buffer(size_t* out_size);
-
-static void PCI_try_attach(uint8_t bus, uint8_t slot, uint8_t function, uint16_t vendor, uint16_t device);
-static void PCI_attach_storage_dev(uint8_t bus, uint8_t slot, uint8_t function, uint16_t vendor, uint16_t device);
 
 #endif

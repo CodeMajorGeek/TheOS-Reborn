@@ -8,43 +8,7 @@
 #include <stddef.h>
 #include <string.h>
 
-#define ACPI_PM1_CNT_SCI_EN_BIT       (1U << 0)
-#define ACPI_PM1_CNT_SLP_TYP_SHIFT    10U
-#define ACPI_PM1_CNT_SLP_TYP_MASK     (0x7U << ACPI_PM1_CNT_SLP_TYP_SHIFT)
-#define ACPI_PM1_CNT_SLP_EN_BIT       (1U << 13)
-
-#define ACPI_SLEEP_CTRL_SLP_TYP_SHIFT 2U
-#define ACPI_SLEEP_CTRL_SLP_TYP_MASK  (0x7U << ACPI_SLEEP_CTRL_SLP_TYP_SHIFT)
-#define ACPI_SLEEP_CTRL_SLP_EN_BIT    (1U << 5)
-
-#define ACPI_ENABLE_TIMEOUT_LOOPS     2000000U
-#define ACPI_TRANSITION_WAIT_LOOPS    1000000U
-#define ACPI_CF9_RESET_PORT           0xCF9U
-
-typedef struct ACPI_sleep_type
-{
-    bool valid;
-    uint8_t typ_a;
-    uint8_t typ_b;
-} ACPI_sleep_type_t;
-
-static uintptr_t ACPI_RSDT_phys = 0;
-static uintptr_t ACPI_XSDT_phys = 0;
-
-static bool ACPI_power_initialized = false;
-static bool ACPI_power_ready = false;
-static bool ACPI_hw_reduced = false;
-static uint8_t ACPI_pm1_cnt_len = 0;
-static uint32_t ACPI_smi_cmd_port = 0;
-static uint8_t ACPI_acpi_enable_value = 0;
-
-static ACPI_generic_address_t ACPI_pm1a_cnt = { 0 };
-static ACPI_generic_address_t ACPI_pm1b_cnt = { 0 };
-static ACPI_generic_address_t ACPI_reset_reg = { 0 };
-static uint8_t ACPI_reset_value = 0;
-static ACPI_generic_address_t ACPI_sleep_control_reg = { 0 };
-
-static ACPI_sleep_type_t ACPI_sleep_types[6];
+static ACPI_runtime_state_t ACPI_runtime_state;
 
 static ACPI_SDT_header_t* ACPI_map_sdt(uintptr_t phys)
 {
@@ -330,14 +294,14 @@ static bool ACPI_aml_parse_integer_u8(const uint8_t* ptr,
 
 static void ACPI_parse_sleep_types_from_aml(const uint8_t* aml, size_t aml_len)
 {
-    for (size_t i = 0; i < sizeof(ACPI_sleep_types) / sizeof(ACPI_sleep_types[0]); i++)
+    for (size_t i = 0; i < sizeof(ACPI_runtime_state.sleep_types) / sizeof(ACPI_runtime_state.sleep_types[0]); i++)
     {
-        ACPI_sleep_types[i].valid = false;
-        ACPI_sleep_types[i].typ_a = 0;
-        ACPI_sleep_types[i].typ_b = 0;
+        ACPI_runtime_state.sleep_types[i].valid = false;
+        ACPI_runtime_state.sleep_types[i].typ_a = 0;
+        ACPI_runtime_state.sleep_types[i].typ_b = 0;
     }
 
-    ACPI_sleep_types[ACPI_SLEEP_S0].valid = true;
+    ACPI_runtime_state.sleep_types[ACPI_SLEEP_S0].valid = true;
 
     if (!aml || aml_len < 8)
         return;
@@ -385,9 +349,9 @@ static void ACPI_parse_sleep_types_from_aml(const uint8_t* aml, size_t aml_len)
         if (!ACPI_aml_parse_integer_u8(aml + cursor, pkg_end - cursor, &typ_b, &used))
             typ_b = typ_a;
 
-        ACPI_sleep_types[state].valid = true;
-        ACPI_sleep_types[state].typ_a = (uint8_t) (typ_a & 0x7U);
-        ACPI_sleep_types[state].typ_b = (uint8_t) (typ_b & 0x7U);
+        ACPI_runtime_state.sleep_types[state].valid = true;
+        ACPI_runtime_state.sleep_types[state].typ_a = (uint8_t) (typ_a & 0x7U);
+        ACPI_runtime_state.sleep_types[state].typ_b = (uint8_t) (typ_b & 0x7U);
     }
 }
 
@@ -409,26 +373,26 @@ static ACPI_generic_address_t ACPI_gas_from_io_port(uint32_t port, uint8_t width
 
 static bool ACPI_try_enable_legacy_mode(void)
 {
-    if (ACPI_pm1_cnt_len == 0 || !ACPI_gas_is_supported(&ACPI_pm1a_cnt))
+    if (ACPI_runtime_state.pm1_cnt_len == 0 || !ACPI_gas_is_supported(&ACPI_runtime_state.pm1a_cnt))
         return false;
 
     uint32_t pm1a = 0;
-    if (!ACPI_gas_read_u32(&ACPI_pm1a_cnt, ACPI_pm1_cnt_len, &pm1a))
+    if (!ACPI_gas_read_u32(&ACPI_runtime_state.pm1a_cnt, ACPI_runtime_state.pm1_cnt_len, &pm1a))
         return false;
 
     if ((pm1a & ACPI_PM1_CNT_SCI_EN_BIT) != 0)
         return true;
 
-    if (ACPI_smi_cmd_port == 0 || ACPI_acpi_enable_value == 0)
+    if (ACPI_runtime_state.smi_cmd_port == 0 || ACPI_runtime_state.acpi_enable_value == 0)
         return false;
-    if (ACPI_smi_cmd_port > 0xFFFFU)
+    if (ACPI_runtime_state.smi_cmd_port > 0xFFFFU)
         return false;
 
-    IO_outb((uint16_t) ACPI_smi_cmd_port, ACPI_acpi_enable_value);
+    IO_outb((uint16_t) ACPI_runtime_state.smi_cmd_port, ACPI_runtime_state.acpi_enable_value);
 
     for (uint32_t i = 0; i < ACPI_ENABLE_TIMEOUT_LOOPS; i++)
     {
-        if (!ACPI_gas_read_u32(&ACPI_pm1a_cnt, ACPI_pm1_cnt_len, &pm1a))
+        if (!ACPI_gas_read_u32(&ACPI_runtime_state.pm1a_cnt, ACPI_runtime_state.pm1_cnt_len, &pm1a))
             break;
         if ((pm1a & ACPI_PM1_CNT_SCI_EN_BIT) != 0)
             return true;
@@ -474,13 +438,13 @@ bool ACPI_SDT_check(ACPI_SDT_header_t* sdt_header_ptr)
 
 void ACPI_init_RSDT(ACPI_RSDP_descriptor10_t* desc)
 {
-    ACPI_RSDT_phys = (uintptr_t) desc->RSDT_ptr;
+    ACPI_runtime_state.rsdt_phys = (uintptr_t) desc->RSDT_ptr;
 }
 
 void ACPI_init_XSDT(ACPI_RSDP_descriptor20_t* desc)
 {
-    ACPI_XSDT_phys = (uintptr_t) desc->XSDT_ptr;
-    ACPI_RSDT_phys = (uintptr_t) desc->first_part.RSDT_ptr;
+    ACPI_runtime_state.xsdt_phys = (uintptr_t) desc->XSDT_ptr;
+    ACPI_runtime_state.rsdt_phys = (uintptr_t) desc->first_part.RSDT_ptr;
 }
 
 void* ACPI_get_table_old(ACPI_RSDT_t* rsdt, char signature[4])
@@ -525,16 +489,16 @@ void* ACPI_get_table_new(ACPI_XSDT_t* xsdt, char signature[4])
 
 void* ACPI_get_table(char signature[4])
 {
-    if (ACPI_XSDT_phys != 0)
+    if (ACPI_runtime_state.xsdt_phys != 0)
     {
-        ACPI_XSDT_t* xsdt = (ACPI_XSDT_t*) ACPI_map_sdt(ACPI_XSDT_phys);
+        ACPI_XSDT_t* xsdt = (ACPI_XSDT_t*) ACPI_map_sdt(ACPI_runtime_state.xsdt_phys);
         if (xsdt && ACPI_SDT_check(&xsdt->header))
             return ACPI_get_table_new(xsdt, signature);
     }
 
-    if (ACPI_RSDT_phys != 0)
+    if (ACPI_runtime_state.rsdt_phys != 0)
     {
-        ACPI_RSDT_t* rsdt = (ACPI_RSDT_t*) ACPI_map_sdt(ACPI_RSDT_phys);
+        ACPI_RSDT_t* rsdt = (ACPI_RSDT_t*) ACPI_map_sdt(ACPI_runtime_state.rsdt_phys);
         if (rsdt && ACPI_SDT_check(&rsdt->header))
             return ACPI_get_table_old(rsdt, signature);
     }
@@ -544,11 +508,11 @@ void* ACPI_get_table(char signature[4])
 
 bool ACPI_power_init(void)
 {
-    if (ACPI_power_initialized)
-        return ACPI_power_ready;
+    if (ACPI_runtime_state.power_initialized)
+        return ACPI_runtime_state.power_ready;
 
-    ACPI_power_initialized = true;
-    ACPI_power_ready = false;
+    ACPI_runtime_state.power_initialized = true;
+    ACPI_runtime_state.power_ready = false;
 
     ACPI_FADT_t* fadt = (ACPI_FADT_t*) ACPI_get_table(ACPI_FACP_SIGNATURE);
     if (!fadt)
@@ -557,63 +521,63 @@ bool ACPI_power_init(void)
         return false;
     }
 
-    ACPI_pm1a_cnt = (ACPI_generic_address_t) { 0 };
-    ACPI_pm1b_cnt = (ACPI_generic_address_t) { 0 };
-    ACPI_reset_reg = (ACPI_generic_address_t) { 0 };
-    ACPI_sleep_control_reg = (ACPI_generic_address_t) { 0 };
-    ACPI_pm1_cnt_len = 0;
-    ACPI_smi_cmd_port = 0;
-    ACPI_acpi_enable_value = 0;
-    ACPI_reset_value = 0;
-    ACPI_hw_reduced = false;
+    ACPI_runtime_state.pm1a_cnt = (ACPI_generic_address_t) { 0 };
+    ACPI_runtime_state.pm1b_cnt = (ACPI_generic_address_t) { 0 };
+    ACPI_runtime_state.reset_reg = (ACPI_generic_address_t) { 0 };
+    ACPI_runtime_state.sleep_control_reg = (ACPI_generic_address_t) { 0 };
+    ACPI_runtime_state.pm1_cnt_len = 0;
+    ACPI_runtime_state.smi_cmd_port = 0;
+    ACPI_runtime_state.acpi_enable_value = 0;
+    ACPI_runtime_state.reset_value = 0;
+    ACPI_runtime_state.hw_reduced = false;
 
     if (ACPI_fadt_has_field(fadt, offsetof(ACPI_FADT_t, flags), sizeof(fadt->flags)))
-        ACPI_hw_reduced = (fadt->flags & ACPI_FADT_FLAG_HW_REDUCED_ACPI) != 0;
+        ACPI_runtime_state.hw_reduced = (fadt->flags & ACPI_FADT_FLAG_HW_REDUCED_ACPI) != 0;
 
     if (ACPI_fadt_has_field(fadt, offsetof(ACPI_FADT_t, pm1_cnt_len), sizeof(fadt->pm1_cnt_len)))
-        ACPI_pm1_cnt_len = fadt->pm1_cnt_len;
+        ACPI_runtime_state.pm1_cnt_len = fadt->pm1_cnt_len;
 
-    if (ACPI_pm1_cnt_len == 0 || ACPI_pm1_cnt_len > 4)
-        ACPI_pm1_cnt_len = 2;
+    if (ACPI_runtime_state.pm1_cnt_len == 0 || ACPI_runtime_state.pm1_cnt_len > 4)
+        ACPI_runtime_state.pm1_cnt_len = 2;
 
     if (ACPI_fadt_has_field(fadt, offsetof(ACPI_FADT_t, x_pm1a_cnt_blk), sizeof(fadt->x_pm1a_cnt_blk)) &&
         ACPI_gas_is_supported(&fadt->x_pm1a_cnt_blk))
     {
-        ACPI_pm1a_cnt = fadt->x_pm1a_cnt_blk;
+        ACPI_runtime_state.pm1a_cnt = fadt->x_pm1a_cnt_blk;
     }
     else if (ACPI_fadt_has_field(fadt, offsetof(ACPI_FADT_t, pm1a_cnt_blk), sizeof(fadt->pm1a_cnt_blk)) &&
              fadt->pm1a_cnt_blk != 0)
     {
-        ACPI_pm1a_cnt = ACPI_gas_from_io_port(fadt->pm1a_cnt_blk, ACPI_pm1_cnt_len);
+        ACPI_runtime_state.pm1a_cnt = ACPI_gas_from_io_port(fadt->pm1a_cnt_blk, ACPI_runtime_state.pm1_cnt_len);
     }
 
     if (ACPI_fadt_has_field(fadt, offsetof(ACPI_FADT_t, x_pm1b_cnt_blk), sizeof(fadt->x_pm1b_cnt_blk)) &&
         ACPI_gas_is_supported(&fadt->x_pm1b_cnt_blk))
     {
-        ACPI_pm1b_cnt = fadt->x_pm1b_cnt_blk;
+        ACPI_runtime_state.pm1b_cnt = fadt->x_pm1b_cnt_blk;
     }
     else if (ACPI_fadt_has_field(fadt, offsetof(ACPI_FADT_t, pm1b_cnt_blk), sizeof(fadt->pm1b_cnt_blk)) &&
              fadt->pm1b_cnt_blk != 0)
     {
-        ACPI_pm1b_cnt = ACPI_gas_from_io_port(fadt->pm1b_cnt_blk, ACPI_pm1_cnt_len);
+        ACPI_runtime_state.pm1b_cnt = ACPI_gas_from_io_port(fadt->pm1b_cnt_blk, ACPI_runtime_state.pm1_cnt_len);
     }
 
     if (ACPI_fadt_has_field(fadt, offsetof(ACPI_FADT_t, smi_cmd), sizeof(fadt->smi_cmd)))
-        ACPI_smi_cmd_port = fadt->smi_cmd;
+        ACPI_runtime_state.smi_cmd_port = fadt->smi_cmd;
 
     if (ACPI_fadt_has_field(fadt, offsetof(ACPI_FADT_t, acpi_enable), sizeof(fadt->acpi_enable)))
-        ACPI_acpi_enable_value = fadt->acpi_enable;
+        ACPI_runtime_state.acpi_enable_value = fadt->acpi_enable;
 
     if (ACPI_fadt_has_field(fadt, offsetof(ACPI_FADT_t, reset_reg), sizeof(fadt->reset_reg)) &&
         ACPI_gas_is_supported(&fadt->reset_reg))
-        ACPI_reset_reg = fadt->reset_reg;
+        ACPI_runtime_state.reset_reg = fadt->reset_reg;
 
     if (ACPI_fadt_has_field(fadt, offsetof(ACPI_FADT_t, reset_value), sizeof(fadt->reset_value)))
-        ACPI_reset_value = fadt->reset_value;
+        ACPI_runtime_state.reset_value = fadt->reset_value;
 
     if (ACPI_fadt_has_field(fadt, offsetof(ACPI_FADT_t, sleep_control_reg), sizeof(fadt->sleep_control_reg)) &&
         ACPI_gas_is_supported(&fadt->sleep_control_reg))
-        ACPI_sleep_control_reg = fadt->sleep_control_reg;
+        ACPI_runtime_state.sleep_control_reg = fadt->sleep_control_reg;
 
     uintptr_t dsdt_phys = 0;
     if (ACPI_fadt_has_field(fadt, offsetof(ACPI_FADT_t, x_dsdt), sizeof(fadt->x_dsdt)) && fadt->x_dsdt != 0)
@@ -632,7 +596,7 @@ bool ACPI_power_init(void)
         }
     }
 
-    if (!ACPI_hw_reduced)
+    if (!ACPI_runtime_state.hw_reduced)
     {
         bool acpi_mode_ok = ACPI_try_enable_legacy_mode();
         if (!acpi_mode_ok)
@@ -640,29 +604,29 @@ bool ACPI_power_init(void)
     }
 
     bool has_sleep_path = false;
-    if (ACPI_hw_reduced)
-        has_sleep_path = ACPI_gas_is_supported(&ACPI_sleep_control_reg);
+    if (ACPI_runtime_state.hw_reduced)
+        has_sleep_path = ACPI_gas_is_supported(&ACPI_runtime_state.sleep_control_reg);
     else
-        has_sleep_path = ACPI_gas_is_supported(&ACPI_pm1a_cnt);
+        has_sleep_path = ACPI_gas_is_supported(&ACPI_runtime_state.pm1a_cnt);
 
-    bool has_reset_path = ACPI_gas_is_supported(&ACPI_reset_reg);
-    ACPI_power_ready = has_sleep_path || has_reset_path;
+    bool has_reset_path = ACPI_gas_is_supported(&ACPI_runtime_state.reset_reg);
+    ACPI_runtime_state.power_ready = has_sleep_path || has_reset_path;
 
     kdebug_printf("[ACPI] power init: hw_reduced=%u sleep=%u reset=%u s5=%u\n",
-                  ACPI_hw_reduced ? 1U : 0U,
+                  ACPI_runtime_state.hw_reduced ? 1U : 0U,
                   has_sleep_path ? 1U : 0U,
                   has_reset_path ? 1U : 0U,
-                  ACPI_sleep_types[ACPI_SLEEP_S5].valid ? 1U : 0U);
+                  ACPI_runtime_state.sleep_types[ACPI_SLEEP_S5].valid ? 1U : 0U);
 
-    return ACPI_power_ready;
+    return ACPI_runtime_state.power_ready;
 }
 
 bool ACPI_is_power_ready(void)
 {
-    if (!ACPI_power_initialized)
+    if (!ACPI_runtime_state.power_initialized)
         return ACPI_power_init();
 
-    return ACPI_power_ready;
+    return ACPI_runtime_state.power_ready;
 }
 
 bool ACPI_sleep(ACPI_sleep_state_t state)
@@ -670,16 +634,16 @@ bool ACPI_sleep(ACPI_sleep_state_t state)
     if ((uint32_t) state > (uint32_t) ACPI_SLEEP_S5)
         return false;
 
-    if (!ACPI_power_initialized)
+    if (!ACPI_runtime_state.power_initialized)
         (void) ACPI_power_init();
 
     if (state == ACPI_SLEEP_S0)
         return true;
 
-    if (!ACPI_power_ready)
+    if (!ACPI_runtime_state.power_ready)
         return false;
 
-    if (!ACPI_sleep_types[state].valid)
+    if (!ACPI_runtime_state.sleep_types[state].valid)
     {
         kdebug_printf("[ACPI] sleep S%u unsupported: _S%u not found\n",
                       (unsigned int) state,
@@ -687,19 +651,19 @@ bool ACPI_sleep(ACPI_sleep_state_t state)
         return false;
     }
 
-    uint8_t typ_a = ACPI_sleep_types[state].typ_a;
-    uint8_t typ_b = ACPI_sleep_types[state].typ_b;
+    uint8_t typ_a = ACPI_runtime_state.sleep_types[state].typ_a;
+    uint8_t typ_b = ACPI_runtime_state.sleep_types[state].typ_b;
 
-    if (ACPI_hw_reduced)
+    if (ACPI_runtime_state.hw_reduced)
     {
-        if (!ACPI_gas_is_supported(&ACPI_sleep_control_reg))
+        if (!ACPI_gas_is_supported(&ACPI_runtime_state.sleep_control_reg))
             return false;
 
         uint32_t ctrl = ((uint32_t) (typ_a & 0x7U) << ACPI_SLEEP_CTRL_SLP_TYP_SHIFT) |
                         ACPI_SLEEP_CTRL_SLP_EN_BIT;
 
         cli();
-        bool ok = ACPI_gas_write_u32(&ACPI_sleep_control_reg, 1, ctrl);
+        bool ok = ACPI_gas_write_u32(&ACPI_runtime_state.sleep_control_reg, 1, ctrl);
         sti();
         if (!ok)
             return false;
@@ -710,22 +674,22 @@ bool ACPI_sleep(ACPI_sleep_state_t state)
         return false;
     }
 
-    if (!ACPI_gas_is_supported(&ACPI_pm1a_cnt))
+    if (!ACPI_gas_is_supported(&ACPI_runtime_state.pm1a_cnt))
         return false;
 
     uint32_t pm1a = 0;
-    if (!ACPI_gas_read_u32(&ACPI_pm1a_cnt, ACPI_pm1_cnt_len, &pm1a))
+    if (!ACPI_gas_read_u32(&ACPI_runtime_state.pm1a_cnt, ACPI_runtime_state.pm1_cnt_len, &pm1a))
         return false;
 
     uint32_t pm1a_base = (pm1a & ~(ACPI_PM1_CNT_SLP_TYP_MASK | ACPI_PM1_CNT_SLP_EN_BIT)) |
                          ((uint32_t) (typ_a & 0x7U) << ACPI_PM1_CNT_SLP_TYP_SHIFT);
 
     uint32_t pm1b_base = 0;
-    bool has_pm1b = ACPI_gas_is_supported(&ACPI_pm1b_cnt);
+    bool has_pm1b = ACPI_gas_is_supported(&ACPI_runtime_state.pm1b_cnt);
     if (has_pm1b)
     {
         uint32_t pm1b = 0;
-        if (!ACPI_gas_read_u32(&ACPI_pm1b_cnt, ACPI_pm1_cnt_len, &pm1b))
+        if (!ACPI_gas_read_u32(&ACPI_runtime_state.pm1b_cnt, ACPI_runtime_state.pm1_cnt_len, &pm1b))
             return false;
 
         pm1b_base = (pm1b & ~(ACPI_PM1_CNT_SLP_TYP_MASK | ACPI_PM1_CNT_SLP_EN_BIT)) |
@@ -734,21 +698,21 @@ bool ACPI_sleep(ACPI_sleep_state_t state)
 
     cli();
 
-    if (!ACPI_gas_write_u32(&ACPI_pm1a_cnt, ACPI_pm1_cnt_len, pm1a_base))
+    if (!ACPI_gas_write_u32(&ACPI_runtime_state.pm1a_cnt, ACPI_runtime_state.pm1_cnt_len, pm1a_base))
     {
         sti();
         return false;
     }
 
-    if (has_pm1b && !ACPI_gas_write_u32(&ACPI_pm1b_cnt, ACPI_pm1_cnt_len, pm1b_base))
+    if (has_pm1b && !ACPI_gas_write_u32(&ACPI_runtime_state.pm1b_cnt, ACPI_runtime_state.pm1_cnt_len, pm1b_base))
     {
         sti();
         return false;
     }
 
     if (has_pm1b)
-        (void) ACPI_gas_write_u32(&ACPI_pm1b_cnt, ACPI_pm1_cnt_len, pm1b_base | ACPI_PM1_CNT_SLP_EN_BIT);
-    (void) ACPI_gas_write_u32(&ACPI_pm1a_cnt, ACPI_pm1_cnt_len, pm1a_base | ACPI_PM1_CNT_SLP_EN_BIT);
+        (void) ACPI_gas_write_u32(&ACPI_runtime_state.pm1b_cnt, ACPI_runtime_state.pm1_cnt_len, pm1b_base | ACPI_PM1_CNT_SLP_EN_BIT);
+    (void) ACPI_gas_write_u32(&ACPI_runtime_state.pm1a_cnt, ACPI_runtime_state.pm1_cnt_len, pm1a_base | ACPI_PM1_CNT_SLP_EN_BIT);
 
     sti();
 
@@ -765,14 +729,14 @@ bool ACPI_shutdown(void)
 
 bool ACPI_reboot(void)
 {
-    if (!ACPI_power_initialized)
+    if (!ACPI_runtime_state.power_initialized)
         (void) ACPI_power_init();
 
     bool reboot_triggered = false;
-    if (ACPI_gas_is_supported(&ACPI_reset_reg))
+    if (ACPI_gas_is_supported(&ACPI_runtime_state.reset_reg))
     {
         cli();
-        reboot_triggered = ACPI_gas_write_u32(&ACPI_reset_reg, 1, ACPI_reset_value);
+        reboot_triggered = ACPI_gas_write_u32(&ACPI_runtime_state.reset_reg, 1, ACPI_runtime_state.reset_value);
         sti();
     }
     else

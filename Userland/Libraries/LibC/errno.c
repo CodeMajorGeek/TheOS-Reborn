@@ -1,8 +1,8 @@
 #include <errno.h>
 
-static int libc_errno = 0;
+static __thread int LibC_errno_tls = 0;
 
 int* __errno_location(void)
 {
-    return &libc_errno;
+    return &LibC_errno_tls;
 }

@@ -5,25 +5,21 @@
 #include <Debug/KDebug.h>
 #include <Task/Task.h>
 
-static volatile uint8_t* HPET_regs = (volatile uint8_t*) 0;
-static uint64_t HPET_period_fs = 0;
-static uint64_t HPET_frequency_hz = 0;
-static bool HPET_counter_64bit = false;
-static bool HPET_ready = false;
+static HPET_runtime_state_t HPET_state;
 
 static inline uint64_t HPET_read64(uint32_t offset)
 {
-    return *((volatile uint64_t*) (HPET_regs + offset));
+    return *((volatile uint64_t*) (HPET_state.regs + offset));
 }
 
 static inline void HPET_write64(uint32_t offset, uint64_t value)
 {
-    *((volatile uint64_t*) (HPET_regs + offset)) = value;
+    *((volatile uint64_t*) (HPET_state.regs + offset)) = value;
 }
 
 bool HPET_init(void)
 {
-    if (HPET_ready)
+    if (HPET_state.ready)
         return true;
 
     ACPI_HPET_t* table = (ACPI_HPET_t*) ACPI_get_table(ACPI_HPET_SIGNATURE);
@@ -45,7 +41,7 @@ bool HPET_init(void)
     uintptr_t hpet_page_phys = hpet_base_phys & ~(uintptr_t) 0xFFFULL;
     uintptr_t hpet_page_virt = VMM_MMIO_VIRT(hpet_page_phys);
     VMM_map_mmio_uc_page(hpet_page_virt, hpet_page_phys);
-    HPET_regs = (volatile uint8_t*) (hpet_page_virt + (hpet_base_phys - hpet_page_phys));
+    HPET_state.regs = (volatile uint8_t*) (hpet_page_virt + (hpet_base_phys - hpet_page_phys));
 
     uint64_t cap = HPET_read64(HPET_GENERAL_CAP_REG);
     uint64_t period_fs = (cap >> HPET_COUNTER_CLK_PERIOD_SHIFT) & HPET_COUNTER_CLK_PERIOD_MASK;
@@ -55,9 +51,9 @@ bool HPET_init(void)
         return false;
     }
 
-    HPET_counter_64bit = (cap & HPET_COUNTER_SIZE_CAP) != 0;
-    HPET_period_fs = period_fs;
-    HPET_frequency_hz = 1000000000000000ULL / HPET_period_fs;
+    HPET_state.counter_64bit = (cap & HPET_COUNTER_SIZE_CAP) != 0;
+    HPET_state.period_fs = period_fs;
+    HPET_state.frequency_hz = 1000000000000000ULL / HPET_state.period_fs;
 
     uint64_t cfg = HPET_read64(HPET_GENERAL_CONFIG_REG);
     cfg &= ~HPET_CFG_ENABLE_CNF;
@@ -65,27 +61,27 @@ bool HPET_init(void)
     HPET_write64(HPET_MAIN_COUNTER_REG, 0);
     HPET_write64(HPET_GENERAL_CONFIG_REG, cfg | HPET_CFG_ENABLE_CNF);
 
-    HPET_ready = true;
+    HPET_state.ready = true;
     kdebug_printf("[HPET] enabled base=0x%llX period_fs=%llu freq=%lluHz counter=%s\n",
                   (unsigned long long) hpet_base_phys,
-                  (unsigned long long) HPET_period_fs,
-                  (unsigned long long) HPET_frequency_hz,
-                  HPET_counter_64bit ? "64-bit" : "32-bit");
+                  (unsigned long long) HPET_state.period_fs,
+                  (unsigned long long) HPET_state.frequency_hz,
+                  HPET_state.counter_64bit ? "64-bit" : "32-bit");
     return true;
 }
 
 bool HPET_is_available(void)
 {
-    return HPET_ready;
+    return HPET_state.ready;
 }
 
 uint64_t HPET_get_counter(void)
 {
-    if (!HPET_ready)
+    if (!HPET_state.ready)
         return 0;
 
     uint64_t value = HPET_read64(HPET_MAIN_COUNTER_REG);
-    if (!HPET_counter_64bit)
+    if (!HPET_state.counter_64bit)
         value &= 0xFFFFFFFFULL;
 
     return value;
@@ -93,12 +89,12 @@ uint64_t HPET_get_counter(void)
 
 uint64_t HPET_get_frequency_hz(void)
 {
-    return HPET_frequency_hz;
+    return HPET_state.frequency_hz;
 }
 
 bool HPET_wait_ms(uint32_t ms, uint64_t* elapsed_ticks)
 {
-    if (!HPET_ready)
+    if (!HPET_state.ready)
         return false;
 
     if (ms == 0)
@@ -109,8 +105,8 @@ bool HPET_wait_ms(uint32_t ms, uint64_t* elapsed_ticks)
     }
 
     const uint64_t fs_per_ms = 1000000000000ULL;
-    uint64_t whole_per_ms = fs_per_ms / HPET_period_fs;
-    uint64_t rem_per_ms = fs_per_ms % HPET_period_fs;
+    uint64_t whole_per_ms = fs_per_ms / HPET_state.period_fs;
+    uint64_t rem_per_ms = fs_per_ms % HPET_state.period_fs;
 
     if (whole_per_ms != 0 && ms > (uint32_t) (~0ULL / whole_per_ms))
         return false;
@@ -123,8 +119,8 @@ bool HPET_wait_ms(uint32_t ms, uint64_t* elapsed_ticks)
             return false;
 
         uint64_t rem_total = (uint64_t) ms * rem_per_ms;
-        target_ticks += rem_total / HPET_period_fs;
-        if ((rem_total % HPET_period_fs) != 0)
+        target_ticks += rem_total / HPET_state.period_fs;
+        if ((rem_total % HPET_state.period_fs) != 0)
             target_ticks++;
     }
 
@@ -134,7 +130,7 @@ bool HPET_wait_ms(uint32_t ms, uint64_t* elapsed_ticks)
     uint64_t start = HPET_get_counter();
     uint64_t spin_guard = 0;
 
-    if (HPET_counter_64bit)
+    if (HPET_state.counter_64bit)
     {
         while ((HPET_get_counter() - start) < target_ticks)
         {

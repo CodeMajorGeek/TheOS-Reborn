@@ -14,6 +14,11 @@
 
 #define EXT4_EXTENTS_FL         0x00080000
 #define EXT4_EXTENT_MAGIC       0xF30A
+#define EXT4_INODE_MODE_TYPE_MASK    0xF000U
+#define EXT4_INODE_MODE_DIRECTORY    0x4000U
+#define EXT4_INODE_MODE_REGULAR      0x8000U
+#define EXT4_PATH_MAX_COMPONENTS     32U
+#define EXT4_PATH_COMPONENT_MAX      255U
 
 #define EXT4_FT_UNKNOWN         0
 #define EXT4_FT_REG_FILE        1
@@ -165,6 +170,11 @@ typedef struct ext4_dirent_info
     uint8_t file_type;
     char name[256];
 } ext4_dirent_info_t;
+
+typedef struct ext4_runtime_state
+{
+    ext4_fs_t* active_fs;
+} ext4_runtime_state_t;
 
 bool ext4_check_format(HBA_PORT_t* port);
 bool ext4_mount(ext4_fs_t* fs, HBA_PORT_t* port);

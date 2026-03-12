@@ -5,27 +5,30 @@
 #include <stdio.h>
 #include <stdbool.h>
 
-#ifndef THEOS_KDEBUG_LOG_SERIAL
-#define THEOS_KDEBUG_LOG_SERIAL 1
-#endif
-
 #ifdef __USE_QEMU
 #include <Device/COM.h>
 #else
 #include <Device/TTY.h>
 #endif
 
+const char* const logger_level_messages[LEVEL_COUNT] = {
+    "[DEBUG] ",
+    "[INFO] ",
+    "[WARNING] ",
+    "[PANIC] "
+};
+
 #ifdef __USE_QEMU
-static bool logger_serial_ready = false;
+static logger_runtime_state_t logger_state;
 #endif
 
 #ifdef __USE_QEMU
 void logger_init(void)
 {
 #if THEOS_KDEBUG_LOG_SERIAL
-    logger_serial_ready = COM_init(LOGGER_COM_PORT);
+    logger_state.serial_ready = COM_init(LOGGER_COM_PORT);
 #else
-    logger_serial_ready = false;
+    logger_state.serial_ready = false;
 #endif
 }
 #else
@@ -37,14 +40,14 @@ void kputc(int level, char c)
 {
 #ifdef __USE_QEMU
 #if THEOS_KDEBUG_LOG_SERIAL
-    if (!logger_serial_ready)
+    if (!logger_state.serial_ready)
         return;
-    COM_puts(LOGGER_COM_PORT, level_messages[level]);
+    COM_puts(LOGGER_COM_PORT, logger_level_messages[level]);
     COM_putc(LOGGER_COM_PORT, c);
     COM_putc(LOGGER_COM_PORT, '\n');
 #endif
 #else
-    TTY_puts(level_messages[level]);
+    TTY_puts(logger_level_messages[level]);
     TTY_putc(c);
     TTY_putc('\n');
 #endif
@@ -54,14 +57,14 @@ void kputs(int level, const char* str)
 {
 #ifdef __USE_QEMU
 #if THEOS_KDEBUG_LOG_SERIAL
-    if (!logger_serial_ready)
+    if (!logger_state.serial_ready)
         return;
-    COM_puts(LOGGER_COM_PORT, level_messages[level]);
+    COM_puts(LOGGER_COM_PORT, logger_level_messages[level]);
     COM_puts(LOGGER_COM_PORT, str);
     COM_putc(LOGGER_COM_PORT, '\n');
 #endif
 #else
-    TTY_puts(level_messages[level]);
+    TTY_puts(logger_level_messages[level]);
     TTY_puts(str);
     TTY_putc('\n');
 #endif
@@ -84,13 +87,13 @@ void kprintf(int level, const char* restrict format, ...)
 
 #ifdef __USE_QEMU
 #if THEOS_KDEBUG_LOG_SERIAL
-    if (!logger_serial_ready)
+    if (!logger_state.serial_ready)
         return;
-    COM_puts(LOGGER_COM_PORT, level_messages[level]);
+    COM_puts(LOGGER_COM_PORT, logger_level_messages[level]);
     COM_puts(LOGGER_COM_PORT, buf);
 #endif
 #else
-    TTY_puts(level_messages[level]);
+    TTY_puts(logger_level_messages[level]);
     TTY_puts(buf);
 #endif
 }

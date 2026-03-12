@@ -1,11 +1,12 @@
-#ifndef _PPM_H
+#ifndef _PMM_H
 #define _PMM_H
 
 #include <stdbool.h>
 #include <stdint.h>
 
 #define PHYS_PAGE_SIZE          4096
-#define PMM_MEM_NOTAVALIABLE    0
+#define PMM_MEM_NOTAVAILABLE    0
+#define PMM_MEM_NOTAVALIABLE    PMM_MEM_NOTAVAILABLE
 #define PMM_MAX_REGIONS         64
 #define PMM_MAX_BOOT_ENTRIES    256
 #define PMM_BOOT_ENTRY_ALLOCATABLE (1U << 0)
@@ -26,6 +27,19 @@ typedef struct PMM_boot_entry
     uint64_t type;
     uint8_t flags;
 } PMM_boot_entry_t;
+
+typedef struct PMM_runtime_state
+{
+    PMM_region_t regions[PMM_MAX_REGIONS];
+    PMM_boot_entry_t boot_entries[PMM_MAX_BOOT_ENTRIES];
+    int num_regions;
+    int boot_entry_count;
+    uintptr_t kernel_phys_start;
+    uintptr_t kernel_phys_end;
+    uintptr_t kernel_virt_start;
+    uintptr_t kernel_virt_end;
+    bool kmem_initialized;
+} PMM_runtime_state_t;
 
 void PMM_init(uintptr_t kernel_phys_start,
               uintptr_t kernel_phys_end,

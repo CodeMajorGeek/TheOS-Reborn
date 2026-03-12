@@ -1,4 +1,5 @@
 #include <Boot/LimineHelper.h>
+#include <Boot/EntryConfig.h>
 
 #include <Device/Keyboard.h>
 #include <FileSystem/ext4.h>
@@ -47,8 +48,6 @@ static APIC_MADT_t* MADT = NULL;
 static const uint32_t BSP_TIMER_HZ = 100;
 static const uint32_t PIT_TIMER_HZ = 1000;
 static uint16_t boot_tty_shadow[VGA_WIDTH * VGA_HEIGHT];
-
-#define THEOS_PSF2_FONT_PATH "/system/fonts/ter-powerline-v14n.psf"
 
 uintptr_t ROOT_DEV = 1;
 

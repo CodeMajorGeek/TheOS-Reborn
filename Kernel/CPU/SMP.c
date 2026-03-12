@@ -1,4 +1,5 @@
 #include <CPU/SMP.h>
+#include <CPU/SMP_private.h>
 
 #include <CPU/APIC.h>
 #include <CPU/FPU.h>
@@ -15,45 +16,9 @@
 extern uint8_t SMP_ap_trampoline_start[];
 extern uint8_t SMP_ap_trampoline_end[];
 
-static SMP_cpu_local_t SMP_cpu[SMP_MAX_CPUS];
-static int32_t SMP_apic_to_cpu_id[SMP_APIC_ID_MAP_SIZE];
-static uint32_t SMP_cpu_count = 0;
-static uint64_t SMP_pong_irq_total = 0;
-static uint32_t SMP_bsp_cpu = 0;
-static SMP_tests_t SMP_tests;
-static SMP_sched_job_t SMP_sched_jobs[SMP_SCHED_MAX_JOBS];
-static uint32_t SMP_sched_patho_short_done = 0;
-static uint32_t SMP_sched_patho_long_done = 0;
-static uint32_t SMP_sched_patho_short_exec_per_cpu[SMP_MAX_CPUS];
-static uint8_t SMP_ymm_done_cpu[SMP_MAX_CPUS];
-static uint8_t SMP_ymm_fail_cpu[SMP_MAX_CPUS];
-static uint64_t SMP_ymm_signature_cpu[SMP_MAX_CPUS];
-static bool SMP_initialized = false;
-static uint32_t SMP_bsp_apic_id = 0;
+static SMP_runtime_state_t SMP_state;
 
 __attribute__((aligned(16))) static uint8_t SMP_ap_stacks[SMP_MAX_CPUS][KERNEL_STACK_SIZE];
-
-static void SMP_ipi_ping_handler(interrupt_frame_t* frame);
-static void SMP_ipi_pong_handler(interrupt_frame_t* frame);
-static void SMP_ipi_counter_handler(interrupt_frame_t* frame);
-static void SMP_ipi_sched_handler(interrupt_frame_t* frame);
-static void SMP_ipi_tlb_handler(interrupt_frame_t* frame);
-static void SMP_ipi_timer_init_handler(interrupt_frame_t* frame);
-static void SMP_setup_ipi_handlers(void);
-static bool SMP_validate_ipi_link(void);
-static bool SMP_run_counter_stress_test(void);
-static bool SMP_run_sched_stress_test(void);
-static void SMP_sched_counter_job(void* arg);
-static void SMP_sched_balance_job(void* arg);
-static bool SMP_run_sched_balance_phase(bool push_enabled, bool steal_enabled, bool bsp_runs_local, const char* label);
-static bool SMP_run_sched_balance_tests(void);
-static void SMP_sched_patho_long_job(void* arg);
-static void SMP_sched_patho_short_job(void* arg);
-static bool SMP_run_sched_pathological_test(void);
-static void SMP_ymm_stress_job(void* arg);
-static bool SMP_run_ymm_stress_test(void);
-static bool SMP_validate_tlb_shootdown(void);
-static bool SMP_issue_tlb_shootdown(uint8_t kind, uintptr_t virt);
 
 static uintptr_t SMP_read_cr3(void)
 {
@@ -79,7 +44,7 @@ static uint32_t SMP_cpu_id_from_apic(uint32_t apic_id)
     if (!SMP_apic_id_is_mappable(apic_id))
         return SMP_INVALID_CPU_ID;
 
-    int32_t cpu_id = __atomic_load_n(&SMP_apic_to_cpu_id[apic_id], __ATOMIC_ACQUIRE);
+    int32_t cpu_id = __atomic_load_n(&SMP_state.apic_to_cpu_id[apic_id], __ATOMIC_ACQUIRE);
     if (cpu_id < 0 || (uint32_t) cpu_id >= SMP_MAX_CPUS)
         return SMP_INVALID_CPU_ID;
 
@@ -91,7 +56,7 @@ static uint32_t SMP_apic_id_from_cpu(uint32_t cpu_id)
     if (cpu_id >= SMP_MAX_CPUS)
         return SMP_INVALID_APIC_ID;
 
-    return __atomic_load_n(&SMP_cpu[cpu_id].apic_id, __ATOMIC_ACQUIRE);
+    return __atomic_load_n(&SMP_state.cpus[cpu_id].apic_id, __ATOMIC_ACQUIRE);
 }
 
 static SMP_cpu_local_t* SMP_cpu_local_from_cpu(uint32_t cpu_id)
@@ -99,7 +64,7 @@ static SMP_cpu_local_t* SMP_cpu_local_from_cpu(uint32_t cpu_id)
     if (cpu_id >= SMP_MAX_CPUS)
         return NULL;
 
-    return &SMP_cpu[cpu_id];
+    return &SMP_state.cpus[cpu_id];
 }
 
 static SMP_cpu_local_t* SMP_cpu_local_from_apic(uint32_t apic_id)
@@ -121,11 +86,11 @@ static void SMP_mark_cpu_online(uint32_t cpu_index, uint32_t apic_id)
     __atomic_store_n(&cpu->apic_id, apic_id, __ATOMIC_RELEASE);
 
     if (SMP_apic_id_is_mappable(apic_id))
-        __atomic_store_n(&SMP_apic_to_cpu_id[apic_id], (int32_t) cpu_index, __ATOMIC_RELEASE);
+        __atomic_store_n(&SMP_state.apic_to_cpu_id[apic_id], (int32_t) cpu_index, __ATOMIC_RELEASE);
 
     uint8_t was_online = __atomic_exchange_n(&cpu->online, 1, __ATOMIC_ACQ_REL);
     if (!was_online)
-        __atomic_fetch_add(&SMP_cpu_count, 1, __ATOMIC_ACQ_REL);
+        __atomic_fetch_add(&SMP_state.cpu_count, 1, __ATOMIC_ACQ_REL);
 }
 
 void SMP_notify_ap_ready(uint32_t cpu_index, uint8_t apic_id)
@@ -177,7 +142,7 @@ static void SMP_ipi_ping_handler(interrupt_frame_t* frame)
     if (cpu)
         __atomic_fetch_add(&cpu->ping_count, 1, __ATOMIC_RELAXED);
 
-    if (SMP_bsp_apic_id <= 0xFFU && APIC_send_ipi((uint8_t) SMP_bsp_apic_id, SMP_IPI_VECTOR_PONG))
+    if (SMP_state.bsp_apic_id <= 0xFFU && APIC_send_ipi((uint8_t) SMP_state.bsp_apic_id, SMP_IPI_VECTOR_PONG))
     {
         if (cpu)
             __atomic_fetch_add(&cpu->pong_sent_count, 1, __ATOMIC_RELAXED);
@@ -203,7 +168,7 @@ static void SMP_ipi_panic_handler(interrupt_frame_t* frame)
 static void SMP_ipi_pong_handler(interrupt_frame_t* frame)
 {
     (void) frame;
-    __atomic_fetch_add(&SMP_pong_irq_total, 1, __ATOMIC_RELAXED);
+    __atomic_fetch_add(&SMP_state.pong_irq_total, 1, __ATOMIC_RELAXED);
     APIC_send_EOI();
 }
 
@@ -225,17 +190,17 @@ static void SMP_ipi_counter_handler(interrupt_frame_t* frame)
     uint32_t cpu_id = task_get_current_cpu_index();
     uint32_t work = 0;
     if (cpu_id < SMP_MAX_CPUS)
-        work = SMP_tests.counter_work_per_cpu[cpu_id];
+        work = SMP_state.tests.counter_work_per_cpu[cpu_id];
 
     for (uint32_t i = 0; i < work; i++)
     {
-        spin_lock(&SMP_tests.counter_lock);
-        __atomic_fetch_add(&SMP_tests.counter_value, 1, __ATOMIC_RELAXED);
-        spin_unlock(&SMP_tests.counter_lock);
+        spin_lock(&SMP_state.tests.counter_lock);
+        __atomic_fetch_add(&SMP_state.tests.counter_value, 1, __ATOMIC_RELAXED);
+        spin_unlock(&SMP_state.tests.counter_lock);
     }
 
     if (cpu_id < SMP_MAX_CPUS)
-        __atomic_store_n(&SMP_tests.counter_done_cpu[cpu_id], 1, __ATOMIC_RELEASE);
+        __atomic_store_n(&SMP_state.tests.counter_done_cpu[cpu_id], 1, __ATOMIC_RELEASE);
 
     APIC_send_EOI();
 }
@@ -258,9 +223,9 @@ static void SMP_ipi_tlb_handler(interrupt_frame_t* frame)
 
     uint32_t cpu_id = task_get_current_cpu_index();
     SMP_cpu_local_t* cpu = SMP_cpu_local_from_cpu(cpu_id);
-    uintptr_t virt = __atomic_load_n(&SMP_tests.tlb_target_virt, __ATOMIC_RELAXED);
-    uint8_t kind = __atomic_load_n(&SMP_tests.tlb_kind, __ATOMIC_ACQUIRE);
-    uint64_t generation = __atomic_load_n(&SMP_tests.tlb_generation, __ATOMIC_RELAXED);
+    uintptr_t virt = __atomic_load_n(&SMP_state.tests.tlb_target_virt, __ATOMIC_RELAXED);
+    uint8_t kind = __atomic_load_n(&SMP_state.tests.tlb_kind, __ATOMIC_ACQUIRE);
+    uint64_t generation = __atomic_load_n(&SMP_state.tests.tlb_generation, __ATOMIC_RELAXED);
 
     if (kind == SMP_TLB_SHOOTDOWN_PAGE)
         SMP_local_invlpg(virt);
@@ -343,7 +308,7 @@ static bool SMP_validate_ipi_link(void)
     for (uint8_t cpu_index = 0; cpu_index < core_count; cpu_index++)
     {
         uint8_t apic_id = APIC_get_core_id(cpu_index);
-        if (apic_id == 0xFF || apic_id == SMP_bsp_apic_id || !SMP_is_apic_online(apic_id))
+        if (apic_id == 0xFF || apic_id == SMP_state.bsp_apic_id || !SMP_is_apic_online(apic_id))
             continue;
 
         SMP_cpu_local_t* cpu = SMP_cpu_local_from_apic(apic_id);
@@ -352,7 +317,7 @@ static bool SMP_validate_ipi_link(void)
 
         uint32_t ping_before = __atomic_load_n(&cpu->ping_count, __ATOMIC_RELAXED);
         uint32_t pong_before = __atomic_load_n(&cpu->pong_sent_count, __ATOMIC_RELAXED);
-        uint64_t pong_irq_before = __atomic_load_n(&SMP_pong_irq_total, __ATOMIC_RELAXED);
+        uint64_t pong_irq_before = __atomic_load_n(&SMP_state.pong_irq_total, __ATOMIC_RELAXED);
 
         if (!APIC_send_ipi(apic_id, SMP_IPI_VECTOR_PING))
         {
@@ -366,7 +331,7 @@ static bool SMP_validate_ipi_link(void)
         {
             if (__atomic_load_n(&cpu->ping_count, __ATOMIC_RELAXED) > ping_before &&
                 __atomic_load_n(&cpu->pong_sent_count, __ATOMIC_RELAXED) > pong_before &&
-                __atomic_load_n(&SMP_pong_irq_total, __ATOMIC_RELAXED) > pong_irq_before)
+                __atomic_load_n(&SMP_state.pong_irq_total, __ATOMIC_RELAXED) > pong_irq_before)
             {
                 got_reply = true;
                 break;
@@ -382,7 +347,7 @@ static bool SMP_validate_ipi_link(void)
                           cpu_index,
                           __atomic_load_n(&cpu->ping_count, __ATOMIC_RELAXED),
                           __atomic_load_n(&cpu->pong_sent_count, __ATOMIC_RELAXED),
-                          (unsigned long long) __atomic_load_n(&SMP_pong_irq_total, __ATOMIC_RELAXED));
+                          (unsigned long long) __atomic_load_n(&SMP_state.pong_irq_total, __ATOMIC_RELAXED));
             ok = false;
             continue;
         }
@@ -408,15 +373,15 @@ static bool SMP_run_counter_stress_test(void)
     uint8_t apic_targets[SMP_MAX_CPUS];
     uint32_t target_count = 0;
 
-    memset((void*) SMP_tests.counter_work_per_cpu, 0, sizeof(SMP_tests.counter_work_per_cpu));
-    memset((void*) SMP_tests.counter_done_cpu, 0, sizeof(SMP_tests.counter_done_cpu));
-    __atomic_store_n(&SMP_tests.counter_value, 0, __ATOMIC_RELAXED);
-    spinlock_init(&SMP_tests.counter_lock);
+    memset((void*) SMP_state.tests.counter_work_per_cpu, 0, sizeof(SMP_state.tests.counter_work_per_cpu));
+    memset((void*) SMP_state.tests.counter_done_cpu, 0, sizeof(SMP_state.tests.counter_done_cpu));
+    __atomic_store_n(&SMP_state.tests.counter_value, 0, __ATOMIC_RELAXED);
+    spinlock_init(&SMP_state.tests.counter_lock);
 
     for (uint8_t cpu_index = 0; cpu_index < core_count; cpu_index++)
     {
         uint8_t apic_id = APIC_get_core_id(cpu_index);
-        if (apic_id == 0xFF || apic_id == SMP_bsp_apic_id || !SMP_is_apic_online(apic_id))
+        if (apic_id == 0xFF || apic_id == SMP_state.bsp_apic_id || !SMP_is_apic_online(apic_id))
             continue;
 
         if (target_count < SMP_MAX_CPUS)
@@ -439,7 +404,7 @@ static bool SMP_run_counter_stress_test(void)
     {
         uint8_t cpu_id = cpu_targets[i];
         uint32_t work = base_work + (rem_work > 0 ? 1U : 0U);
-        SMP_tests.counter_work_per_cpu[cpu_id] = work;
+        SMP_state.tests.counter_work_per_cpu[cpu_id] = work;
         if (rem_work > 0)
             rem_work--;
     }
@@ -460,9 +425,9 @@ static bool SMP_run_counter_stress_test(void)
 
     for (uint32_t i = 0; i < bsp_work; i++)
     {
-        spin_lock(&SMP_tests.counter_lock);
-        __atomic_fetch_add(&SMP_tests.counter_value, 1, __ATOMIC_RELAXED);
-        spin_unlock(&SMP_tests.counter_lock);
+        spin_lock(&SMP_state.tests.counter_lock);
+        __atomic_fetch_add(&SMP_state.tests.counter_value, 1, __ATOMIC_RELAXED);
+        spin_unlock(&SMP_state.tests.counter_lock);
     }
 
     for (uint32_t i = 0; i < target_count; i++)
@@ -472,7 +437,7 @@ static bool SMP_run_counter_stress_test(void)
         bool done = false;
         for (uint32_t spin = 0; spin < SMP_COUNTER_STRESS_TIMEOUT; spin++)
         {
-            if (__atomic_load_n(&SMP_tests.counter_done_cpu[cpu_id], __ATOMIC_ACQUIRE) != 0)
+            if (__atomic_load_n(&SMP_state.tests.counter_done_cpu[cpu_id], __ATOMIC_ACQUIRE) != 0)
             {
                 done = true;
                 break;
@@ -490,7 +455,7 @@ static bool SMP_run_counter_stress_test(void)
     if (restore_cli)
         cli();
 
-    uint32_t final_counter = __atomic_load_n(&SMP_tests.counter_value, __ATOMIC_RELAXED);
+    uint32_t final_counter = __atomic_load_n(&SMP_state.tests.counter_value, __ATOMIC_RELAXED);
     if (final_counter != SMP_COUNTER_STRESS_TARGET)
     {
         kdebug_printf("[SMP] counter test FAILED got=%u expected=%u (targets=%u bsp_work=%u)\n",
@@ -522,47 +487,47 @@ static void SMP_sched_counter_job(void* arg)
     uint32_t got_apic = SMP_apic_id_from_cpu(got_cpu);
 
     if (got_cpu < SMP_MAX_CPUS)
-        __atomic_fetch_add(&SMP_tests.sched_exec_per_cpu[got_cpu], 1, __ATOMIC_RELAXED);
+        __atomic_fetch_add(&SMP_state.tests.sched_exec_per_cpu[got_cpu], 1, __ATOMIC_RELAXED);
 
     if (got_cpu != expected_cpu)
     {
-        uint32_t err_idx = __atomic_fetch_add(&SMP_tests.sched_migration_errors, 1, __ATOMIC_RELAXED);
+        uint32_t err_idx = __atomic_fetch_add(&SMP_state.tests.sched_migration_errors, 1, __ATOMIC_RELAXED);
         if (err_idx == 0)
         {
-            uintptr_t base = (uintptr_t) &SMP_sched_jobs[0];
+            uintptr_t base = (uintptr_t) &SMP_state.sched_jobs[0];
             uintptr_t self = (uintptr_t) job;
-            uint32_t job_index = (self >= base) ? (uint32_t) ((self - base) / sizeof(SMP_sched_jobs[0])) : 0xFFFFFFFFU;
-            __atomic_store_n(&SMP_tests.sched_first_migration_job, job_index, __ATOMIC_RELAXED);
-            __atomic_store_n(&SMP_tests.sched_first_expected_cpu, expected_cpu, __ATOMIC_RELAXED);
-            __atomic_store_n(&SMP_tests.sched_first_got_cpu, got_cpu, __ATOMIC_RELAXED);
-            __atomic_store_n(&SMP_tests.sched_first_expected_apic, expected_apic, __ATOMIC_RELAXED);
-            __atomic_store_n(&SMP_tests.sched_first_got_apic, got_apic, __ATOMIC_RELAXED);
+            uint32_t job_index = (self >= base) ? (uint32_t) ((self - base) / sizeof(SMP_state.sched_jobs[0])) : 0xFFFFFFFFU;
+            __atomic_store_n(&SMP_state.tests.sched_first_migration_job, job_index, __ATOMIC_RELAXED);
+            __atomic_store_n(&SMP_state.tests.sched_first_expected_cpu, expected_cpu, __ATOMIC_RELAXED);
+            __atomic_store_n(&SMP_state.tests.sched_first_got_cpu, got_cpu, __ATOMIC_RELAXED);
+            __atomic_store_n(&SMP_state.tests.sched_first_expected_apic, expected_apic, __ATOMIC_RELAXED);
+            __atomic_store_n(&SMP_state.tests.sched_first_got_apic, got_apic, __ATOMIC_RELAXED);
         }
     }
 
     for (uint32_t i = 0; i < work_count; i++)
     {
-        spin_lock(&SMP_tests.sched_counter_lock);
-        __atomic_fetch_add(&SMP_tests.sched_counter_value, 1, __ATOMIC_RELAXED);
-        spin_unlock(&SMP_tests.sched_counter_lock);
+        spin_lock(&SMP_state.tests.sched_counter_lock);
+        __atomic_fetch_add(&SMP_state.tests.sched_counter_value, 1, __ATOMIC_RELAXED);
+        spin_unlock(&SMP_state.tests.sched_counter_lock);
     }
 
-    __atomic_fetch_add(&SMP_tests.sched_jobs_done, 1, __ATOMIC_RELEASE);
+    __atomic_fetch_add(&SMP_state.tests.sched_jobs_done, 1, __ATOMIC_RELEASE);
 }
 
 static bool SMP_run_sched_stress_test(void)
 {
-    spinlock_init(&SMP_tests.sched_counter_lock);
-    __atomic_store_n(&SMP_tests.sched_counter_value, 0, __ATOMIC_RELAXED);
-    __atomic_store_n(&SMP_tests.sched_jobs_done, 0, __ATOMIC_RELAXED);
-    memset((void*) SMP_tests.sched_exec_per_cpu, 0, sizeof(SMP_tests.sched_exec_per_cpu));
-    __atomic_store_n(&SMP_tests.sched_migration_errors, 0, __ATOMIC_RELAXED);
-    __atomic_store_n(&SMP_tests.sched_first_migration_job, 0xFFFFFFFFU, __ATOMIC_RELAXED);
-    __atomic_store_n(&SMP_tests.sched_first_expected_cpu, 0xFF, __ATOMIC_RELAXED);
-    __atomic_store_n(&SMP_tests.sched_first_got_cpu, 0xFF, __ATOMIC_RELAXED);
-    __atomic_store_n(&SMP_tests.sched_first_expected_apic, SMP_INVALID_APIC_ID, __ATOMIC_RELAXED);
-    __atomic_store_n(&SMP_tests.sched_first_got_apic, SMP_INVALID_APIC_ID, __ATOMIC_RELAXED);
-    memset(SMP_sched_jobs, 0, sizeof(SMP_sched_jobs));
+    spinlock_init(&SMP_state.tests.sched_counter_lock);
+    __atomic_store_n(&SMP_state.tests.sched_counter_value, 0, __ATOMIC_RELAXED);
+    __atomic_store_n(&SMP_state.tests.sched_jobs_done, 0, __ATOMIC_RELAXED);
+    memset((void*) SMP_state.tests.sched_exec_per_cpu, 0, sizeof(SMP_state.tests.sched_exec_per_cpu));
+    __atomic_store_n(&SMP_state.tests.sched_migration_errors, 0, __ATOMIC_RELAXED);
+    __atomic_store_n(&SMP_state.tests.sched_first_migration_job, 0xFFFFFFFFU, __ATOMIC_RELAXED);
+    __atomic_store_n(&SMP_state.tests.sched_first_expected_cpu, 0xFF, __ATOMIC_RELAXED);
+    __atomic_store_n(&SMP_state.tests.sched_first_got_cpu, 0xFF, __ATOMIC_RELAXED);
+    __atomic_store_n(&SMP_state.tests.sched_first_expected_apic, SMP_INVALID_APIC_ID, __ATOMIC_RELAXED);
+    __atomic_store_n(&SMP_state.tests.sched_first_got_apic, SMP_INVALID_APIC_ID, __ATOMIC_RELAXED);
+    memset(SMP_state.sched_jobs, 0, sizeof(SMP_state.sched_jobs));
 
     uint8_t core_count = APIC_get_core_count();
     uint8_t cpu_targets[SMP_MAX_CPUS];
@@ -604,14 +569,14 @@ static bool SMP_run_sched_stress_test(void)
         uint8_t target_apic = apic_targets[target_slot];
         uint32_t work_count = base_work + (rem_work > 0 ? 1U : 0U);
 
-        __atomic_store_n(&SMP_sched_jobs[i].work, work_count, __ATOMIC_RELAXED);
-        __atomic_store_n(&SMP_sched_jobs[i].expected_cpu, (uint8_t) target_cpu, __ATOMIC_RELEASE);
+        __atomic_store_n(&SMP_state.sched_jobs[i].work, work_count, __ATOMIC_RELAXED);
+        __atomic_store_n(&SMP_state.sched_jobs[i].expected_cpu, (uint8_t) target_cpu, __ATOMIC_RELEASE);
         if (rem_work > 0)
             rem_work--;
 
         expected_jobs_per_cpu[target_cpu]++;
 
-        if (!task_schedule_work_on_cpu(target_cpu, SMP_sched_counter_job, &SMP_sched_jobs[i]))
+        if (!task_schedule_work_on_cpu(target_cpu, SMP_sched_counter_job, &SMP_state.sched_jobs[i]))
         {
             kdebug_printf("[SMP] scheduler test enqueue failed idx=%u cpu=%u apic=%u depth_cpu=%u depth_total=%u\n",
                           i,
@@ -629,7 +594,7 @@ static bool SMP_run_sched_stress_test(void)
         while (task_run_next_work())
             ;
 
-        if (__atomic_load_n(&SMP_tests.sched_jobs_done, __ATOMIC_ACQUIRE) == job_count)
+        if (__atomic_load_n(&SMP_state.tests.sched_jobs_done, __ATOMIC_ACQUIRE) == job_count)
         {
             done = true;
             break;
@@ -641,15 +606,15 @@ static bool SMP_run_sched_stress_test(void)
     if (!done)
     {
         kdebug_printf("[SMP] scheduler test timeout done=%u/%u counter=%u depth_local=%u depth_total=%u\n",
-                      __atomic_load_n(&SMP_tests.sched_jobs_done, __ATOMIC_RELAXED),
+                      __atomic_load_n(&SMP_state.tests.sched_jobs_done, __ATOMIC_RELAXED),
                       job_count,
-                      __atomic_load_n(&SMP_tests.sched_counter_value, __ATOMIC_RELAXED),
+                      __atomic_load_n(&SMP_state.tests.sched_counter_value, __ATOMIC_RELAXED),
                       task_runqueue_depth(),
                       task_runqueue_depth_total());
         return false;
     }
 
-    uint32_t final_counter = __atomic_load_n(&SMP_tests.sched_counter_value, __ATOMIC_RELAXED);
+    uint32_t final_counter = __atomic_load_n(&SMP_state.tests.sched_counter_value, __ATOMIC_RELAXED);
     if (final_counter != SMP_SCHED_STRESS_TARGET)
     {
         kdebug_printf("[SMP] scheduler test FAILED got=%u expected=%u\n",
@@ -658,15 +623,15 @@ static bool SMP_run_sched_stress_test(void)
         return false;
     }
 
-    uint32_t migration_errors = __atomic_load_n(&SMP_tests.sched_migration_errors, __ATOMIC_RELAXED);
+    uint32_t migration_errors = __atomic_load_n(&SMP_state.tests.sched_migration_errors, __ATOMIC_RELAXED);
     if (migration_errors != 0)
     {
         kdebug_printf("[SMP] scheduler affinity migration job=%u expected cpu=%u apic=%u got cpu=%u apic=%u\n",
-                      __atomic_load_n(&SMP_tests.sched_first_migration_job, __ATOMIC_RELAXED),
-                      __atomic_load_n(&SMP_tests.sched_first_expected_cpu, __ATOMIC_RELAXED),
-                      __atomic_load_n(&SMP_tests.sched_first_expected_apic, __ATOMIC_RELAXED),
-                      __atomic_load_n(&SMP_tests.sched_first_got_cpu, __ATOMIC_RELAXED),
-                      __atomic_load_n(&SMP_tests.sched_first_got_apic, __ATOMIC_RELAXED));
+                      __atomic_load_n(&SMP_state.tests.sched_first_migration_job, __ATOMIC_RELAXED),
+                      __atomic_load_n(&SMP_state.tests.sched_first_expected_cpu, __ATOMIC_RELAXED),
+                      __atomic_load_n(&SMP_state.tests.sched_first_expected_apic, __ATOMIC_RELAXED),
+                      __atomic_load_n(&SMP_state.tests.sched_first_got_cpu, __ATOMIC_RELAXED),
+                      __atomic_load_n(&SMP_state.tests.sched_first_got_apic, __ATOMIC_RELAXED));
         kdebug_printf("[SMP] scheduler test FAILED migration_errors=%u\n", migration_errors);
         return false;
     }
@@ -676,7 +641,7 @@ static bool SMP_run_sched_stress_test(void)
         uint8_t cpu_index = cpu_targets[i];
         uint8_t apic_id = apic_targets[i];
         uint32_t expected_jobs = expected_jobs_per_cpu[cpu_index];
-        uint32_t got_jobs = __atomic_load_n(&SMP_tests.sched_exec_per_cpu[cpu_index], __ATOMIC_RELAXED);
+        uint32_t got_jobs = __atomic_load_n(&SMP_state.tests.sched_exec_per_cpu[cpu_index], __ATOMIC_RELAXED);
         if (got_jobs != expected_jobs)
         {
             kdebug_printf("[SMP] scheduler test FAILED cpu=%u apic_id=%u expected_jobs=%u got_jobs=%u\n",
@@ -704,25 +669,25 @@ static void SMP_sched_balance_job(void* arg)
     uint32_t work_count = __atomic_load_n(&job->work, __ATOMIC_RELAXED);
     uint32_t cpu_id = task_get_current_cpu_index();
     if (cpu_id < SMP_MAX_CPUS)
-        __atomic_fetch_add(&SMP_tests.sched_exec_per_cpu[cpu_id], 1, __ATOMIC_RELAXED);
+        __atomic_fetch_add(&SMP_state.tests.sched_exec_per_cpu[cpu_id], 1, __ATOMIC_RELAXED);
 
     for (uint32_t i = 0; i < work_count; i++)
     {
-        spin_lock(&SMP_tests.sched_counter_lock);
-        __atomic_fetch_add(&SMP_tests.sched_counter_value, 1, __ATOMIC_RELAXED);
-        spin_unlock(&SMP_tests.sched_counter_lock);
+        spin_lock(&SMP_state.tests.sched_counter_lock);
+        __atomic_fetch_add(&SMP_state.tests.sched_counter_value, 1, __ATOMIC_RELAXED);
+        spin_unlock(&SMP_state.tests.sched_counter_lock);
     }
 
-    __atomic_fetch_add(&SMP_tests.sched_jobs_done, 1, __ATOMIC_RELEASE);
+    __atomic_fetch_add(&SMP_state.tests.sched_jobs_done, 1, __ATOMIC_RELEASE);
 }
 
 static bool SMP_run_sched_balance_phase(bool push_enabled, bool steal_enabled, bool bsp_runs_local, const char* label)
 {
-    spinlock_init(&SMP_tests.sched_counter_lock);
-    __atomic_store_n(&SMP_tests.sched_counter_value, 0, __ATOMIC_RELAXED);
-    __atomic_store_n(&SMP_tests.sched_jobs_done, 0, __ATOMIC_RELAXED);
-    memset((void*) SMP_tests.sched_exec_per_cpu, 0, sizeof(SMP_tests.sched_exec_per_cpu));
-    memset(SMP_sched_jobs, 0, sizeof(SMP_sched_jobs));
+    spinlock_init(&SMP_state.tests.sched_counter_lock);
+    __atomic_store_n(&SMP_state.tests.sched_counter_value, 0, __ATOMIC_RELAXED);
+    __atomic_store_n(&SMP_state.tests.sched_jobs_done, 0, __ATOMIC_RELAXED);
+    memset((void*) SMP_state.tests.sched_exec_per_cpu, 0, sizeof(SMP_state.tests.sched_exec_per_cpu));
+    memset(SMP_state.sched_jobs, 0, sizeof(SMP_state.sched_jobs));
 
     task_set_push_balance(push_enabled);
     task_set_work_stealing(steal_enabled);
@@ -740,11 +705,11 @@ static bool SMP_run_sched_balance_phase(bool push_enabled, bool steal_enabled, b
     for (uint32_t i = 0; i < job_count; i++)
     {
         uint32_t work_count = base_work + (rem_work > 0 ? 1U : 0U);
-        __atomic_store_n(&SMP_sched_jobs[i].work, work_count, __ATOMIC_RELAXED);
+        __atomic_store_n(&SMP_state.sched_jobs[i].work, work_count, __ATOMIC_RELAXED);
         if (rem_work > 0)
             rem_work--;
 
-        if (!task_schedule_work(SMP_sched_balance_job, &SMP_sched_jobs[i]))
+        if (!task_schedule_work(SMP_sched_balance_job, &SMP_state.sched_jobs[i]))
         {
             kdebug_printf("[SMP] scheduler %s enqueue failed idx=%u depth_local=%u depth_total=%u\n",
                           label,
@@ -764,7 +729,7 @@ static bool SMP_run_sched_balance_phase(bool push_enabled, bool steal_enabled, b
                 ;
         }
 
-        if (__atomic_load_n(&SMP_tests.sched_jobs_done, __ATOMIC_ACQUIRE) == job_count)
+        if (__atomic_load_n(&SMP_state.tests.sched_jobs_done, __ATOMIC_ACQUIRE) == job_count)
         {
             done = true;
             break;
@@ -777,15 +742,15 @@ static bool SMP_run_sched_balance_phase(bool push_enabled, bool steal_enabled, b
     {
         kdebug_printf("[SMP] scheduler %s timeout done=%u/%u counter=%u depth_local=%u depth_total=%u\n",
                       label,
-                      __atomic_load_n(&SMP_tests.sched_jobs_done, __ATOMIC_RELAXED),
+                      __atomic_load_n(&SMP_state.tests.sched_jobs_done, __ATOMIC_RELAXED),
                       job_count,
-                      __atomic_load_n(&SMP_tests.sched_counter_value, __ATOMIC_RELAXED),
+                      __atomic_load_n(&SMP_state.tests.sched_counter_value, __ATOMIC_RELAXED),
                       task_runqueue_depth(),
                       task_runqueue_depth_total());
         return false;
     }
 
-    uint32_t final_counter = __atomic_load_n(&SMP_tests.sched_counter_value, __ATOMIC_RELAXED);
+    uint32_t final_counter = __atomic_load_n(&SMP_state.tests.sched_counter_value, __ATOMIC_RELAXED);
     if (final_counter != SMP_SCHED_BALANCE_TARGET)
     {
         kdebug_printf("[SMP] scheduler %s FAILED got=%u expected=%u\n",
@@ -800,10 +765,10 @@ static bool SMP_run_sched_balance_phase(bool push_enabled, bool steal_enabled, b
     for (uint8_t cpu_index = 0; cpu_index < core_count; cpu_index++)
     {
         uint8_t apic_id = APIC_get_core_id(cpu_index);
-        if (apic_id == 0xFF || !SMP_is_apic_online(apic_id) || cpu_index == SMP_bsp_cpu)
+        if (apic_id == 0xFF || !SMP_is_apic_online(apic_id) || cpu_index == SMP_state.bsp_cpu)
             continue;
 
-        remote_exec += __atomic_load_n(&SMP_tests.sched_exec_per_cpu[cpu_index], __ATOMIC_RELAXED);
+        remote_exec += __atomic_load_n(&SMP_state.tests.sched_exec_per_cpu[cpu_index], __ATOMIC_RELAXED);
     }
 
     if (SMP_get_online_cpu_count() > 1 && remote_exec == 0)
@@ -849,7 +814,7 @@ static void SMP_sched_patho_long_job(void* arg)
     for (uint32_t spin = 0; spin < SMP_SCHED_PATHO_LONG_SPINS; spin++)
         __asm__ __volatile__("pause");
 
-    __atomic_store_n(&SMP_sched_patho_long_done, 1, __ATOMIC_RELEASE);
+    __atomic_store_n(&SMP_state.sched_patho_long_done, 1, __ATOMIC_RELEASE);
 }
 
 static void SMP_sched_patho_short_job(void* arg)
@@ -858,9 +823,9 @@ static void SMP_sched_patho_short_job(void* arg)
 
     uint32_t cpu_id = task_get_current_cpu_index();
     if (cpu_id < SMP_MAX_CPUS)
-        __atomic_fetch_add(&SMP_sched_patho_short_exec_per_cpu[cpu_id], 1, __ATOMIC_RELAXED);
+        __atomic_fetch_add(&SMP_state.sched_patho_short_exec_per_cpu[cpu_id], 1, __ATOMIC_RELAXED);
 
-    __atomic_fetch_add(&SMP_sched_patho_short_done, 1, __ATOMIC_RELEASE);
+    __atomic_fetch_add(&SMP_state.sched_patho_short_done, 1, __ATOMIC_RELEASE);
 }
 
 static bool SMP_run_sched_pathological_test(void)
@@ -873,7 +838,7 @@ static bool SMP_run_sched_pathological_test(void)
     for (uint8_t cpu_index = 0; cpu_index < core_count; cpu_index++)
     {
         uint8_t apic_id = APIC_get_core_id(cpu_index);
-        if (apic_id == 0xFF || !SMP_is_apic_online(apic_id) || cpu_index == SMP_bsp_cpu)
+        if (apic_id == 0xFF || !SMP_is_apic_online(apic_id) || cpu_index == SMP_state.bsp_cpu)
             continue;
 
         blocking_cpu = cpu_index;
@@ -889,9 +854,9 @@ static bool SMP_run_sched_pathological_test(void)
     task_set_push_balance(false);
     task_set_work_stealing(true);
 
-    __atomic_store_n(&SMP_sched_patho_short_done, 0, __ATOMIC_RELAXED);
-    __atomic_store_n(&SMP_sched_patho_long_done, 0, __ATOMIC_RELAXED);
-    memset(SMP_sched_patho_short_exec_per_cpu, 0, sizeof(SMP_sched_patho_short_exec_per_cpu));
+    __atomic_store_n(&SMP_state.sched_patho_short_done, 0, __ATOMIC_RELAXED);
+    __atomic_store_n(&SMP_state.sched_patho_long_done, 0, __ATOMIC_RELAXED);
+    memset(SMP_state.sched_patho_short_exec_per_cpu, 0, sizeof(SMP_state.sched_patho_short_exec_per_cpu));
 
     if (!task_schedule_work_on_cpu(blocking_cpu, SMP_sched_patho_long_job, NULL))
     {
@@ -917,8 +882,8 @@ static bool SMP_run_sched_pathological_test(void)
     bool done = false;
     for (uint32_t spin = 0; spin < SMP_SCHED_PATHO_TIMEOUT; spin++)
     {
-        if (__atomic_load_n(&SMP_sched_patho_short_done, __ATOMIC_ACQUIRE) == SMP_SCHED_PATHO_SHORT_JOBS &&
-            __atomic_load_n(&SMP_sched_patho_long_done, __ATOMIC_ACQUIRE) != 0)
+        if (__atomic_load_n(&SMP_state.sched_patho_short_done, __ATOMIC_ACQUIRE) == SMP_SCHED_PATHO_SHORT_JOBS &&
+            __atomic_load_n(&SMP_state.sched_patho_long_done, __ATOMIC_ACQUIRE) != 0)
         {
             done = true;
             break;
@@ -933,9 +898,9 @@ static bool SMP_run_sched_pathological_test(void)
     if (!done)
     {
         kdebug_printf("[SMP] scheduler patho timeout short=%u/%u long_done=%u depth_total=%u\n",
-                      __atomic_load_n(&SMP_sched_patho_short_done, __ATOMIC_RELAXED),
+                      __atomic_load_n(&SMP_state.sched_patho_short_done, __ATOMIC_RELAXED),
                       SMP_SCHED_PATHO_SHORT_JOBS,
-                      __atomic_load_n(&SMP_sched_patho_long_done, __ATOMIC_RELAXED),
+                      __atomic_load_n(&SMP_state.sched_patho_long_done, __ATOMIC_RELAXED),
                       task_runqueue_depth_total());
         return false;
     }
@@ -944,10 +909,10 @@ static bool SMP_run_sched_pathological_test(void)
     for (uint8_t cpu_index = 0; cpu_index < core_count; cpu_index++)
     {
         uint8_t apic_id = APIC_get_core_id(cpu_index);
-        if (apic_id == 0xFF || !SMP_is_apic_online(apic_id) || cpu_index == SMP_bsp_cpu)
+        if (apic_id == 0xFF || !SMP_is_apic_online(apic_id) || cpu_index == SMP_state.bsp_cpu)
             continue;
 
-        non_bsp_short += __atomic_load_n(&SMP_sched_patho_short_exec_per_cpu[cpu_index], __ATOMIC_RELAXED);
+        non_bsp_short += __atomic_load_n(&SMP_state.sched_patho_short_exec_per_cpu[cpu_index], __ATOMIC_RELAXED);
     }
 
     if (non_bsp_short == 0)
@@ -960,7 +925,7 @@ static bool SMP_run_sched_pathological_test(void)
                   blocking_cpu,
                   SMP_SCHED_PATHO_SHORT_JOBS,
                   non_bsp_short,
-                  __atomic_load_n(&SMP_sched_patho_short_exec_per_cpu[blocking_cpu], __ATOMIC_RELAXED));
+                  __atomic_load_n(&SMP_state.sched_patho_short_exec_per_cpu[blocking_cpu], __ATOMIC_RELAXED));
     return true;
 }
 
@@ -974,9 +939,9 @@ static void SMP_ymm_stress_job(void* arg)
 
     if (cpu_id < SMP_MAX_CPUS)
     {
-        __atomic_store_n(&SMP_ymm_signature_cpu[cpu_id], signature, __ATOMIC_RELAXED);
-        __atomic_store_n(&SMP_ymm_fail_cpu[cpu_id], ok ? 0 : 1, __ATOMIC_RELEASE);
-        __atomic_store_n(&SMP_ymm_done_cpu[cpu_id], 1, __ATOMIC_RELEASE);
+        __atomic_store_n(&SMP_state.ymm_signature_cpu[cpu_id], signature, __ATOMIC_RELAXED);
+        __atomic_store_n(&SMP_state.ymm_fail_cpu[cpu_id], ok ? 0 : 1, __ATOMIC_RELEASE);
+        __atomic_store_n(&SMP_state.ymm_done_cpu[cpu_id], 1, __ATOMIC_RELEASE);
     }
 }
 
@@ -991,9 +956,9 @@ static bool SMP_run_ymm_stress_test(void)
         return true;
     }
 
-    memset(SMP_ymm_done_cpu, 0, sizeof(SMP_ymm_done_cpu));
-    memset(SMP_ymm_fail_cpu, 0, sizeof(SMP_ymm_fail_cpu));
-    memset(SMP_ymm_signature_cpu, 0, sizeof(SMP_ymm_signature_cpu));
+    memset(SMP_state.ymm_done_cpu, 0, sizeof(SMP_state.ymm_done_cpu));
+    memset(SMP_state.ymm_fail_cpu, 0, sizeof(SMP_state.ymm_fail_cpu));
+    memset(SMP_state.ymm_signature_cpu, 0, sizeof(SMP_state.ymm_signature_cpu));
 
     uint8_t core_count = APIC_get_core_count();
     uint8_t cpu_targets[SMP_MAX_CPUS];
@@ -1042,7 +1007,7 @@ static bool SMP_run_ymm_stress_test(void)
         for (uint32_t i = 0; i < target_count; i++)
         {
             uint8_t cpu_id = cpu_targets[i];
-            if (__atomic_load_n(&SMP_ymm_done_cpu[cpu_id], __ATOMIC_ACQUIRE) != 0)
+            if (__atomic_load_n(&SMP_state.ymm_done_cpu[cpu_id], __ATOMIC_ACQUIRE) != 0)
                 done_count++;
         }
 
@@ -1061,7 +1026,7 @@ static bool SMP_run_ymm_stress_test(void)
         for (uint32_t i = 0; i < target_count; i++)
         {
             uint8_t cpu_id = cpu_targets[i];
-            if (__atomic_load_n(&SMP_ymm_done_cpu[cpu_id], __ATOMIC_RELAXED) != 0)
+            if (__atomic_load_n(&SMP_state.ymm_done_cpu[cpu_id], __ATOMIC_RELAXED) != 0)
                 done_count++;
         }
 
@@ -1078,10 +1043,10 @@ static bool SMP_run_ymm_stress_test(void)
     for (uint32_t i = 0; i < target_count; i++)
     {
         uint8_t cpu_id = cpu_targets[i];
-        uint64_t signature = __atomic_load_n(&SMP_ymm_signature_cpu[cpu_id], __ATOMIC_RELAXED);
+        uint64_t signature = __atomic_load_n(&SMP_state.ymm_signature_cpu[cpu_id], __ATOMIC_RELAXED);
         signature_mix ^= (signature + (((uint64_t) cpu_id + 1ULL) << 32));
 
-        if (__atomic_load_n(&SMP_ymm_fail_cpu[cpu_id], __ATOMIC_ACQUIRE) != 0 && failed_cpu == SMP_INVALID_CPU_ID)
+        if (__atomic_load_n(&SMP_state.ymm_fail_cpu[cpu_id], __ATOMIC_ACQUIRE) != 0 && failed_cpu == SMP_INVALID_CPU_ID)
             failed_cpu = cpu_id;
     }
 
@@ -1102,7 +1067,7 @@ static bool SMP_run_ymm_stress_test(void)
 
 static bool SMP_issue_tlb_shootdown(uint8_t kind, uintptr_t virt)
 {
-    if (!APIC_is_enabled() || __atomic_load_n(&SMP_cpu_count, __ATOMIC_ACQUIRE) <= 1)
+    if (!APIC_is_enabled() || __atomic_load_n(&SMP_state.cpu_count, __ATOMIC_ACQUIRE) <= 1)
         return true;
 
     uint8_t self_apic = APIC_get_current_lapic_id();
@@ -1129,11 +1094,11 @@ static bool SMP_issue_tlb_shootdown(uint8_t kind, uintptr_t virt)
         return true;
 
     bool ok = true;
-    uint64_t flags = spin_lock_irqsave(&SMP_tests.tlb_lock);
-    uint64_t generation = __atomic_add_fetch(&SMP_tests.tlb_generation, 1, __ATOMIC_ACQ_REL);
+    uint64_t flags = spin_lock_irqsave(&SMP_state.tests.tlb_lock);
+    uint64_t generation = __atomic_add_fetch(&SMP_state.tests.tlb_generation, 1, __ATOMIC_ACQ_REL);
 
-    __atomic_store_n(&SMP_tests.tlb_target_virt, virt & ~(uintptr_t) 0xFFFULL, __ATOMIC_RELAXED);
-    __atomic_store_n(&SMP_tests.tlb_kind, kind, __ATOMIC_RELEASE);
+    __atomic_store_n(&SMP_state.tests.tlb_target_virt, virt & ~(uintptr_t) 0xFFFULL, __ATOMIC_RELAXED);
+    __atomic_store_n(&SMP_state.tests.tlb_kind, kind, __ATOMIC_RELEASE);
 
     for (uint32_t i = 0; i < target_count; i++)
     {
@@ -1183,8 +1148,8 @@ static bool SMP_issue_tlb_shootdown(uint8_t kind, uintptr_t virt)
         }
     }
 
-    __atomic_store_n(&SMP_tests.tlb_kind, SMP_TLB_SHOOTDOWN_NONE, __ATOMIC_RELEASE);
-    spin_unlock_irqrestore(&SMP_tests.tlb_lock, flags);
+    __atomic_store_n(&SMP_state.tests.tlb_kind, SMP_TLB_SHOOTDOWN_NONE, __ATOMIC_RELEASE);
+    spin_unlock_irqrestore(&SMP_state.tests.tlb_lock, flags);
 
     return ok;
 }
@@ -1203,7 +1168,7 @@ bool SMP_tlb_shootdown_all(void)
 
 static bool SMP_validate_tlb_shootdown(void)
 {
-    if (__atomic_load_n(&SMP_cpu_count, __ATOMIC_ACQUIRE) <= 1)
+    if (__atomic_load_n(&SMP_state.cpu_count, __ATOMIC_ACQUIRE) <= 1)
         return true;
 
     uint8_t core_count = APIC_get_core_count();
@@ -1238,7 +1203,7 @@ static bool SMP_validate_tlb_shootdown(void)
             before[cpu_id] = __atomic_load_n(&cpu->tlb_ipi_count, __ATOMIC_RELAXED);
     }
 
-    if (!SMP_tlb_shootdown_page((uintptr_t) &SMP_initialized))
+    if (!SMP_tlb_shootdown_page((uintptr_t) &SMP_state.initialized))
         return false;
 
     for (uint32_t i = 0; i < target_count; i++)
@@ -1260,12 +1225,12 @@ static bool SMP_validate_tlb_shootdown(void)
 
 bool SMP_init(void)
 {
-    if (SMP_initialized)
+    if (SMP_state.initialized)
         return true;
 
     for (uint32_t cpu_id = 0; cpu_id < SMP_MAX_CPUS; cpu_id++)
     {
-        SMP_cpu_local_t* cpu = &SMP_cpu[cpu_id];
+        SMP_cpu_local_t* cpu = &SMP_state.cpus[cpu_id];
         cpu->cpu_id = cpu_id;
         cpu->apic_id = SMP_INVALID_APIC_ID;
         cpu->kstack_top = 0;
@@ -1280,38 +1245,38 @@ bool SMP_init(void)
     }
 
     for (uint32_t apic_id = 0; apic_id < SMP_APIC_ID_MAP_SIZE; apic_id++)
-        __atomic_store_n(&SMP_apic_to_cpu_id[apic_id], -1, __ATOMIC_RELAXED);
+        __atomic_store_n(&SMP_state.apic_to_cpu_id[apic_id], -1, __ATOMIC_RELAXED);
 
-    memset(&SMP_tests, 0, sizeof(SMP_tests));
-    memset(SMP_sched_patho_short_exec_per_cpu, 0, sizeof(SMP_sched_patho_short_exec_per_cpu));
-    memset(SMP_ymm_done_cpu, 0, sizeof(SMP_ymm_done_cpu));
-    memset(SMP_ymm_fail_cpu, 0, sizeof(SMP_ymm_fail_cpu));
-    memset(SMP_ymm_signature_cpu, 0, sizeof(SMP_ymm_signature_cpu));
-    __atomic_store_n(&SMP_sched_patho_short_done, 0, __ATOMIC_RELAXED);
-    __atomic_store_n(&SMP_sched_patho_long_done, 0, __ATOMIC_RELAXED);
-    spinlock_init(&SMP_tests.counter_lock);
-    spinlock_init(&SMP_tests.sched_counter_lock);
-    spinlock_init(&SMP_tests.tlb_lock);
-    __atomic_store_n(&SMP_tests.sched_first_migration_job, 0xFFFFFFFFU, __ATOMIC_RELAXED);
-    __atomic_store_n(&SMP_tests.sched_first_expected_cpu, 0xFF, __ATOMIC_RELAXED);
-    __atomic_store_n(&SMP_tests.sched_first_got_cpu, 0xFF, __ATOMIC_RELAXED);
-    __atomic_store_n(&SMP_tests.sched_first_expected_apic, SMP_INVALID_APIC_ID, __ATOMIC_RELAXED);
-    __atomic_store_n(&SMP_tests.sched_first_got_apic, SMP_INVALID_APIC_ID, __ATOMIC_RELAXED);
-    __atomic_store_n(&SMP_tests.tlb_kind, SMP_TLB_SHOOTDOWN_NONE, __ATOMIC_RELAXED);
+    memset(&SMP_state.tests, 0, sizeof(SMP_state.tests));
+    memset(SMP_state.sched_patho_short_exec_per_cpu, 0, sizeof(SMP_state.sched_patho_short_exec_per_cpu));
+    memset(SMP_state.ymm_done_cpu, 0, sizeof(SMP_state.ymm_done_cpu));
+    memset(SMP_state.ymm_fail_cpu, 0, sizeof(SMP_state.ymm_fail_cpu));
+    memset(SMP_state.ymm_signature_cpu, 0, sizeof(SMP_state.ymm_signature_cpu));
+    __atomic_store_n(&SMP_state.sched_patho_short_done, 0, __ATOMIC_RELAXED);
+    __atomic_store_n(&SMP_state.sched_patho_long_done, 0, __ATOMIC_RELAXED);
+    spinlock_init(&SMP_state.tests.counter_lock);
+    spinlock_init(&SMP_state.tests.sched_counter_lock);
+    spinlock_init(&SMP_state.tests.tlb_lock);
+    __atomic_store_n(&SMP_state.tests.sched_first_migration_job, 0xFFFFFFFFU, __ATOMIC_RELAXED);
+    __atomic_store_n(&SMP_state.tests.sched_first_expected_cpu, 0xFF, __ATOMIC_RELAXED);
+    __atomic_store_n(&SMP_state.tests.sched_first_got_cpu, 0xFF, __ATOMIC_RELAXED);
+    __atomic_store_n(&SMP_state.tests.sched_first_expected_apic, SMP_INVALID_APIC_ID, __ATOMIC_RELAXED);
+    __atomic_store_n(&SMP_state.tests.sched_first_got_apic, SMP_INVALID_APIC_ID, __ATOMIC_RELAXED);
+    __atomic_store_n(&SMP_state.tests.tlb_kind, SMP_TLB_SHOOTDOWN_NONE, __ATOMIC_RELAXED);
 
-    __atomic_store_n(&SMP_pong_irq_total, 0, __ATOMIC_RELAXED);
-    __atomic_store_n(&SMP_cpu_count, 0, __ATOMIC_RELAXED);
+    __atomic_store_n(&SMP_state.pong_irq_total, 0, __ATOMIC_RELAXED);
+    __atomic_store_n(&SMP_state.cpu_count, 0, __ATOMIC_RELAXED);
 
-    SMP_bsp_apic_id = APIC_get_bsp_lapic_id();
-    SMP_bsp_cpu = 0;
-    SMP_mark_cpu_online(SMP_bsp_cpu, SMP_bsp_apic_id);
-    kdebug_printf("[SMP] init start bsp_apic_id=%u\n", (unsigned) SMP_bsp_apic_id);
+    SMP_state.bsp_apic_id = APIC_get_bsp_lapic_id();
+    SMP_state.bsp_cpu = 0;
+    SMP_mark_cpu_online(SMP_state.bsp_cpu, SMP_state.bsp_apic_id);
+    kdebug_printf("[SMP] init start bsp_apic_id=%u\n", (unsigned) SMP_state.bsp_apic_id);
 
     SMP_setup_ipi_handlers();
 
     if (!APIC_is_enabled())
     {
-        SMP_initialized = true;
+        SMP_state.initialized = true;
         return true;
     }
 
@@ -1319,7 +1284,7 @@ bool SMP_init(void)
     kdebug_printf("[SMP] detected cores=%u\n", (unsigned) core_count);
     if (core_count <= 1)
     {
-        SMP_initialized = true;
+        SMP_state.initialized = true;
         return true;
     }
 
@@ -1332,13 +1297,13 @@ bool SMP_init(void)
     for (uint8_t cpu_index = 0; cpu_index < core_count; cpu_index++)
     {
         uint8_t apic_id = APIC_get_core_id(cpu_index);
-        if (apic_id == 0xFF || apic_id == SMP_bsp_apic_id)
+        if (apic_id == 0xFF || apic_id == SMP_state.bsp_apic_id)
             continue;
         kdebug_printf("[SMP] startup begin apic_id=%u cpu=%u\n", apic_id, cpu_index);
 
         uintptr_t stack_top = (uintptr_t) &SMP_ap_stacks[cpu_index][KERNEL_STACK_SIZE];
         stack_top &= ~(uintptr_t) 0xFULL;
-        SMP_cpu[cpu_index].kstack_top = stack_top;
+        SMP_state.cpus[cpu_index].kstack_top = stack_top;
 
         memset((void*) handoff, 0, sizeof(*handoff));
         handoff->magic = SMP_HANDOFF_MAGIC_VALUE;
@@ -1397,7 +1362,7 @@ bool SMP_init(void)
         kdebug_puts("[SMP] TLB shootdown validation failed\n");
 #endif
 
-    SMP_initialized = true;
+    SMP_state.initialized = true;
     return true;
 }
 
@@ -1406,7 +1371,7 @@ uint32_t SMP_get_current_cpu(void)
     uint32_t apic_id = APIC_get_current_lapic_id();
     uint32_t cpu_id = SMP_cpu_id_from_apic(apic_id);
     if (cpu_id == SMP_INVALID_CPU_ID)
-        return SMP_bsp_cpu;
+        return SMP_state.bsp_cpu;
 
     return cpu_id;
 }
@@ -1426,7 +1391,7 @@ bool SMP_is_apic_online(uint8_t apic_id)
 
 uint8_t SMP_get_online_cpu_count(void)
 {
-    uint32_t count = __atomic_load_n(&SMP_cpu_count, __ATOMIC_ACQUIRE);
+    uint32_t count = __atomic_load_n(&SMP_state.cpu_count, __ATOMIC_ACQUIRE);
     if (count > 0xFFU)
         count = 0xFFU;
     return (uint8_t) count;
@@ -1463,7 +1428,7 @@ uint64_t SMP_get_sched_kick_count(uint32_t cpu_id)
 
 bool SMP_start_ap_timers(void)
 {
-    if (!APIC_is_enabled() || !SMP_initialized)
+    if (!APIC_is_enabled() || !SMP_state.initialized)
         return false;
 
     if (SMP_get_online_cpu_count() <= 1)

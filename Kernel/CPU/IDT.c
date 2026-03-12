@@ -9,6 +9,8 @@
 #include <stddef.h>
 #include <stdlib.h>
 
+static IDT_runtime_state_t IDT_state __attribute__((aligned(0x10)));
+
 void IDT_init(void)
 {
     size_t isr_stub_count = (size_t) (ISR_stub_table_end - ISR_stub_table);
@@ -22,8 +24,8 @@ void IDT_init(void)
         abort();
     }
 
-    idtr.base = (uint64_t) &IDT[0];
-    idtr.limit = (uint16_t) sizeof(IDT_entry_t) * IDT_MAX_DESCRIPTORS - 1;
+    IDT_state.descriptor.base = (uint64_t) &IDT_state.entries[0];
+    IDT_state.descriptor.limit = (uint16_t) sizeof(IDT_entry_t) * IDT_MAX_DESCRIPTORS - 1;
 
     PIC_remap(IRQ_BASE, IRQ_BASE + 8);
 
@@ -39,19 +41,19 @@ void IDT_init(void)
 
 void IDT_load(void)
 {
-    __asm__ __volatile__("lidt %0" : : "m"(idtr));  // Load the new IDT.
+    __asm__ __volatile__("lidt %0" : : "m"(IDT_state.descriptor));  // Load the new IDT.
 }
 
 void IDT_set_descriptor(uint8_t vector, void* isr, uint8_t dpl)
 {
-    IDT_entry_t* desc = &IDT[vector];
+    IDT_entry_t* desc = &IDT_state.entries[vector];
 
     desc->base_low   = (uint64_t)isr & 0xFFFF;
     desc->base_mid   = ((uint64_t)isr >> 16) & 0xFFFF;
     desc->base_high  = ((uint64_t)isr >> 32) & 0xFFFFFFFF;
 
     desc->kernel_cs  = KERNEL_CODE_SEGMENT;  // ring0 code segment
-    desc->ist        = 0;                     // pas d’IST pour l’instant
+    desc->ist        = 0;                     // no IST slot for now
     desc->attributes = 0x8E | ((dpl & 0x3) << 5); // interrupt gate + DPL
     desc->reserved   = 0;
 }

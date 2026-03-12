@@ -26,6 +26,22 @@ SECTIONS
         *(.data*)
     } :data
 
+    .tdata ALIGN(16) :
+    {
+        __theos_tls_tdata_start = .;
+        *(.tdata*)
+        __theos_tls_tdata_end = .;
+    } :data
+
+    .tbss ALIGN(16) (NOLOAD) :
+    {
+        *(.tbss*)
+        *(.tcommon)
+        __theos_tls_tbss_end = .;
+    } :data
+
+    __theos_tls_align = MAX(16, MAX(ALIGNOF(.tdata), ALIGNOF(.tbss)));
+
     .bss ALIGN(4K) (NOLOAD) :
     {
         *(COMMON)

@@ -141,6 +141,25 @@ typedef struct SMP_tests
     uint8_t tlb_kind;
 } SMP_tests_t;
 
+typedef struct SMP_runtime_state
+{
+    SMP_cpu_local_t cpus[SMP_MAX_CPUS];
+    int32_t apic_to_cpu_id[SMP_APIC_ID_MAP_SIZE];
+    uint32_t cpu_count;
+    uint64_t pong_irq_total;
+    uint32_t bsp_cpu;
+    SMP_tests_t tests;
+    SMP_sched_job_t sched_jobs[SMP_SCHED_MAX_JOBS];
+    uint32_t sched_patho_short_done;
+    uint32_t sched_patho_long_done;
+    uint32_t sched_patho_short_exec_per_cpu[SMP_MAX_CPUS];
+    uint8_t ymm_done_cpu[SMP_MAX_CPUS];
+    uint8_t ymm_fail_cpu[SMP_MAX_CPUS];
+    uint64_t ymm_signature_cpu[SMP_MAX_CPUS];
+    bool initialized;
+    uint32_t bsp_apic_id;
+} SMP_runtime_state_t;
+
 bool SMP_init(void);
 uint32_t SMP_get_current_cpu(void);
 bool SMP_is_apic_online(uint8_t apic_id);

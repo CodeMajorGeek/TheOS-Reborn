@@ -113,6 +113,40 @@ typedef struct task_sleep_wait_context
     uint8_t use_hpet;
 } task_sleep_wait_context_t;
 
+typedef struct task_scheduler_stats
+{
+    uint64_t exec_runs[TASK_MAX_CPUS];
+    uint64_t exec_runs_total;
+    uint64_t steal_runs[TASK_MAX_CPUS];
+    uint64_t steal_batch_total[TASK_MAX_CPUS];
+    uint64_t steal_fail_runs[TASK_MAX_CPUS];
+    uint64_t steal_from_cpu[TASK_MAX_CPUS];
+    uint64_t idle_hlt_runs[TASK_MAX_CPUS];
+    uint64_t rq_lock_contended[TASK_MAX_CPUS];
+    uint32_t last_steal_victim[TASK_MAX_CPUS];
+    uint64_t stats_log_epoch;
+    volatile uint64_t sched_tick_kicks;
+} task_scheduler_stats_t;
+
+typedef struct task_scheduler_control
+{
+    uint32_t preempt_count[TASK_MAX_CPUS];
+    uint8_t need_resched[TASK_MAX_CPUS];
+    uint8_t resched_active[TASK_MAX_CPUS];
+    uint8_t push_balance_enabled;
+    uint8_t work_stealing_enabled;
+} task_scheduler_control_t;
+
+typedef struct task_scheduler_state
+{
+    task_cpu_local_t cpu_local_per_apic[TASK_MAX_CPUS];
+    task_runqueue_t runqueues[TASK_MAX_CPUS];
+    uint32_t steal_cursor[TASK_MAX_CPUS];
+    task_wait_queue_t sleep_waitq;
+    task_scheduler_stats_t stats;
+    task_scheduler_control_t control;
+} task_scheduler_state_t;
+
 extern uint64_t read_rip(void);
 extern uint64_t read_flags(void);
 extern void perform_task_switch(task_t* task);
