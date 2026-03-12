@@ -34,6 +34,7 @@
 #define SYSCALL_MAX_OPEN_FILES         64U
 #define SYSCALL_MAX_PROCS              32U
 #define SYSCALL_MAX_EXIT_EVENTS        64U
+#define SYSCALL_MAX_THREAD_EXIT_EVENTS 64U
 #define SYSCALL_PATH_MAX_COMPONENTS    32U
 #define SYSCALL_PATH_COMPONENT_MAX     255U
 #define SYSCALL_PROC_NONE              0xFFFFFFFFU
@@ -45,8 +46,14 @@
 #define SYSCALL_EXEC_MAX_ENVP          64U
 #define SYSCALL_ELF_CANONICAL_LOW_MAX  0x0000800000000000ULL
 #define SYSCALL_PTE_PS                 (1ULL << 7)
+#define SYSCALL_PTE_COW                (1ULL << 9)
 #define SYSCALL_ELF_PF_X               (1U << 0)
 #define SYSCALL_ELF_PF_W               (1U << 1)
+#define SYSCALL_PAGE_FAULT_PRESENT     (1ULL << 0)
+#define SYSCALL_PAGE_FAULT_WRITE       (1ULL << 1)
+#define SYSCALL_PREEMPT_QUANTUM_TICKS  4U
+#define SYSCALL_COW_MAX_REFS           32768U
+#define SYSCALL_RFLAGS_IF              (1ULL << 9)
 
 static volatile uint64_t Syscall_count_per_cpu[256] = { 0 };
 static uintptr_t Syscall_user_map_hint = SYSCALL_MAP_HINT_BASE;
@@ -80,11 +87,23 @@ typedef struct syscall_process
     bool exiting;
     bool terminated_by_signal;
     bool owns_cr3;
+    bool is_thread;
     uint32_t pid;
     uint32_t ppid;
+    uint32_t owner_pid;
     int64_t exit_status;
+    uint64_t thread_exit_value;
     int32_t term_signal;
     uintptr_t cr3_phys;
+    uint64_t rax;
+    uint64_t rcx;
+    uint64_t rdx;
+    uint64_t rsi;
+    uint64_t rdi;
+    uint64_t r8;
+    uint64_t r9;
+    uint64_t r10;
+    uint64_t r11;
     uint64_t r15;
     uint64_t r14;
     uint64_t r13;
@@ -97,6 +116,13 @@ typedef struct syscall_process
     uint64_t pending_rax;
 } syscall_process_t;
 
+typedef struct syscall_cow_ref
+{
+    bool used;
+    uintptr_t phys;
+    uint32_t refs;
+} syscall_cow_ref_t;
+
 typedef struct syscall_exit_event
 {
     bool used;
@@ -105,6 +131,14 @@ typedef struct syscall_exit_event
     int64_t status;
     int32_t signal;
 } syscall_exit_event_t;
+
+typedef struct syscall_thread_exit_event
+{
+    bool used;
+    uint32_t owner_pid;
+    uint32_t tid;
+    uint64_t value;
+} syscall_thread_exit_event_t;
 
 typedef struct syscall_elf64_ehdr
 {
@@ -138,14 +172,25 @@ typedef struct syscall_elf64_phdr
 
 static syscall_process_t Syscall_procs[SYSCALL_MAX_PROCS];
 static syscall_exit_event_t Syscall_exit_events[SYSCALL_MAX_EXIT_EVENTS];
+static syscall_thread_exit_event_t Syscall_thread_exit_events[SYSCALL_MAX_THREAD_EXIT_EVENTS];
+static syscall_cow_ref_t Syscall_cow_refs[SYSCALL_COW_MAX_REFS];
 static uint32_t Syscall_cpu_current_proc[256];
 static uint8_t Syscall_cpu_need_resched[256];
+static uint8_t Syscall_cpu_slice_ticks[256];
 static uint32_t Syscall_next_pid = 1U;
 static spinlock_t Syscall_proc_lock;
 static bool Syscall_proc_lock_ready = false;
+static spinlock_t Syscall_cow_lock;
+static bool Syscall_cow_lock_ready = false;
 
 static inline uintptr_t Syscall_read_cr3_phys(void);
 static inline void Syscall_write_cr3_phys(uintptr_t cr3_phys);
+static bool Syscall_cow_ref_add(uintptr_t phys, uint32_t delta);
+static bool Syscall_cow_ref_sub(uintptr_t phys, bool* out_zero);
+static uint32_t Syscall_cow_ref_get(uintptr_t phys);
+static uint64_t* Syscall_get_user_pte_ptr(uintptr_t cr3_phys, uintptr_t virt);
+static bool Syscall_resolve_cow_fault(uint32_t cpu_index, uintptr_t fault_addr, uint64_t err_code);
+static bool Syscall_proc_owner_has_other_live_locked(uint32_t owner_pid, int32_t exclude_slot);
 
 static inline uintptr_t Syscall_align_up_page(uintptr_t value)
 {
@@ -207,11 +252,75 @@ static bool Syscall_copy_to_user(void* user_dst, const void* kernel_src, size_t 
         spin_lock(&Syscall_vm_lock);
 
     size_t copied = 0;
+    bool tlb_needs_reload = false;
     while (copied < size)
     {
         uintptr_t user_addr = (uintptr_t) user_dst + copied;
         uintptr_t page = user_addr & ~(uintptr_t) (SYSCALL_PAGE_SIZE - 1U);
         if (!VMM_is_user_accessible(page))
+        {
+            if (Syscall_vm_lock_ready)
+                spin_unlock(&Syscall_vm_lock);
+            return false;
+        }
+
+        uintptr_t current_cr3 = Syscall_read_cr3_phys();
+        uint64_t* pte = Syscall_get_user_pte_ptr(current_cr3, page);
+        if (!pte)
+        {
+            if (Syscall_vm_lock_ready)
+                spin_unlock(&Syscall_vm_lock);
+            return false;
+        }
+
+        uintptr_t entry = *pte;
+        if ((entry & SYSCALL_PTE_COW) != 0)
+        {
+            uintptr_t old_phys = entry & FRAME;
+            if (old_phys == 0)
+            {
+                if (Syscall_vm_lock_ready)
+                    spin_unlock(&Syscall_vm_lock);
+                return false;
+            }
+
+            uint32_t refs = Syscall_cow_ref_get(old_phys);
+            if (refs <= 1U)
+            {
+                bool dummy_zero = false;
+                (void) Syscall_cow_ref_sub(old_phys, &dummy_zero);
+                entry &= ~SYSCALL_PTE_COW;
+                entry |= WRITABLE;
+                *pte = entry;
+                tlb_needs_reload = true;
+            }
+            else
+            {
+                uintptr_t new_phys = (uintptr_t) PMM_alloc_page();
+                if (new_phys == 0)
+                {
+                    if (Syscall_vm_lock_ready)
+                        spin_unlock(&Syscall_vm_lock);
+                    return false;
+                }
+
+                memcpy((void*) P2V(new_phys), (const void*) P2V(old_phys), SYSCALL_PAGE_SIZE);
+                entry &= ~FRAME;
+                entry |= new_phys;
+                entry &= ~SYSCALL_PTE_COW;
+                entry |= WRITABLE;
+                *pte = entry;
+                tlb_needs_reload = true;
+
+                bool ref_zero = false;
+                if (Syscall_cow_ref_sub(old_phys, &ref_zero) && ref_zero)
+                    PMM_dealloc_page((void*) old_phys);
+            }
+
+            entry = *pte;
+        }
+
+        if ((entry & WRITABLE) == 0)
         {
             if (Syscall_vm_lock_ready)
                 spin_unlock(&Syscall_vm_lock);
@@ -226,6 +335,9 @@ static bool Syscall_copy_to_user(void* user_dst, const void* kernel_src, size_t 
         memcpy((void*) user_addr, (const uint8_t*) kernel_src + copied, chunk);
         copied += chunk;
     }
+
+    if (tlb_needs_reload)
+        Syscall_write_cr3_phys(Syscall_read_cr3_phys());
 
     if (Syscall_vm_lock_ready)
         spin_unlock(&Syscall_vm_lock);
@@ -682,6 +794,141 @@ static bool Syscall_is_canonical_low(uint64_t value)
     return value < SYSCALL_ELF_CANONICAL_LOW_MAX;
 }
 
+static int32_t Syscall_cow_ref_find_locked(uintptr_t phys)
+{
+    for (uint32_t i = 0; i < SYSCALL_COW_MAX_REFS; i++)
+    {
+        if (Syscall_cow_refs[i].used && Syscall_cow_refs[i].phys == phys)
+            return (int32_t) i;
+    }
+    return -1;
+}
+
+static int32_t Syscall_cow_ref_alloc_locked(void)
+{
+    for (uint32_t i = 0; i < SYSCALL_COW_MAX_REFS; i++)
+    {
+        if (!Syscall_cow_refs[i].used)
+            return (int32_t) i;
+    }
+    return -1;
+}
+
+static bool Syscall_cow_ref_add(uintptr_t phys, uint32_t delta)
+{
+    if (phys == 0 || delta == 0 || !Syscall_cow_lock_ready)
+        return false;
+
+    spin_lock(&Syscall_cow_lock);
+    int32_t slot = Syscall_cow_ref_find_locked(phys);
+    if (slot >= 0)
+    {
+        syscall_cow_ref_t* ref = &Syscall_cow_refs[(uint32_t) slot];
+        if (ref->refs > UINT32_MAX - delta)
+        {
+            spin_unlock(&Syscall_cow_lock);
+            return false;
+        }
+        ref->refs += delta;
+        spin_unlock(&Syscall_cow_lock);
+        return true;
+    }
+
+    slot = Syscall_cow_ref_alloc_locked();
+    if (slot < 0)
+    {
+        spin_unlock(&Syscall_cow_lock);
+        return false;
+    }
+
+    syscall_cow_ref_t* ref = &Syscall_cow_refs[(uint32_t) slot];
+    ref->used = true;
+    ref->phys = phys;
+    ref->refs = delta;
+    spin_unlock(&Syscall_cow_lock);
+    return true;
+}
+
+static bool Syscall_cow_ref_sub(uintptr_t phys, bool* out_zero)
+{
+    if (out_zero)
+        *out_zero = false;
+    if (phys == 0 || !Syscall_cow_lock_ready)
+        return false;
+
+    spin_lock(&Syscall_cow_lock);
+    int32_t slot = Syscall_cow_ref_find_locked(phys);
+    if (slot < 0)
+    {
+        spin_unlock(&Syscall_cow_lock);
+        return false;
+    }
+
+    syscall_cow_ref_t* ref = &Syscall_cow_refs[(uint32_t) slot];
+    if (ref->refs <= 1U)
+    {
+        ref->used = false;
+        ref->phys = 0;
+        ref->refs = 0;
+        if (out_zero)
+            *out_zero = true;
+    }
+    else
+    {
+        ref->refs -= 1U;
+    }
+
+    spin_unlock(&Syscall_cow_lock);
+    return true;
+}
+
+static uint32_t Syscall_cow_ref_get(uintptr_t phys)
+{
+    if (phys == 0 || !Syscall_cow_lock_ready)
+        return 0;
+
+    spin_lock(&Syscall_cow_lock);
+    int32_t slot = Syscall_cow_ref_find_locked(phys);
+    uint32_t refs = (slot >= 0) ? Syscall_cow_refs[(uint32_t) slot].refs : 0U;
+    spin_unlock(&Syscall_cow_lock);
+    return refs;
+}
+
+static uint64_t* Syscall_get_user_pte_ptr(uintptr_t cr3_phys, uintptr_t virt)
+{
+    if (cr3_phys == 0 || !Syscall_is_canonical_low(virt) || virt < SYSCALL_USER_VADDR_MIN)
+        return NULL;
+
+    uint16_t pml4_index = PML4_INDEX(virt);
+    uint16_t pdpt_index = PDPT_INDEX(virt);
+    uint16_t pdt_index = PDT_INDEX(virt);
+    uint16_t pt_index = PT_INDEX(virt);
+    if (pml4_index >= VMM_HHDM_PML4_INDEX)
+        return NULL;
+
+    PML4_t* pml4 = (PML4_t*) P2V(cr3_phys);
+    uintptr_t pml4_entry = pml4->entries[pml4_index];
+    if ((pml4_entry & PRESENT) == 0 || (pml4_entry & USER_MODE) == 0)
+        return NULL;
+
+    PDPT_t* pdpt = (PDPT_t*) P2V(pml4_entry & FRAME);
+    uintptr_t pdpt_entry = pdpt->entries[pdpt_index];
+    if ((pdpt_entry & PRESENT) == 0 || (pdpt_entry & USER_MODE) == 0)
+        return NULL;
+    if ((pdpt_entry & SYSCALL_PTE_PS) != 0)
+        return NULL;
+
+    PDT_t* pdt = (PDT_t*) P2V(pdpt_entry & FRAME);
+    uintptr_t pdt_entry = pdt->entries[pdt_index];
+    if ((pdt_entry & PRESENT) == 0 || (pdt_entry & USER_MODE) == 0)
+        return NULL;
+    if ((pdt_entry & SYSCALL_PTE_PS) != 0)
+        return NULL;
+
+    PT_t* pt = (PT_t*) P2V(pdt_entry & FRAME);
+    return &pt->entries[pt_index];
+}
+
 static void Syscall_free_user_pt(uintptr_t pt_phys)
 {
     if (pt_phys == 0)
@@ -695,8 +942,18 @@ static void Syscall_free_user_pt(uintptr_t pt_phys)
             continue;
 
         uintptr_t page_phys = entry & FRAME;
-        if (page_phys != 0)
-            PMM_dealloc_page((void*) page_phys);
+        if (page_phys == 0)
+            continue;
+
+        if ((entry & SYSCALL_PTE_COW) != 0)
+        {
+            bool ref_zero = false;
+            if (Syscall_cow_ref_sub(page_phys, &ref_zero) && ref_zero)
+                PMM_dealloc_page((void*) page_phys);
+            continue;
+        }
+
+        PMM_dealloc_page((void*) page_phys);
     }
 
     PMM_dealloc_page((void*) pt_phys);
@@ -784,6 +1041,31 @@ static bool Syscall_clone_user_pt(uintptr_t src_pt_phys, uintptr_t* out_dst_pt_p
         }
 
         uintptr_t src_page_phys = src_entry & FRAME;
+        if (src_page_phys == 0)
+        {
+            dst_pt->entries[i] = src_entry;
+            continue;
+        }
+
+        bool writable = (src_entry & WRITABLE) != 0;
+        bool already_cow = (src_entry & SYSCALL_PTE_COW) != 0;
+        if (writable || already_cow)
+        {
+            uintptr_t shared_entry = src_entry & ~WRITABLE;
+            shared_entry |= SYSCALL_PTE_COW;
+
+            uint32_t delta = already_cow ? 1U : 2U;
+            if (!Syscall_cow_ref_add(src_page_phys, delta))
+            {
+                Syscall_free_user_pt(dst_pt_phys);
+                return false;
+            }
+
+            src_pt->entries[i] = shared_entry;
+            dst_pt->entries[i] = shared_entry;
+            continue;
+        }
+
         uintptr_t dst_page_phys = Syscall_alloc_zero_page_phys();
         if (dst_page_phys == 0)
         {
@@ -918,6 +1200,9 @@ static bool Syscall_clone_address_space(uintptr_t src_cr3_phys, uintptr_t* out_d
 
         dst_pml4->entries[i] = (src_entry & ~FRAME) | dst_pdpt_phys;
     }
+
+    if (src_cr3_phys == Syscall_read_cr3_phys())
+        Syscall_write_cr3_phys(src_cr3_phys);
 
     *out_dst_cr3_phys = dst_cr3_phys;
     return true;
@@ -1207,14 +1492,26 @@ static int32_t Syscall_proc_ensure_current_locked(uint32_t cpu_index, const sysc
     proc->used = true;
     proc->exiting = false;
     proc->terminated_by_signal = false;
+    proc->is_thread = false;
     proc->exit_status = 0;
+    proc->thread_exit_value = 0;
     proc->term_signal = 0;
     uintptr_t current_cr3 = Syscall_read_cr3_phys();
     uintptr_t kernel_cr3 = VMM_get_kernel_cr3_phys();
     proc->owns_cr3 = (current_cr3 != 0 && current_cr3 != kernel_cr3);
     proc->pid = Syscall_next_pid++;
     proc->ppid = 0;
+    proc->owner_pid = proc->pid;
     proc->cr3_phys = current_cr3;
+    proc->rax = 0;
+    proc->rcx = 0;
+    proc->rdx = frame->rdx;
+    proc->rsi = frame->rsi;
+    proc->rdi = frame->rdi;
+    proc->r8 = frame->r8;
+    proc->r9 = frame->r9;
+    proc->r10 = frame->r10;
+    proc->r11 = 0;
     proc->r15 = frame->r15;
     proc->r14 = frame->r14;
     proc->r13 = frame->r13;
@@ -1222,7 +1519,7 @@ static int32_t Syscall_proc_ensure_current_locked(uint32_t cpu_index, const sysc
     proc->rbp = frame->rbp;
     proc->rbx = frame->rbx;
     proc->rip = frame->rip;
-    proc->rflags = frame->rflags;
+    proc->rflags = frame->rflags | SYSCALL_RFLAGS_IF;
     proc->rsp = frame->rsp;
     proc->pending_rax = 0;
 
@@ -1237,7 +1534,7 @@ static uint32_t Syscall_proc_current_pid(uint32_t cpu_index, const syscall_frame
 
     uint64_t flags = spin_lock_irqsave(&Syscall_proc_lock);
     int32_t slot = Syscall_proc_ensure_current_locked(cpu_index, frame);
-    uint32_t pid = (slot >= 0) ? Syscall_procs[slot].pid : 0;
+    uint32_t pid = (slot >= 0) ? Syscall_procs[slot].owner_pid : 0;
     spin_unlock_irqrestore(&Syscall_proc_lock, flags);
     return pid;
 }
@@ -1264,6 +1561,145 @@ static int32_t Syscall_proc_pick_next_locked(int32_t current_slot)
     }
 
     return -1;
+}
+
+static void Syscall_proc_save_from_interrupt(syscall_process_t* proc,
+                                             const interrupt_frame_t* frame,
+                                             uintptr_t cr3_phys)
+{
+    if (!proc || !frame)
+        return;
+
+    proc->rax = frame->rax;
+    proc->rcx = frame->rcx;
+    proc->rdx = frame->rdx;
+    proc->rsi = frame->rsi;
+    proc->rdi = frame->rdi;
+    proc->r8 = frame->r8;
+    proc->r9 = frame->r9;
+    proc->r10 = frame->r10;
+    proc->r11 = frame->r11;
+    proc->r15 = frame->r15;
+    proc->r14 = frame->r14;
+    proc->r13 = frame->r13;
+    proc->r12 = frame->r12;
+    proc->rbp = frame->rbp;
+    proc->rbx = frame->rbx;
+    proc->rip = frame->rip;
+    proc->rflags = frame->rflags | SYSCALL_RFLAGS_IF;
+    proc->rsp = frame->rsp;
+    proc->pending_rax = frame->rax;
+    proc->cr3_phys = cr3_phys;
+}
+
+static void Syscall_proc_load_to_interrupt(const syscall_process_t* proc, interrupt_frame_t* frame)
+{
+    if (!proc || !frame)
+        return;
+
+    frame->rax = proc->rax;
+    frame->rcx = proc->rcx;
+    frame->rdx = proc->rdx;
+    frame->rsi = proc->rsi;
+    frame->rdi = proc->rdi;
+    frame->r8 = proc->r8;
+    frame->r9 = proc->r9;
+    frame->r10 = proc->r10;
+    frame->r11 = proc->r11;
+    frame->r15 = proc->r15;
+    frame->r14 = proc->r14;
+    frame->r13 = proc->r13;
+    frame->r12 = proc->r12;
+    frame->rbp = proc->rbp;
+    frame->rbx = proc->rbx;
+    frame->rip = proc->rip;
+    frame->rflags = proc->rflags | SYSCALL_RFLAGS_IF;
+    frame->rsp = proc->rsp;
+}
+
+static bool Syscall_resolve_cow_fault(uint32_t cpu_index, uintptr_t fault_addr, uint64_t err_code)
+{
+    if ((err_code & (SYSCALL_PAGE_FAULT_PRESENT | SYSCALL_PAGE_FAULT_WRITE)) !=
+        (SYSCALL_PAGE_FAULT_PRESENT | SYSCALL_PAGE_FAULT_WRITE))
+        return false;
+    if (!Syscall_proc_lock_ready || !Syscall_vm_lock_ready)
+        return false;
+
+    uintptr_t page = fault_addr & FRAME;
+    if (!Syscall_user_range_in_bounds(page, 1))
+        return false;
+
+    uintptr_t current_cr3 = Syscall_read_cr3_phys();
+    uint64_t lock_flags = spin_lock_irqsave(&Syscall_proc_lock);
+    int32_t slot = Syscall_proc_get_current_slot_locked(cpu_index);
+    if (slot < 0)
+    {
+        spin_unlock_irqrestore(&Syscall_proc_lock, lock_flags);
+        return false;
+    }
+
+    syscall_process_t* proc = &Syscall_procs[(uint32_t) slot];
+    uintptr_t proc_cr3 = proc->cr3_phys;
+    spin_unlock_irqrestore(&Syscall_proc_lock, lock_flags);
+    if (proc_cr3 == 0 || proc_cr3 != current_cr3)
+        return false;
+
+    spin_lock(&Syscall_vm_lock);
+    uint64_t* pte = Syscall_get_user_pte_ptr(proc_cr3, page);
+    if (!pte)
+    {
+        spin_unlock(&Syscall_vm_lock);
+        return false;
+    }
+
+    uintptr_t entry = *pte;
+    if ((entry & (PRESENT | USER_MODE | SYSCALL_PTE_COW)) != (PRESENT | USER_MODE | SYSCALL_PTE_COW))
+    {
+        spin_unlock(&Syscall_vm_lock);
+        return false;
+    }
+
+    uintptr_t old_phys = entry & FRAME;
+    if (old_phys == 0)
+    {
+        spin_unlock(&Syscall_vm_lock);
+        return false;
+    }
+
+    uint32_t refs = Syscall_cow_ref_get(old_phys);
+    if (refs <= 1U)
+    {
+        bool dummy_zero = false;
+        (void) Syscall_cow_ref_sub(old_phys, &dummy_zero);
+        entry &= ~SYSCALL_PTE_COW;
+        entry |= WRITABLE;
+        *pte = entry;
+        spin_unlock(&Syscall_vm_lock);
+        Syscall_write_cr3_phys(proc_cr3);
+        return true;
+    }
+
+    uintptr_t new_phys = (uintptr_t) PMM_alloc_page();
+    if (new_phys == 0)
+    {
+        spin_unlock(&Syscall_vm_lock);
+        return false;
+    }
+
+    memcpy((void*) P2V(new_phys), (const void*) P2V(old_phys), SYSCALL_PAGE_SIZE);
+    entry &= ~FRAME;
+    entry |= new_phys;
+    entry &= ~SYSCALL_PTE_COW;
+    entry |= WRITABLE;
+    *pte = entry;
+    spin_unlock(&Syscall_vm_lock);
+
+    bool ref_zero = false;
+    if (Syscall_cow_ref_sub(old_phys, &ref_zero) && ref_zero)
+        PMM_dealloc_page((void*) old_phys);
+
+    Syscall_write_cr3_phys(proc_cr3);
+    return true;
 }
 
 static int32_t Syscall_user_exception_signal_num(uint64_t int_no)
@@ -1341,6 +1777,36 @@ static void Syscall_exit_event_push_locked(uint32_t ppid, uint32_t pid, int64_t 
     event->signal = signal;
 }
 
+static void Syscall_thread_exit_event_push_locked(uint32_t owner_pid, uint32_t tid, uint64_t value)
+{
+    if (owner_pid == 0 || tid == 0)
+        return;
+
+    int32_t slot = -1;
+    for (uint32_t i = 0; i < SYSCALL_MAX_THREAD_EXIT_EVENTS; i++)
+    {
+        if (Syscall_thread_exit_events[i].used &&
+            Syscall_thread_exit_events[i].owner_pid == owner_pid &&
+            Syscall_thread_exit_events[i].tid == tid)
+        {
+            slot = (int32_t) i;
+            break;
+        }
+
+        if (!Syscall_thread_exit_events[i].used && slot < 0)
+            slot = (int32_t) i;
+    }
+
+    if (slot < 0)
+        slot = 0;
+
+    syscall_thread_exit_event_t* event = &Syscall_thread_exit_events[(uint32_t) slot];
+    event->used = true;
+    event->owner_pid = owner_pid;
+    event->tid = tid;
+    event->value = value;
+}
+
 static bool Syscall_exit_event_pop_locked(uint32_t ppid,
                                           int32_t wait_pid,
                                           uint32_t* out_pid,
@@ -1368,13 +1834,71 @@ static bool Syscall_exit_event_pop_locked(uint32_t ppid,
     return false;
 }
 
+static bool Syscall_thread_exit_event_pop_locked(uint32_t owner_pid,
+                                                 uint32_t tid,
+                                                 uint64_t* out_value)
+{
+    for (uint32_t i = 0; i < SYSCALL_MAX_THREAD_EXIT_EVENTS; i++)
+    {
+        syscall_thread_exit_event_t* event = &Syscall_thread_exit_events[i];
+        if (!event->used || event->owner_pid != owner_pid || event->tid != tid)
+            continue;
+
+        if (out_value)
+            *out_value = event->value;
+        memset(event, 0, sizeof(*event));
+        return true;
+    }
+
+    return false;
+}
+
+static bool Syscall_proc_owner_has_other_live_locked(uint32_t owner_pid, int32_t exclude_slot)
+{
+    if (owner_pid == 0)
+        return false;
+
+    for (uint32_t i = 0; i < SYSCALL_MAX_PROCS; i++)
+    {
+        if ((int32_t) i == exclude_slot)
+            continue;
+        if (!Syscall_procs[i].used)
+            continue;
+        if (Syscall_procs[i].owner_pid != owner_pid)
+            continue;
+        return true;
+    }
+
+    return false;
+}
+
+static bool Syscall_proc_has_live_thread_locked(uint32_t owner_pid, uint32_t tid)
+{
+    if (owner_pid == 0 || tid == 0)
+        return false;
+
+    for (uint32_t i = 0; i < SYSCALL_MAX_PROCS; i++)
+    {
+        syscall_process_t* proc = &Syscall_procs[i];
+        if (!proc->used || !proc->is_thread)
+            continue;
+        if (proc->owner_pid != owner_pid || proc->pid != tid)
+            continue;
+        return true;
+    }
+
+    return false;
+}
+
 static bool Syscall_proc_has_matching_child_locked(uint32_t ppid, int32_t wait_pid)
 {
     for (uint32_t i = 0; i < SYSCALL_MAX_PROCS; i++)
     {
         if (!Syscall_procs[i].used || Syscall_procs[i].ppid != ppid)
             continue;
-        if (wait_pid > 0 && Syscall_procs[i].pid != (uint32_t) wait_pid)
+        if (wait_pid > 0 &&
+            Syscall_procs[i].pid != (uint32_t) wait_pid &&
+            Syscall_procs[i].owner_pid != (uint32_t) wait_pid)
             continue;
         return true;
     }
@@ -1394,19 +1918,132 @@ void Syscall_init(void)
 
     memset(Syscall_procs, 0, sizeof(Syscall_procs));
     memset(Syscall_exit_events, 0, sizeof(Syscall_exit_events));
+    memset(Syscall_thread_exit_events, 0, sizeof(Syscall_thread_exit_events));
+    memset(Syscall_cow_refs, 0, sizeof(Syscall_cow_refs));
     for (uint32_t i = 0; i < 256; i++)
     {
         Syscall_cpu_current_proc[i] = SYSCALL_PROC_NONE;
         Syscall_cpu_need_resched[i] = 0;
+        Syscall_cpu_slice_ticks[i] = 0;
     }
     Syscall_next_pid = 1U;
     spinlock_init(&Syscall_proc_lock);
     Syscall_proc_lock_ready = true;
+    spinlock_init(&Syscall_cow_lock);
+    Syscall_cow_lock_ready = true;
 
     MSR_set(IA32_LSTAR, (uint64_t) &syscall_handler_stub);
     MSR_set(IA32_FMASK, SYSCALL_FMASK_TF_BIT | SYSCALL_FMASK_DF_BIT);
 
     enable_syscall_ext();
+}
+
+void Syscall_on_timer_tick(uint32_t cpu_index)
+{
+    if (!Syscall_proc_lock_ready || cpu_index >= 256)
+        return;
+
+    uint32_t runnable = 0;
+    uint64_t flags = spin_lock_irqsave(&Syscall_proc_lock);
+    for (uint32_t i = 0; i < SYSCALL_MAX_PROCS; i++)
+    {
+        if (Syscall_procs[i].used)
+            runnable++;
+    }
+    spin_unlock_irqrestore(&Syscall_proc_lock, flags);
+
+    if (runnable <= 1U)
+    {
+        Syscall_cpu_slice_ticks[cpu_index] = 0;
+        return;
+    }
+
+    uint8_t slice = (uint8_t) (Syscall_cpu_slice_ticks[cpu_index] + 1U);
+    Syscall_cpu_slice_ticks[cpu_index] = slice;
+    if (slice >= SYSCALL_PREEMPT_QUANTUM_TICKS)
+        __atomic_store_n(&Syscall_cpu_need_resched[cpu_index], 1, __ATOMIC_RELEASE);
+}
+
+bool Syscall_handle_timer_preempt(interrupt_frame_t* frame, uint32_t cpu_index)
+{
+    if (!frame || !Syscall_proc_lock_ready || cpu_index >= 256)
+        return false;
+
+    if ((frame->cs & 0x3ULL) != 0x3ULL)
+        return false;
+
+    uint64_t lock_flags = spin_lock_irqsave(&Syscall_proc_lock);
+    if (__atomic_exchange_n(&Syscall_cpu_need_resched[cpu_index], 0, __ATOMIC_ACQ_REL) == 0)
+    {
+        spin_unlock_irqrestore(&Syscall_proc_lock, lock_flags);
+        return false;
+    }
+
+    int32_t current_slot = Syscall_proc_get_current_slot_locked(cpu_index);
+    if (current_slot < 0)
+    {
+        syscall_frame_t bootstrap_frame;
+        memset(&bootstrap_frame, 0, sizeof(bootstrap_frame));
+        bootstrap_frame.r15 = frame->r15;
+        bootstrap_frame.r14 = frame->r14;
+        bootstrap_frame.r13 = frame->r13;
+        bootstrap_frame.r12 = frame->r12;
+        bootstrap_frame.rbp = frame->rbp;
+        bootstrap_frame.rbx = frame->rbx;
+        bootstrap_frame.rdi = frame->rdi;
+        bootstrap_frame.rsi = frame->rsi;
+        bootstrap_frame.rdx = frame->rdx;
+        bootstrap_frame.r10 = frame->r10;
+        bootstrap_frame.r8 = frame->r8;
+        bootstrap_frame.r9 = frame->r9;
+        bootstrap_frame.rip = frame->rip;
+        bootstrap_frame.rflags = frame->rflags;
+        bootstrap_frame.rsp = frame->rsp;
+        current_slot = Syscall_proc_ensure_current_locked(cpu_index, &bootstrap_frame);
+        if (current_slot < 0)
+        {
+            spin_unlock_irqrestore(&Syscall_proc_lock, lock_flags);
+            return false;
+        }
+    }
+
+    syscall_process_t* current = &Syscall_procs[(uint32_t) current_slot];
+    if (!current->used || current->exiting)
+    {
+        Syscall_cpu_slice_ticks[cpu_index] = 0;
+        spin_unlock_irqrestore(&Syscall_proc_lock, lock_flags);
+        return false;
+    }
+
+    uintptr_t current_cr3 = Syscall_read_cr3_phys();
+    Syscall_proc_save_from_interrupt(current, frame, current_cr3);
+
+    int32_t next_slot = Syscall_proc_pick_next_locked(current_slot);
+    if (next_slot < 0 || next_slot == current_slot)
+    {
+        Syscall_cpu_slice_ticks[cpu_index] = 0;
+        spin_unlock_irqrestore(&Syscall_proc_lock, lock_flags);
+        return false;
+    }
+
+    syscall_process_t* next = &Syscall_procs[(uint32_t) next_slot];
+    if (!next->used || next->exiting || next->cr3_phys == 0)
+    {
+        Syscall_cpu_slice_ticks[cpu_index] = 0;
+        spin_unlock_irqrestore(&Syscall_proc_lock, lock_flags);
+        return false;
+    }
+
+    Syscall_cpu_current_proc[cpu_index] = (uint32_t) next_slot;
+    Syscall_cpu_slice_ticks[cpu_index] = 0;
+    Syscall_proc_load_to_interrupt(next, frame);
+    uintptr_t next_cr3 = next->cr3_phys;
+    spin_unlock_irqrestore(&Syscall_proc_lock, lock_flags);
+
+    if (next_cr3 != current_cr3)
+        Syscall_write_cr3_phys(next_cr3);
+
+    return true;
 }
 
 uint64_t Syscall_interupt_handler(uint64_t syscall_num, syscall_frame_t* frame, uint32_t cpu_index)
@@ -1565,6 +2202,7 @@ uint64_t Syscall_interupt_handler(uint64_t syscall_num, syscall_frame_t* frame, 
                 Syscall_procs[slot].exiting = true;
                 Syscall_procs[slot].terminated_by_signal = false;
                 Syscall_procs[slot].exit_status = status;
+                Syscall_procs[slot].thread_exit_value = (uint64_t) status;
                 Syscall_procs[slot].term_signal = 0;
             }
             spin_unlock_irqrestore(&Syscall_proc_lock, lock_flags);
@@ -1586,8 +2224,15 @@ uint64_t Syscall_interupt_handler(uint64_t syscall_num, syscall_frame_t* frame, 
                 return (uint64_t) -1;
             }
 
-            parent_pid = Syscall_procs[parent_slot].pid;
-            parent_cr3 = Syscall_procs[parent_slot].cr3_phys;
+            syscall_process_t* parent = &Syscall_procs[parent_slot];
+            if (Syscall_proc_owner_has_other_live_locked(parent->owner_pid, parent_slot))
+            {
+                spin_unlock_irqrestore(&Syscall_proc_lock, lock_flags);
+                return (uint64_t) -1;
+            }
+
+            parent_pid = parent->owner_pid;
+            parent_cr3 = parent->cr3_phys;
             spin_unlock_irqrestore(&Syscall_proc_lock, lock_flags);
 
             uintptr_t child_cr3 = 0;
@@ -1610,11 +2255,23 @@ uint64_t Syscall_interupt_handler(uint64_t syscall_num, syscall_frame_t* frame, 
             child->exiting = false;
             child->terminated_by_signal = false;
             child->owns_cr3 = true;
+            child->is_thread = false;
             child->pid = child_pid;
             child->ppid = parent_pid;
+            child->owner_pid = child_pid;
             child->exit_status = 0;
+            child->thread_exit_value = 0;
             child->term_signal = 0;
             child->cr3_phys = child_cr3;
+            child->rax = 0;
+            child->rcx = 0;
+            child->rdx = frame->rdx;
+            child->rsi = frame->rsi;
+            child->rdi = frame->rdi;
+            child->r8 = frame->r8;
+            child->r9 = frame->r9;
+            child->r10 = frame->r10;
+            child->r11 = 0;
             child->r15 = frame->r15;
             child->r14 = frame->r14;
             child->r13 = frame->r13;
@@ -1622,7 +2279,7 @@ uint64_t Syscall_interupt_handler(uint64_t syscall_num, syscall_frame_t* frame, 
             child->rbp = frame->rbp;
             child->rbx = frame->rbx;
             child->rip = frame->rip;
-            child->rflags = frame->rflags;
+            child->rflags = frame->rflags | SYSCALL_RFLAGS_IF;
             child->rsp = frame->rsp;
             child->pending_rax = 0;
             if (cpu_index < 256)
@@ -1637,6 +2294,25 @@ uint64_t Syscall_interupt_handler(uint64_t syscall_num, syscall_frame_t* frame, 
             char path[SYSCALL_USER_CSTR_MAX];
             if (!Syscall_read_user_cstr(path, sizeof(path), (const char*) frame->rdi))
                 return (uint64_t) -1;
+
+            if (Syscall_proc_lock_ready)
+            {
+                uint64_t lock_flags = spin_lock_irqsave(&Syscall_proc_lock);
+                int32_t slot = Syscall_proc_ensure_current_locked(cpu_index, frame);
+                if (slot < 0)
+                {
+                    spin_unlock_irqrestore(&Syscall_proc_lock, lock_flags);
+                    return (uint64_t) -1;
+                }
+
+                syscall_process_t* proc = &Syscall_procs[slot];
+                if (Syscall_proc_owner_has_other_live_locked(proc->owner_pid, slot))
+                {
+                    spin_unlock_irqrestore(&Syscall_proc_lock, lock_flags);
+                    return (uint64_t) -1;
+                }
+                spin_unlock_irqrestore(&Syscall_proc_lock, lock_flags);
+            }
 
             char* argv_copy[SYSCALL_EXEC_MAX_ARGS];
             char* envp_copy[SYSCALL_EXEC_MAX_ENVP];
@@ -1701,10 +2377,22 @@ uint64_t Syscall_interupt_handler(uint64_t syscall_num, syscall_frame_t* frame, 
                     free_old = proc->owns_cr3 && old_cr3 != 0 && old_cr3 != new_cr3;
                     proc->cr3_phys = new_cr3;
                     proc->owns_cr3 = true;
+                    proc->is_thread = false;
+                    proc->owner_pid = proc->pid;
                     proc->exiting = false;
                     proc->terminated_by_signal = false;
                     proc->exit_status = 0;
+                    proc->thread_exit_value = 0;
                     proc->term_signal = 0;
+                    proc->rax = 0;
+                    proc->rcx = 0;
+                    proc->rdx = 0;
+                    proc->rsi = 0;
+                    proc->rdi = 0;
+                    proc->r8 = 0;
+                    proc->r9 = 0;
+                    proc->r10 = 0;
+                    proc->r11 = 0;
                     proc->r15 = 0;
                     proc->r14 = 0;
                     proc->r13 = 0;
@@ -1712,11 +2400,19 @@ uint64_t Syscall_interupt_handler(uint64_t syscall_num, syscall_frame_t* frame, 
                     proc->rbp = 0;
                     proc->rbx = 0;
                     proc->rip = new_entry;
+                    proc->rflags = frame->rflags | SYSCALL_RFLAGS_IF;
                     proc->rsp = new_rsp;
+                    proc->pending_rax = 0;
                 }
                 spin_unlock_irqrestore(&Syscall_proc_lock, lock_flags);
             }
 
+            frame->rdx = 0;
+            frame->rsi = 0;
+            frame->rdi = 0;
+            frame->r8 = 0;
+            frame->r9 = 0;
+            frame->r10 = 0;
             frame->r15 = 0;
             frame->r14 = 0;
             frame->r13 = 0;
@@ -1856,10 +2552,23 @@ map_out:
             {
                 uintptr_t virt = base + (i * SYSCALL_PAGE_SIZE);
                 uintptr_t phys = 0;
+                bool was_cow = false;
+                uint64_t* pte = Syscall_get_user_pte_ptr(Syscall_read_cr3_phys(), virt);
+                if (pte && ((*pte & SYSCALL_PTE_COW) != 0))
+                    was_cow = true;
                 if (!VMM_unmap_page(virt, &phys))
                     goto unmap_out;
                 if (phys != 0)
-                    PMM_dealloc_page((void*) phys);
+                {
+                    if (was_cow)
+                    {
+                        bool ref_zero = false;
+                        if (Syscall_cow_ref_sub(phys, &ref_zero) && ref_zero)
+                            PMM_dealloc_page((void*) phys);
+                    }
+                    else
+                        PMM_dealloc_page((void*) phys);
+                }
             }
             ret = 0;
 
@@ -1909,6 +2618,18 @@ unmap_out:
                 set_bits |= NO_EXECUTE;
             else
                 clear_bits |= NO_EXECUTE;
+
+            if (writable)
+            {
+                uintptr_t current_cr3 = Syscall_read_cr3_phys();
+                for (size_t i = 0; i < page_count; i++)
+                {
+                    uintptr_t virt = base + (i * SYSCALL_PAGE_SIZE);
+                    uint64_t* pte = Syscall_get_user_pte_ptr(current_cr3, virt);
+                    if (pte && ((*pte & SYSCALL_PTE_COW) != 0))
+                        goto mprotect_out;
+                }
+            }
             for (size_t i = 0; i < page_count; i++)
             {
                 uintptr_t virt = base + (i * SYSCALL_PAGE_SIZE);
@@ -2319,7 +3040,7 @@ mprotect_out:
                 return (uint64_t) -1;
             }
 
-            uint32_t parent_pid = Syscall_procs[slot].pid;
+            uint32_t parent_pid = Syscall_procs[slot].owner_pid;
             got_event = Syscall_exit_event_pop_locked(parent_pid,
                                                       wait_pid,
                                                       &reaped_pid,
@@ -2361,6 +3082,7 @@ mprotect_out:
 
             uint32_t sender_pid = 0;
             bool killed = false;
+            uint32_t target_owner_pid = 0;
 
             uint64_t lock_flags = spin_lock_irqsave(&Syscall_proc_lock);
             int32_t sender_slot = Syscall_proc_ensure_current_locked(cpu_index, frame);
@@ -2373,20 +3095,33 @@ mprotect_out:
                 if (!Syscall_procs[i].used || Syscall_procs[i].pid != (uint32_t) target_pid)
                     continue;
                 target_slot = (int32_t) i;
+                target_owner_pid = Syscall_procs[i].owner_pid;
                 break;
             }
 
-            if (target_slot >= 0)
+            if (target_slot >= 0 && target_owner_pid != 0)
             {
-                syscall_process_t* proc = &Syscall_procs[(uint32_t) target_slot];
-                proc->exiting = true;
-                proc->terminated_by_signal = true;
-                proc->term_signal = SYS_SIGKILL;
-                proc->exit_status = 128 + SYS_SIGKILL;
+                for (uint32_t i = 0; i < SYSCALL_MAX_PROCS; i++)
+                {
+                    syscall_process_t* proc = &Syscall_procs[i];
+                    if (!proc->used || proc->owner_pid != target_owner_pid)
+                        continue;
+                    proc->exiting = true;
+                    proc->terminated_by_signal = true;
+                    proc->term_signal = SYS_SIGKILL;
+                    proc->exit_status = 128 + SYS_SIGKILL;
+                    proc->thread_exit_value = 0;
+                }
 
                 for (uint32_t i = 0; i < 256; i++)
                 {
-                    if (Syscall_cpu_current_proc[i] == (uint32_t) target_slot)
+                    uint32_t running_slot = Syscall_cpu_current_proc[i];
+                    if (running_slot >= SYSCALL_MAX_PROCS)
+                        continue;
+                    if (!Syscall_procs[running_slot].used)
+                        continue;
+                    if (Syscall_procs[running_slot].owner_pid != target_owner_pid)
+                        continue;
                         __atomic_store_n(&Syscall_cpu_need_resched[i], 1, __ATOMIC_RELEASE);
                 }
                 killed = true;
@@ -2401,6 +3136,173 @@ mprotect_out:
                           (unsigned int) sender_pid,
                           (int) target_pid);
             return 0;
+        }
+
+        case SYS_THREAD_CREATE:
+        {
+            if (!Syscall_proc_lock_ready)
+                return (uint64_t) -1;
+
+            uintptr_t start_rip = (uintptr_t) frame->rdi;
+            uintptr_t start_arg = (uintptr_t) frame->rsi;
+            uintptr_t stack_top = (uintptr_t) frame->rdx & ~(uintptr_t) 0xFULL;
+            if (!Syscall_is_canonical_low(start_rip) ||
+                start_rip < SYSCALL_USER_VADDR_MIN ||
+                start_rip > SYSCALL_USER_VADDR_MAX)
+            {
+                return (uint64_t) -1;
+            }
+
+            if (stack_top <= (SYSCALL_USER_VADDR_MIN + 8U) || stack_top > SYSCALL_USER_VADDR_MAX)
+                return (uint64_t) -1;
+
+            uintptr_t thread_rsp = stack_top - 8U;
+            if (!Syscall_user_range_in_bounds(thread_rsp, sizeof(uint64_t)))
+                return (uint64_t) -1;
+
+            uint64_t fake_ret = 0;
+            if (!Syscall_copy_to_user((void*) thread_rsp, &fake_ret, sizeof(fake_ret)))
+                return (uint64_t) -1;
+
+            uint64_t lock_flags = spin_lock_irqsave(&Syscall_proc_lock);
+            int32_t parent_slot = Syscall_proc_ensure_current_locked(cpu_index, frame);
+            if (parent_slot < 0)
+            {
+                spin_unlock_irqrestore(&Syscall_proc_lock, lock_flags);
+                return (uint64_t) -1;
+            }
+
+            syscall_process_t* parent = &Syscall_procs[(uint32_t) parent_slot];
+            int32_t thread_slot = Syscall_proc_alloc_locked();
+            if (thread_slot < 0)
+            {
+                spin_unlock_irqrestore(&Syscall_proc_lock, lock_flags);
+                return (uint64_t) -1;
+            }
+
+            uint32_t tid = Syscall_next_pid++;
+            syscall_process_t* thread = &Syscall_procs[(uint32_t) thread_slot];
+            memset(thread, 0, sizeof(*thread));
+            thread->used = true;
+            thread->exiting = false;
+            thread->terminated_by_signal = false;
+            thread->owns_cr3 = false;
+            thread->is_thread = true;
+            thread->pid = tid;
+            thread->ppid = parent->ppid;
+            thread->owner_pid = parent->owner_pid;
+            thread->exit_status = 0;
+            thread->thread_exit_value = 0;
+            thread->term_signal = 0;
+            thread->cr3_phys = parent->cr3_phys;
+            thread->rax = 0;
+            thread->rcx = 0;
+            thread->rdx = 0;
+            thread->rsi = 0;
+            thread->rdi = start_arg;
+            thread->r8 = 0;
+            thread->r9 = 0;
+            thread->r10 = 0;
+            thread->r11 = 0;
+            thread->r15 = 0;
+            thread->r14 = 0;
+            thread->r13 = 0;
+            thread->r12 = 0;
+            thread->rbp = 0;
+            thread->rbx = 0;
+            thread->rip = start_rip;
+            thread->rflags = parent->rflags | SYSCALL_RFLAGS_IF;
+            thread->rsp = thread_rsp;
+            thread->pending_rax = 0;
+
+            if (cpu_index < 256)
+                __atomic_store_n(&Syscall_cpu_need_resched[cpu_index], 1, __ATOMIC_RELEASE);
+            spin_unlock_irqrestore(&Syscall_proc_lock, lock_flags);
+            return (uint64_t) tid;
+        }
+
+        case SYS_THREAD_JOIN:
+        {
+            if (!Syscall_proc_lock_ready)
+                return (uint64_t) -1;
+
+            int32_t tid = (int32_t) frame->rdi;
+            uint64_t* out_retval = (uint64_t*) frame->rsi;
+            if (tid <= 0)
+                return (uint64_t) -1;
+
+            uint32_t owner_pid = 0;
+            uint32_t self_tid = 0;
+            uint64_t thread_retval = 0;
+            bool got_event = false;
+            bool has_live_thread = false;
+
+            uint64_t lock_flags = spin_lock_irqsave(&Syscall_proc_lock);
+            int32_t slot = Syscall_proc_ensure_current_locked(cpu_index, frame);
+            if (slot < 0)
+            {
+                spin_unlock_irqrestore(&Syscall_proc_lock, lock_flags);
+                return (uint64_t) -1;
+            }
+
+            owner_pid = Syscall_procs[slot].owner_pid;
+            self_tid = Syscall_procs[slot].pid;
+            if ((uint32_t) tid == self_tid)
+            {
+                spin_unlock_irqrestore(&Syscall_proc_lock, lock_flags);
+                return (uint64_t) -1;
+            }
+
+            got_event = Syscall_thread_exit_event_pop_locked(owner_pid, (uint32_t) tid, &thread_retval);
+            if (!got_event)
+                has_live_thread = Syscall_proc_has_live_thread_locked(owner_pid, (uint32_t) tid);
+            spin_unlock_irqrestore(&Syscall_proc_lock, lock_flags);
+
+            if (!got_event)
+            {
+                if (!has_live_thread)
+                    return (uint64_t) -1;
+                if (cpu_index < 256)
+                    __atomic_store_n(&Syscall_cpu_need_resched[cpu_index], 1, __ATOMIC_RELEASE);
+                return 0;
+            }
+
+            if (out_retval && !Syscall_copy_to_user(out_retval, &thread_retval, sizeof(thread_retval)))
+                return (uint64_t) -1;
+            return (uint64_t) tid;
+        }
+
+        case SYS_THREAD_EXIT:
+        {
+            uint64_t retval = frame->rdi;
+            if (!Syscall_proc_lock_ready)
+                return retval;
+
+            uint64_t lock_flags = spin_lock_irqsave(&Syscall_proc_lock);
+            int32_t slot = Syscall_proc_ensure_current_locked(cpu_index, frame);
+            if (slot >= 0)
+            {
+                syscall_process_t* proc = &Syscall_procs[slot];
+                proc->exiting = true;
+                proc->terminated_by_signal = false;
+                proc->exit_status = (int64_t) retval;
+                proc->thread_exit_value = retval;
+                proc->term_signal = 0;
+            }
+            spin_unlock_irqrestore(&Syscall_proc_lock, lock_flags);
+            return retval;
+        }
+
+        case SYS_THREAD_SELF:
+        {
+            if (!Syscall_proc_lock_ready)
+                return (uint64_t) -1;
+
+            uint64_t lock_flags = spin_lock_irqsave(&Syscall_proc_lock);
+            int32_t slot = Syscall_proc_ensure_current_locked(cpu_index, frame);
+            uint64_t tid = (slot >= 0) ? Syscall_procs[slot].pid : (uint64_t) -1;
+            spin_unlock_irqrestore(&Syscall_proc_lock, lock_flags);
+            return tid;
         }
 
         case SYS_POWER:
@@ -2440,9 +3342,13 @@ uint64_t Syscall_post_handler(uint64_t syscall_ret, syscall_frame_t* frame, uint
     bool cleanup_fds = false;
     uint32_t cleanup_pid = 0;
     uint32_t cleanup_ppid = 0;
+    uint32_t cleanup_owner_pid = 0;
+    uint32_t cleanup_tid = 0;
     int64_t cleanup_status = 0;
     int32_t cleanup_signal = 0;
+    uint64_t cleanup_thread_value = 0;
     bool queue_exit_event = false;
+    bool queue_thread_exit_event = false;
     uint64_t ret_for_next = syscall_ret;
     uintptr_t next_cr3 = Syscall_read_cr3_phys();
 
@@ -2457,6 +3363,15 @@ uint64_t Syscall_post_handler(uint64_t syscall_ret, syscall_frame_t* frame, uint
     syscall_process_t* current = &Syscall_procs[current_slot];
     if (!current->exiting)
     {
+        current->rax = syscall_ret;
+        current->rcx = 0;
+        current->rdx = frame->rdx;
+        current->rsi = frame->rsi;
+        current->rdi = frame->rdi;
+        current->r8 = frame->r8;
+        current->r9 = frame->r9;
+        current->r10 = frame->r10;
+        current->r11 = 0;
         current->r15 = frame->r15;
         current->r14 = frame->r14;
         current->r13 = frame->r13;
@@ -2464,25 +3379,30 @@ uint64_t Syscall_post_handler(uint64_t syscall_ret, syscall_frame_t* frame, uint
         current->rbp = frame->rbp;
         current->rbx = frame->rbx;
         current->rip = frame->rip;
-        current->rflags = frame->rflags;
+        current->rflags = frame->rflags | SYSCALL_RFLAGS_IF;
         current->rsp = frame->rsp;
         current->cr3_phys = Syscall_read_cr3_phys();
         current->pending_rax = syscall_ret;
     }
     else
     {
-        if (current->owns_cr3)
+        bool owner_has_other_live = Syscall_proc_owner_has_other_live_locked(current->owner_pid, current_slot);
+        if (!owner_has_other_live && current->owns_cr3)
         {
             old_cr3_to_free = current->cr3_phys;
             free_old_cr3 = (old_cr3_to_free != 0);
         }
 
-        cleanup_pid = current->pid;
+        cleanup_pid = current->owner_pid;
         cleanup_ppid = current->ppid;
+        cleanup_owner_pid = current->owner_pid;
+        cleanup_tid = current->pid;
         cleanup_status = current->exit_status;
         cleanup_signal = current->terminated_by_signal ? current->term_signal : 0;
-        queue_exit_event = (cleanup_ppid != 0 && cleanup_pid != 0);
-        cleanup_fds = true;
+        cleanup_thread_value = current->thread_exit_value;
+        queue_thread_exit_event = current->is_thread && cleanup_owner_pid != 0 && cleanup_tid != 0;
+        queue_exit_event = (!owner_has_other_live && cleanup_ppid != 0 && cleanup_pid != 0);
+        cleanup_fds = !owner_has_other_live;
         memset(current, 0, sizeof(*current));
         Syscall_cpu_current_proc[cpu_index] = SYSCALL_PROC_NONE;
         current_slot = -1;
@@ -2505,7 +3425,14 @@ uint64_t Syscall_post_handler(uint64_t syscall_ret, syscall_frame_t* frame, uint
     }
 
     Syscall_cpu_current_proc[cpu_index] = (uint32_t) next_slot;
+    Syscall_cpu_slice_ticks[cpu_index] = 0;
     syscall_process_t* next = &Syscall_procs[next_slot];
+    frame->rdi = next->rdi;
+    frame->rsi = next->rsi;
+    frame->rdx = next->rdx;
+    frame->r10 = next->r10;
+    frame->r8 = next->r8;
+    frame->r9 = next->r9;
     frame->r15 = next->r15;
     frame->r14 = next->r14;
     frame->r13 = next->r13;
@@ -2513,12 +3440,14 @@ uint64_t Syscall_post_handler(uint64_t syscall_ret, syscall_frame_t* frame, uint
     frame->rbp = next->rbp;
     frame->rbx = next->rbx;
     frame->rip = next->rip;
-    frame->rflags = next->rflags;
+    frame->rflags = next->rflags | SYSCALL_RFLAGS_IF;
     frame->rsp = next->rsp;
     ret_for_next = next->pending_rax;
     next_cr3 = next->cr3_phys;
     if (queue_exit_event)
         Syscall_exit_event_push_locked(cleanup_ppid, cleanup_pid, cleanup_status, cleanup_signal);
+    if (queue_thread_exit_event)
+        Syscall_thread_exit_event_push_locked(cleanup_owner_pid, cleanup_tid, cleanup_thread_value);
     spin_unlock_irqrestore(&Syscall_proc_lock, lock_flags);
 
     if (next_cr3 != Syscall_read_cr3_phys())
@@ -2549,6 +3478,12 @@ bool Syscall_handle_user_exception(interrupt_frame_t* frame, uintptr_t fault_add
 
     if (cpu_index >= 256)
         cpu_index = apic_id;
+
+    if (frame->int_no == 14 &&
+        Syscall_resolve_cow_fault(cpu_index, fault_addr, frame->err_code))
+    {
+        return true;
+    }
 
     syscall_frame_t syscall_frame;
     memset(&syscall_frame, 0, sizeof(syscall_frame));

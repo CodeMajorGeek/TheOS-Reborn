@@ -1,6 +1,7 @@
 #include <CPU/APIC.h>
 
 #include <CPU/ISR.h>
+#include <CPU/Syscall.h>
 #include <Device/HPET.h>
 #include <Device/PIT.h>
 #include <Device/TTY.h>
@@ -784,11 +785,12 @@ bool APIC_timer_init_ap(uint32_t hz)
 
 static void APIC_timer_callback(interrupt_frame_t* frame)
 {
-    (void) frame;
     if (APIC_get_current_lapic_id() == APIC_get_bsp_lapic_id())
         TTY_on_timer_tick();
 
     task_scheduler_on_tick();
+    uint32_t cpu_slot = (uint32_t) APIC_get_current_lapic_id() & 0xFFU;
+    (void) Syscall_handle_timer_preempt(frame, cpu_slot);
     APIC_send_EOI();
     task_irq_exit();
 }

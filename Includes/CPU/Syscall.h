@@ -39,5 +39,7 @@ void Syscall_init(void);
 uint64_t Syscall_interupt_handler(uint64_t syscall_num, syscall_frame_t* frame, uint32_t cpu_index);
 uint64_t Syscall_post_handler(uint64_t syscall_ret, syscall_frame_t* frame, uint32_t cpu_index);
 bool Syscall_handle_user_exception(interrupt_frame_t* frame, uintptr_t fault_addr);
+void Syscall_on_timer_tick(uint32_t cpu_index);
+bool Syscall_handle_timer_preempt(interrupt_frame_t* frame, uint32_t cpu_index);
 
 #endif

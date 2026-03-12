@@ -94,6 +94,11 @@ syscall_handler_stub:
     cli
 
     # Restore RCX/R11/RSP and callee-saved regs from (possibly updated) syscall frame.
+    movq 48(%rsp), %rdi      # RDI
+    movq 56(%rsp), %rsi      # RSI
+    movq 64(%rsp), %rdx      # RDX
+    movq 80(%rsp), %r8       # R8
+    movq 88(%rsp), %r9       # R9
     movq 96(%rsp), %rcx      # RCX = user RIP
     movq 104(%rsp), %r11     # R11 = user RFLAGS
     movq 112(%rsp), %r10     # R10 = user RSP

@@ -245,6 +245,9 @@ flowchart TD
 
 - Ring3 ELF process start.
 - `fork/execve/waitpid/kill/yield` path implemented.
+- Copy-on-write (COW) clone path for writable user pages on `fork`.
+- Timer-driven userland reschedule hook is present (still experimental/tuning in progress).
+- libc provides a `pthread` layer backed by shared-address-space user threads.
 - Shell-centric workflow with additional user apps (`TheTest`, `ThePowerManager`, `TheMicroPython`).
 
 ---
@@ -351,13 +354,21 @@ serial_baudrate: 115200
 - `/bin/TheTest`
 - `/bin/ThePowerManager`
 - `/bin/TheMicroPython`
-- `/bin/MicroPython` (alias)
 
 Runtime resources:
 
 - `/system/keyboard.conf`
 - `/system/azerty.conf`
 - `/system/fonts/ter-powerline-v14n.psf`
+
+`TheTest` currently exercises:
+
+- mmap/unmap edge cases
+- race behavior on ext4 file updates
+- heap stress (`malloc/calloc/realloc/free`, `posix_memalign`, `aligned_alloc`)
+- COW fork probe
+- timer preemption probe (experimental)
+- pthread shared-memory probe
 
 ### Root filesystem selection policy
 
@@ -370,7 +381,7 @@ At boot, root mount does:
 
 ## Syscalls
 
-Current public syscall IDs are `1..27` (`Includes/UAPI/Syscall.h`).
+Current public syscall IDs are `1..31` (`Includes/UAPI/Syscall.h`).
 
 - `1` `SYS_SLEEP_MS`
 - `2` `SYS_TICK_GET`
@@ -399,6 +410,10 @@ Current public syscall IDs are `1..27` (`Includes/UAPI/Syscall.h`).
 - `25` `SYS_WAITPID`
 - `26` `SYS_KILL`
 - `27` `SYS_POWER`
+- `28` `SYS_THREAD_CREATE`
+- `29` `SYS_THREAD_JOIN`
+- `30` `SYS_THREAD_EXIT`
+- `31` `SYS_THREAD_SELF`
 
 ---
 
@@ -429,7 +444,8 @@ Current public syscall IDs are `1..27` (`Includes/UAPI/Syscall.h`).
 
 - ext4 implementation remains intentionally limited (not full production ext4 feature set).
 - libc is partial and targeted to current apps/ports.
-- No complete POSIX process/thread model yet (no COW, no pthread runtime).
+- Userland timer preemption fairness is still being tuned/validated.
+- `pthread` coverage remains partial (focus on create/join/exit/self + basic mutex).
 - Signal model is still minimal.
 - Legacy IDE/PIIX storage path is not implemented; storage discovery currently targets AHCI-class controllers.
 - Some components (x2APIC SMP mode, parts of scheduler stress paths) are experimental.

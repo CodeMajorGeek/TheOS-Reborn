@@ -1,11 +1,12 @@
 #ifndef _SIGNAL_H
 #define _SIGNAL_H
 
-/* Minimal subset of standard POSIX signals.
- * Values follow the usual Unix convention on x86_64. */
-
-/* Abnormal termination (used by abort). */
-#define SIGABRT 6
+/* Minimal POSIX-compatible signal set. */
+#define SIGILL   4
+#define SIGTRAP  5
+#define SIGABRT  6
+#define SIGFPE   8
+#define SIGKILL  9
+#define SIGSEGV  11
 
 #endif
-

@@ -1,6 +1,8 @@
 set(LIBC_SOURCES
     dirent.c
     errno.c
+    malloc.c
+    pthread.c
     string.c
     stdlib.c
     stdlib_parse.c
@@ -14,6 +16,8 @@ set(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} -DTHEOS_LIBC_BUILD")
 add_library(UserLibC STATIC
     dirent.c
     errno.c
+    malloc.c
+    pthread.c
     string.c
     stdlib_parse.c
     stdio.c

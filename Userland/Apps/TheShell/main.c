@@ -1,12 +1,16 @@
 #include <ctype.h>
 #include <dirent.h>
+#include <fcntl.h>
 #include <stdbool.h>
 #include <stddef.h>
 #include <stdint.h>
+#include <signal.h>
 #include <stdio.h>
 #include <string.h>
 #include <strings.h>
-#include <syscall.h>
+#include <sys/stat.h>
+#include <sys/wait.h>
+#include <unistd.h>
 
 #define SHELL_LINE_MAX           256U
 #define SHELL_PATH_MAX           256U
@@ -205,12 +209,20 @@ static bool shell_path_exists(const char* path)
     if (!path || path[0] == '\0')
         return false;
 
-    int fd = sys_open(path, SYS_OPEN_READ);
-    if (fd < 0)
+    struct stat st;
+    return stat(path, &st) == 0;
+}
+
+static bool shell_path_is_dir(const char* path)
+{
+    if (!path || path[0] == '\0')
         return false;
 
-    (void) sys_close(fd);
-    return true;
+    struct stat st;
+    if (stat(path, &st) != 0)
+        return false;
+
+    return S_ISDIR(st.st_mode);
 }
 
 static bool shell_build_the_alias_path(const char* command, char* out, size_t out_size)
@@ -343,16 +355,14 @@ static const char* shell_signal_name(int signal)
 {
     switch (signal)
     {
-        case SYS_SIGFPE:
+        case SIGFPE:
             return "SIGFPE";
-        case SYS_SIGTRAP:
+        case SIGTRAP:
             return "SIGTRAP";
-        case SYS_SIGILL:
+        case SIGILL:
             return "SIGILL";
-        case SYS_SIGSEGV:
+        case SIGSEGV:
             return "SIGSEGV";
-        case SYS_SIGFAULT:
-            return "SIGFAULT";
         default:
             return "SIGUNKNOWN";
     }
@@ -399,17 +409,17 @@ static bool shell_read_file(const char* path, uint8_t* buf, size_t buf_size, siz
     if (!path || !buf || buf_size == 0U || !out_size)
         return false;
 
-    int fd = sys_open(path, SYS_OPEN_READ);
+    int fd = open(path, O_RDONLY);
     if (fd < 0)
         return false;
 
     size_t total = 0U;
     while (total < buf_size)
     {
-        int rc = sys_read(fd, buf + total, buf_size - total);
+        int rc = (int) read(fd, buf + total, buf_size - total);
         if (rc < 0)
         {
-            (void) sys_close(fd);
+            (void) close(fd);
             return false;
         }
         if (rc == 0)
@@ -417,7 +427,7 @@ static bool shell_read_file(const char* path, uint8_t* buf, size_t buf_size, siz
         total += (size_t) rc;
     }
 
-    (void) sys_close(fd);
+    (void) close(fd);
     *out_size = total;
     return true;
 }
@@ -537,7 +547,7 @@ static void shell_tab_complete_argument_path(const char* cwd,
                 snprintf(abs_path, sizeof(abs_path), "/%s", ent->d_name);
             else
                 snprintf(abs_path, sizeof(abs_path), "%s/%s", resolved_dir, ent->d_name);
-            is_dir = (fs_is_dir(abs_path) == 1);
+            is_dir = shell_path_is_dir(abs_path);
         }
 
         if (strcmp(dir_part, ".") == 0)
@@ -629,20 +639,20 @@ static void shell_history_save_append(const char* line)
     if (!line || line[0] == '\0')
         return;
 
-    int fd = sys_open(SHELL_HISTORY_PATH, SYS_OPEN_CREATE | SYS_OPEN_WRITE);
+    int fd = open(SHELL_HISTORY_PATH, O_CREAT | O_WRONLY);
     if (fd < 0)
         return;
 
-    int64_t end = sys_lseek(fd, 0, SYS_SEEK_END);
+    int64_t end = lseek(fd, 0, SEEK_END);
     if (end >= 0)
     {
         size_t len = strlen(line);
         if (len > 0U)
-            (void) sys_write(fd, line, len);
-        (void) sys_write(fd, "\n", 1U);
+            (void) write(fd, line, len);
+        (void) write(fd, "\n", 1U);
     }
 
-    (void) sys_close(fd);
+    (void) close(fd);
 }
 
 static void shell_redraw_input(const char* prompt,
@@ -658,9 +668,9 @@ static void shell_redraw_input(const char* prompt,
     size_t clear_count = (prev_len > length) ? (prev_len - length) : 0U;
 
     putc('\r');
-    (void) sys_console_write(prompt, strlen(prompt));
+    (void) write(STDOUT_FILENO, prompt, strlen(prompt));
     if (length > 0U)
-        (void) sys_console_write(line, length);
+        (void) write(STDOUT_FILENO, line, length);
 
     for (size_t i = 0; i < clear_count; i++)
         putc(' ');
@@ -1041,7 +1051,7 @@ static void shell_cmd_exec_path(const char* cwd, const char* command, char* arg_
         return;
     }
 
-    const char* argv_exec[SHELL_EXEC_MAX_ARGS + 1U];
+    char* argv_exec[SHELL_EXEC_MAX_ARGS + 1U];
     size_t argc_exec = 0U;
     argv_exec[argc_exec++] = resolved;
 
@@ -1054,7 +1064,7 @@ static void shell_cmd_exec_path(const char* cwd, const char* command, char* arg_
     }
     argv_exec[argc_exec] = NULL;
 
-    int fork_rc = sys_fork();
+    int fork_rc = fork();
     if (fork_rc < 0)
     {
         printf("exec: fork failed (rc=%d)\n", fork_rc);
@@ -1063,34 +1073,23 @@ static void shell_cmd_exec_path(const char* cwd, const char* command, char* arg_
 
     if (fork_rc == 0)
     {
-        const char* const envp[] = { NULL };
-        int rc = sys_execve(resolved, argv_exec, envp);
+        int rc = execv(resolved, argv_exec);
         printf("exec: cannot run '%s' (rc=%d)\n", resolved, rc);
-        sys_exit(127);
+        _exit(127);
     }
 
-    for (;;)
+    int wait_status = 0;
+    int wait_rc = waitpid(fork_rc, &wait_status, 0);
+    if (wait_rc < 0)
     {
-        int status = 0;
-        int signal = 0;
-        int wait_rc = sys_waitpid(fork_rc, &status, &signal);
-        if (wait_rc == fork_rc)
-        {
-            if (signal != 0)
-                printf("exec: pid=%d killed by %s\n", fork_rc, shell_signal_name(signal));
-            else if (status != 0)
-                printf("exec: pid=%d exited status=%d\n", fork_rc, status);
-            return;
-        }
-
-        if (wait_rc < 0)
-        {
-            printf("exec: waitpid failed for pid=%d\n", fork_rc);
-            return;
-        }
-
-        (void) sys_sleep_ms(10);
+        printf("exec: waitpid failed for pid=%d\n", fork_rc);
+        return;
     }
+
+    if (WIFSIGNALED(wait_status))
+        printf("exec: pid=%d killed by %s\n", fork_rc, shell_signal_name(WTERMSIG(wait_status)));
+    else if (WIFEXITED(wait_status) && WEXITSTATUS(wait_status) != 0)
+        printf("exec: pid=%d exited status=%d\n", fork_rc, WEXITSTATUS(wait_status));
 }
 
 static void shell_cmd_pwd(const char* cwd)
@@ -1108,7 +1107,7 @@ static void shell_cmd_cd(char* cwd, const char* arg)
         return;
     }
 
-    if (fs_is_dir(resolved) != 1)
+    if (!shell_path_is_dir(resolved))
     {
         printf("cd: no such directory: %s\n", resolved);
         return;
@@ -1132,7 +1131,7 @@ static void shell_cmd_ls(const char* cwd, const char* arg)
         target = resolved;
     }
 
-    if (fs_is_dir(target) == 1)
+    if (shell_path_is_dir(target))
     {
         DIR* dir = opendir(target);
         if (!dir)
@@ -1197,7 +1196,7 @@ static void shell_cmd_cat(const char* cwd, const char* arg)
 
     buffer[out_size] = '\0';
     if (out_size > 0U)
-        (void) sys_console_write(buffer, out_size);
+        (void) write(STDOUT_FILENO, buffer, out_size);
     if (out_size == 0U || buffer[out_size - 1U] != '\n')
         putc('\n');
 }
@@ -1217,14 +1216,14 @@ static void shell_cmd_touch(const char* cwd, const char* arg)
         return;
     }
 
-    int fd = sys_open(resolved, SYS_OPEN_WRITE | SYS_OPEN_CREATE);
+    int fd = open(resolved, O_WRONLY | O_CREAT);
     if (fd < 0)
     {
         printf("touch: cannot touch '%s'\n", resolved);
         return;
     }
 
-    if (sys_close(fd) != 0)
+    if (close(fd) != 0)
         printf("touch: close failed for '%s'\n", resolved);
 }
 
@@ -1243,7 +1242,7 @@ static void shell_cmd_mkdir(const char* cwd, const char* arg)
         return;
     }
 
-    if (fs_mkdir(resolved) != 0)
+    if (mkdir(resolved, 0755U) != 0)
         printf("mkdir: cannot create directory '%s'\n", resolved);
 }
 
@@ -1285,7 +1284,7 @@ static void shell_cmd_echo(const char* cwd, char* arg)
         return;
     }
 
-    int fd = sys_open(resolved, SYS_OPEN_WRITE | SYS_OPEN_CREATE | SYS_OPEN_TRUNC);
+    int fd = open(resolved, O_WRONLY | O_CREAT | O_TRUNC);
     if (fd < 0)
     {
         printf("echo: cannot open '%s'\n", resolved);
@@ -1294,29 +1293,29 @@ static void shell_cmd_echo(const char* cwd, char* arg)
 
     const char* out_text = text ? text : "";
     size_t text_len = strlen(out_text);
-    if (text_len > 0U && sys_write(fd, out_text, text_len) != (int) text_len)
+    if (text_len > 0U && write(fd, out_text, text_len) != (int) text_len)
     {
         printf("echo: write failed on '%s'\n", resolved);
-        (void) sys_close(fd);
+        (void) close(fd);
         return;
     }
 
     const char newline = '\n';
-    if (sys_write(fd, &newline, 1U) != 1)
+    if (write(fd, &newline, 1U) != 1)
     {
         printf("echo: write failed on '%s'\n", resolved);
-        (void) sys_close(fd);
+        (void) close(fd);
         return;
     }
 
-    if (sys_close(fd) != 0)
+    if (close(fd) != 0)
         printf("echo: close failed on '%s'\n", resolved);
 }
 
 static void shell_cmd_clear(void)
 {
     static const char clear_seq[] = "\x1b[2J\x1b[H";
-    (void) sys_console_write(clear_seq, sizeof(clear_seq) - 1U);
+    (void) write(STDOUT_FILENO, clear_seq, sizeof(clear_seq) - 1U);
 }
 
 static void shell_print_help(void)
@@ -1359,7 +1358,7 @@ int main(int argc, char** argv, char** envp)
         int prompt_len = snprintf(prompt, sizeof(prompt), "TheShell:%s$ ", cwd);
         if (prompt_len <= 0 || (size_t) prompt_len >= sizeof(prompt))
             strcpy(prompt, "TheShell:/$ ");
-        (void) sys_console_write(prompt, strlen(prompt));
+        (void) write(STDOUT_FILENO, prompt, strlen(prompt));
 
         char line[SHELL_LINE_MAX];
         if (!shell_read_line(prompt, cwd, line, sizeof(line), &history))
@@ -1403,7 +1402,7 @@ int main(int argc, char** argv, char** envp)
         else if (strcmp(command, "exit") == 0)
         {
             printf("Bye !\n");
-            sys_exit(0);
+            _exit(0);
         }
         else
         {

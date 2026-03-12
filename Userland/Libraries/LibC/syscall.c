@@ -173,3 +173,25 @@ int sys_reboot(void)
 {
     return sys_power(SYS_POWER_CMD_REBOOT, 0);
 }
+
+int sys_thread_create(uintptr_t start_rip, uintptr_t arg, uintptr_t stack_top)
+{
+    return (int) syscall(SYS_THREAD_CREATE, (long) start_rip, (long) arg, (long) stack_top, 0, 0, 0);
+}
+
+int sys_thread_join(int tid, uint64_t* out_retval)
+{
+    return (int) syscall(SYS_THREAD_JOIN, (long) tid, (long) out_retval, 0, 0, 0, 0);
+}
+
+__attribute__((__noreturn__)) void sys_thread_exit(uint64_t retval)
+{
+    (void) syscall(SYS_THREAD_EXIT, (long) retval, 0, 0, 0, 0, 0);
+    for (;;)
+        (void) syscall(SYS_SLEEP_MS, 1000, 0, 0, 0, 0, 0);
+}
+
+int sys_thread_self(void)
+{
+    return (int) syscall(SYS_THREAD_SELF, 0, 0, 0, 0, 0, 0);
+}

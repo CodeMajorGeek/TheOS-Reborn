@@ -181,6 +181,8 @@ void IRQ_handler(interrupt_frame_t *frame)
 {
     int vector = (int) frame->int_no;
     int irq = vector - IRQ_VECTOR_BASE;
+    bool is_tick_vector = ((uint8_t) vector == TICK_VECTOR);
+    uint32_t tick_cpu_slot = 0;
 
     if (irq < 0 || irq >= MAX_IRQ_ENTRIES)
         return;
@@ -188,20 +190,22 @@ void IRQ_handler(interrupt_frame_t *frame)
     uint64_t vector_hits = __atomic_add_fetch(&irq_vector_count[irq], 1, __ATOMIC_RELAXED);
     uint64_t range_hits = __atomic_add_fetch(&irq_range_seen, 1, __ATOMIC_RELAXED);
 
-    if ((uint8_t) vector == TICK_VECTOR)
+    if (is_tick_vector)
     {
         uint32_t cpu_id = APIC_is_enabled() ? (uint32_t) APIC_get_current_lapic_id() : 0;
-        uint32_t cpu_slot = cpu_id & 0xFFU;
-        uint64_t cpu_ticks = __atomic_add_fetch(&tick_cpu_hits[cpu_slot], 1, __ATOMIC_RELAXED);
+        tick_cpu_slot = cpu_id & 0xFFU;
+        uint64_t cpu_ticks = __atomic_add_fetch(&tick_cpu_hits[tick_cpu_slot], 1, __ATOMIC_RELAXED);
         uint64_t total_ticks = __atomic_add_fetch(&timer_ticks, 1, __ATOMIC_RELAXED);
         tick_source_t source = __atomic_load_n(&tick_source, __ATOMIC_RELAXED);
+
+        Syscall_on_timer_tick(tick_cpu_slot);
 
         if ((cpu_ticks % TICK_LOG_PERIOD) == 0)
         {
             kdebug_printf("[TICK] src=%s vec=0x%X cpu=%u cpu_count=%llu total=%llu\n",
                           ISR_tick_source_name(source),
                           (unsigned) vector,
-                          cpu_slot,
+                          tick_cpu_slot,
                           (unsigned long long) cpu_ticks,
                           (unsigned long long) total_ticks);
         }

@@ -1,5 +1,5 @@
 #include <stdio.h>
-#include <syscall.h>
+#include <unistd.h>
 
 int main(int argc, char** argv, char** envp)
 {
@@ -7,11 +7,8 @@ int main(int argc, char** argv, char** envp)
     (void) argv;
     (void) envp;
 
-    printf("Hello World from TheApp (ring3)\n");
-
-    const char* const shell_argv[] = { "TheShell", NULL };
-    const char* const shell_envp[] = { NULL };
-    int shell_rc = sys_execve("/bin/TheShell", shell_argv, shell_envp);
-    printf("[TheApp] execve('/bin/TheShell') failed rc=%d\n", shell_rc);
+    char* const shell_argv[] = { "TheShell", NULL };
+    int shell_rc = execv("/bin/TheShell", shell_argv);
+    printf("[TheApp] execv('/bin/TheShell') failed rc=%d\n", shell_rc);
     return 1;
 }
