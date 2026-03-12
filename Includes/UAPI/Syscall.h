@@ -47,6 +47,7 @@
 #define SYS_OPEN_WRITE   (1ULL << 1)
 #define SYS_OPEN_CREATE  (1ULL << 2)
 #define SYS_OPEN_TRUNC   (1ULL << 3)
+#define SYS_OPEN_LOCK    (1ULL << 4)
 
 #define SYS_SEEK_SET     0
 #define SYS_SEEK_CUR     1

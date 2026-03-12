@@ -187,6 +187,62 @@ static bool thetest_write_counter(const char* path, uint64_t value)
     return write_rc == text_len && close_rc == 0;
 }
 
+static bool thetest_increment_counter_atomic(const char* path)
+{
+    if (!path)
+        return false;
+
+    for (uint32_t attempt = 0; attempt < 8192U; attempt++)
+    {
+        int fd = open(path, O_RDWR | O_CREAT | O_LOCK);
+        if (fd < 0)
+        {
+            (void) sched_yield();
+            continue;
+        }
+
+        uint8_t raw[64];
+        int read_rc = (int) read(fd, raw, sizeof(raw) - 1U);
+        if (read_rc < 0)
+        {
+            (void) close(fd);
+            return false;
+        }
+
+        uint64_t current = 0;
+        if (read_rc > 0)
+        {
+            raw[(size_t) read_rc] = '\0';
+            if (!thetest_parse_u64((const char*) raw, &current))
+            {
+                (void) close(fd);
+                return false;
+            }
+        }
+
+        uint64_t next = current + 1ULL;
+        char text[64];
+        int text_len = snprintf(text, sizeof(text), "%llu\n", (unsigned long long) next);
+        if (text_len <= 0 || (size_t) text_len >= sizeof(text))
+        {
+            (void) close(fd);
+            return false;
+        }
+
+        if (lseek(fd, 0, SEEK_SET) < 0)
+        {
+            (void) close(fd);
+            return false;
+        }
+
+        int write_rc = (int) write(fd, text, (size_t) text_len);
+        int close_rc = close(fd);
+        return write_rc == text_len && close_rc == 0;
+    }
+
+    return false;
+}
+
 static int thetest_wait_child(int pid, int* out_status, int* out_signal, uint32_t timeout_ms)
 {
     if (out_status)
@@ -222,20 +278,9 @@ static void thetest_race_worker(const char* path, int worker_id)
 {
     for (int i = 0; i < RACE_ITERS; i++)
     {
-        uint64_t current = 0;
-        if (!thetest_read_counter(path, &current))
+        if (!thetest_increment_counter_atomic(path))
         {
-            printf("[TheTest][worker:%d] read failed iter=%d\n", worker_id, i);
-            _exit(2);
-        }
-
-        if ((i & 1) == 0)
-            (void) sched_yield();
-
-        uint64_t next = current + 1ULL;
-        if (!thetest_write_counter(path, next))
-        {
-            printf("[TheTest][worker:%d] write failed iter=%d\n", worker_id, i);
+            printf("[TheTest][worker:%d] atomic increment failed iter=%d\n", worker_id, i);
             _exit(3);
         }
 

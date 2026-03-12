@@ -362,7 +362,7 @@ int open(const char* path, int flags, ...)
         return -1;
     }
 
-    int unsupported = flags & ~(O_ACCMODE | O_CREAT | O_TRUNC);
+    int unsupported = flags & ~(O_ACCMODE | O_CREAT | O_TRUNC | O_LOCK);
     if (unsupported != 0)
     {
         errno = EINVAL;
@@ -390,6 +390,11 @@ int open(const char* path, int flags, ...)
     if ((flags & O_CREAT) != 0)
     {
         sys_flags |= SYS_OPEN_CREATE;
+    }
+
+    if ((flags & O_LOCK) != 0)
+    {
+        sys_flags |= SYS_OPEN_LOCK;
     }
 
     if ((flags & O_TRUNC) != 0)

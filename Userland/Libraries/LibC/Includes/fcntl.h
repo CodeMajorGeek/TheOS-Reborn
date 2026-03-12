@@ -7,5 +7,6 @@
 #define O_ACCMODE 0x0003
 #define O_CREAT   0x0040
 #define O_TRUNC   0x0200
+#define O_LOCK    0x40000000
 
 #endif

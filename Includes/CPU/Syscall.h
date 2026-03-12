@@ -73,6 +73,7 @@ typedef struct syscall_file_desc
     uint32_t owner_pid;
     bool can_read;
     bool can_write;
+    bool exclusive;
     bool dirty;
     bool io_busy;
     char path[SYSCALL_USER_CSTR_MAX];

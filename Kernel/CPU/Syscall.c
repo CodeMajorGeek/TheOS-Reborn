@@ -604,6 +604,26 @@ static int32_t Syscall_fd_alloc_locked(void)
     return -1;
 }
 
+static bool Syscall_fd_path_conflicts_locked(const char* path, bool want_exclusive)
+{
+    if (!path || path[0] == '\0')
+        return false;
+
+    for (uint32_t i = 0; i < SYSCALL_MAX_OPEN_FILES; i++)
+    {
+        const syscall_file_desc_t* entry = &Syscall_state.fds[i];
+        if (!entry->used || entry->path[0] == '\0')
+            continue;
+        if (strcmp(entry->path, path) != 0)
+            continue;
+
+        if (want_exclusive || entry->exclusive)
+            return true;
+    }
+
+    return false;
+}
+
 static uint64_t Syscall_handle_open(uint32_t cpu_index, const syscall_frame_t* frame)
 {
     if (!frame || !Syscall_state.fd_lock_ready || !Syscall_state.fs_lock_ready)
@@ -618,7 +638,7 @@ static uint64_t Syscall_handle_open(uint32_t cpu_index, const syscall_frame_t* f
         return (uint64_t) -1;
 
     uint64_t flags = frame->rsi;
-    const uint64_t valid_flags = SYS_OPEN_READ | SYS_OPEN_WRITE | SYS_OPEN_CREATE | SYS_OPEN_TRUNC;
+    const uint64_t valid_flags = SYS_OPEN_READ | SYS_OPEN_WRITE | SYS_OPEN_CREATE | SYS_OPEN_TRUNC | SYS_OPEN_LOCK;
     if ((flags & ~valid_flags) != 0)
         return (uint64_t) -1;
 
@@ -626,18 +646,40 @@ static uint64_t Syscall_handle_open(uint32_t cpu_index, const syscall_frame_t* f
     bool can_write = (flags & SYS_OPEN_WRITE) != 0;
     bool want_create = (flags & SYS_OPEN_CREATE) != 0;
     bool want_trunc = (flags & SYS_OPEN_TRUNC) != 0;
+    bool want_exclusive = (flags & SYS_OPEN_LOCK) != 0;
 
     if (!can_read && !can_write)
         can_read = true;
     if ((want_create || want_trunc) && !can_write)
         return (uint64_t) -1;
 
+    char lock_path[SYSCALL_USER_CSTR_MAX] = { 0 };
+    bool lock_path_is_normalized = Syscall_normalize_write_path(path, lock_path, sizeof(lock_path));
+    if (can_write || want_exclusive)
+    {
+        if (!lock_path_is_normalized)
+            return (uint64_t) -1;
+    }
+    else
+    {
+        size_t raw_len = strlen(path);
+        if (raw_len + 1U > sizeof(lock_path))
+            return (uint64_t) -1;
+        memcpy(lock_path, path, raw_len + 1U);
+    }
+
     char write_path[SYSCALL_USER_CSTR_MAX] = { 0 };
-    if (can_write && !Syscall_normalize_write_path(path, write_path, sizeof(write_path)))
-        return (uint64_t) -1;
+    if (can_write)
+        memcpy(write_path, lock_path, sizeof(write_path));
 
     int32_t fd = -1;
     spin_lock(&Syscall_state.fd_lock);
+    if (Syscall_fd_path_conflicts_locked(lock_path, want_exclusive))
+    {
+        spin_unlock(&Syscall_state.fd_lock);
+        return (uint64_t) -1;
+    }
+
     fd = Syscall_fd_alloc_locked();
     if (fd < 0)
     {
@@ -649,7 +691,9 @@ static uint64_t Syscall_handle_open(uint32_t cpu_index, const syscall_frame_t* f
     memset(entry, 0, sizeof(*entry));
     entry->used = true;
     entry->owner_pid = owner_pid;
+    entry->exclusive = want_exclusive;
     entry->io_busy = true;
+    memcpy(entry->path, lock_path, sizeof(entry->path));
     spin_unlock(&Syscall_state.fd_lock);
 
     uint8_t* file_data = NULL;
@@ -709,12 +753,6 @@ static uint64_t Syscall_handle_open(uint32_t cpu_index, const syscall_frame_t* f
     entry->capacity = file_size;
     entry->offset = 0;
     entry->max_size = can_write ? block_size : file_size;
-
-    if (can_write)
-    {
-        size_t write_path_len = strlen(write_path);
-        memcpy(entry->path, write_path, write_path_len + 1U);
-    }
 
     spin_unlock(&Syscall_state.fd_lock);
     return (uint64_t) fd;
