@@ -20,6 +20,7 @@ int sys_sched_info_get(syscall_sched_info_t* out_info);
 int sys_ahci_irq_info_get(syscall_ahci_irq_info_t* out_info);
 int sys_rcu_sync(void);
 int sys_rcu_info_get(syscall_rcu_info_t* out_info);
+int sys_proc_info_get(syscall_proc_info_t* out_entries, uint32_t max_entries, uint32_t* out_total);
 int sys_console_write(const void* buf, size_t len);
 __attribute__((__noreturn__)) void sys_exit(int status);
 int sys_fork(void);

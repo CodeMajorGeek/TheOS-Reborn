@@ -38,6 +38,7 @@
 #define SYS_THREAD_SELF       31
 #define SYS_THREAD_SET_FSBASE 32
 #define SYS_THREAD_GET_FSBASE 33
+#define SYS_PROC_INFO_GET     34
 
 #define SYS_PROT_READ    (1ULL << 0)
 #define SYS_PROT_WRITE   (1ULL << 1)
@@ -75,6 +76,12 @@
 #define SYS_DT_UNKNOWN      0U
 #define SYS_DT_DIR          4U
 #define SYS_DT_REG          8U
+
+#define SYS_PROC_FLAG_THREAD               (1U << 0)
+#define SYS_PROC_FLAG_EXITING              (1U << 1)
+#define SYS_PROC_FLAG_TERMINATED_BY_SIGNAL (1U << 2)
+#define SYS_PROC_CPU_NONE                  0xFFFFFFFFU
+#define SYS_PROC_MAX_ENTRIES               32U
 
 #ifndef __ASSEMBLER__
 typedef struct syscall_cpu_info
@@ -117,6 +124,17 @@ typedef struct syscall_dirent
     uint8_t reserved[3];
     char d_name[SYS_DIRENT_NAME_MAX + 1U];
 } syscall_dirent_t;
+
+typedef struct syscall_proc_info
+{
+    uint32_t pid;
+    uint32_t ppid;
+    uint32_t owner_pid;
+    uint32_t flags;
+    uint32_t current_cpu;
+    uint32_t term_signal;
+    int64_t exit_status;
+} syscall_proc_info_t;
 #endif
 
 #endif

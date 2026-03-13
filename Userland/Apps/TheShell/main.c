@@ -27,6 +27,7 @@ static const char* shell_known_binaries[] =
     "TheShell",
     "TheTest",
     "ThePowerManager",
+    "TheSystemMonitor",
     "TheMicroPython",
     "MicroPython"
 };

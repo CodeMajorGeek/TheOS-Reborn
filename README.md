@@ -106,7 +106,7 @@ Core features currently implemented:
   - thread-safe userland heap (`malloc/calloc/realloc/free`, `posix_memalign`, `aligned_alloc`),
   - TLS-backed `errno` and dynamic TLS module plumbing (`__libc_tls_module_register`, `__tls_get_addr`, unregister),
   - `pthread` layer backed by shared-address-space kernel threads (no `fork/waitpid` emulation),
-  - shell, tests, power manager, and MicroPython app.
+  - shell, tests, power manager, system monitor, and MicroPython app.
 
 ---
 
@@ -254,7 +254,7 @@ flowchart TD
 - Timer-driven userland reschedule hook is present (still experimental/tuning in progress).
 - libc provides a `pthread` layer backed by shared-address-space user threads (kernel thread syscalls + FS-base TLS activation).
 - libc `errno` is TLS-backed, and dynamic TLS modules can be registered/unregistered at runtime.
-- Shell-centric workflow with additional user apps (`TheTest`, `ThePowerManager`, `TheMicroPython`).
+- Shell-centric workflow with additional user apps (`TheTest`, `ThePowerManager`, `TheSystemMonitor`, `TheMicroPython`).
 
 ---
 
@@ -359,6 +359,7 @@ serial_baudrate: 115200
 - `/bin/TheShell`
 - `/bin/TheTest`
 - `/bin/ThePowerManager`
+- `/bin/TheSystemMonitor`
 - `/bin/TheMicroPython`
 
 Runtime resources:
@@ -388,7 +389,7 @@ At boot, root mount does:
 
 ## Syscalls
 
-Current public syscall IDs are `1..33` (`Includes/UAPI/Syscall.h`).
+Current public syscall IDs are `1..34` (`Includes/UAPI/Syscall.h`).
 
 - `1` `SYS_SLEEP_MS`
 - `2` `SYS_TICK_GET`
@@ -423,6 +424,7 @@ Current public syscall IDs are `1..33` (`Includes/UAPI/Syscall.h`).
 - `31` `SYS_THREAD_SELF`
 - `32` `SYS_THREAD_SET_FSBASE`
 - `33` `SYS_THREAD_GET_FSBASE`
+- `34` `SYS_PROC_INFO_GET`
 
 ---
 

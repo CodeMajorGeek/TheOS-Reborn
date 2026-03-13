@@ -2450,6 +2450,76 @@ uint64_t Syscall_interrupt_handler(uint64_t syscall_num, syscall_frame_t* frame,
             return Syscall_copy_to_user((void*) frame->rdi, &info, sizeof(info)) ? 0 : (uint64_t) -1;
         }
 
+        case SYS_PROC_INFO_GET:
+        {
+            if (!Syscall_state.proc_lock_ready)
+                return (uint64_t) -1;
+
+            syscall_proc_info_t snapshot[SYSCALL_MAX_PROCS];
+            uint32_t running_cpu[SYSCALL_MAX_PROCS];
+            for (uint32_t i = 0; i < SYSCALL_MAX_PROCS; i++)
+            {
+                memset(&snapshot[i], 0, sizeof(snapshot[i]));
+                running_cpu[i] = SYS_PROC_CPU_NONE;
+            }
+
+            uint32_t snapshot_count = 0;
+
+            uint64_t lock_flags = spin_lock_irqsave(&Syscall_state.proc_lock);
+            for (uint32_t cpu = 0; cpu < 256; cpu++)
+            {
+                uint32_t slot = Syscall_state.cpu_current_proc[cpu];
+                if (slot >= SYSCALL_MAX_PROCS)
+                    continue;
+                if (!Syscall_state.procs[slot].used)
+                    continue;
+                running_cpu[slot] = cpu;
+            }
+
+            for (uint32_t i = 0; i < SYSCALL_MAX_PROCS; i++)
+            {
+                const syscall_process_t* proc = &Syscall_state.procs[i];
+                if (!proc->used)
+                    continue;
+                if (snapshot_count >= SYSCALL_MAX_PROCS)
+                    break;
+
+                syscall_proc_info_t* out = &snapshot[snapshot_count++];
+                out->pid = proc->pid;
+                out->ppid = proc->ppid;
+                out->owner_pid = proc->owner_pid;
+                out->flags = 0;
+                if (proc->is_thread)
+                    out->flags |= SYS_PROC_FLAG_THREAD;
+                if (proc->exiting)
+                    out->flags |= SYS_PROC_FLAG_EXITING;
+                if (proc->terminated_by_signal)
+                    out->flags |= SYS_PROC_FLAG_TERMINATED_BY_SIGNAL;
+                out->current_cpu = running_cpu[i];
+                out->term_signal = proc->terminated_by_signal ? (uint32_t) proc->term_signal : 0U;
+                out->exit_status = proc->exit_status;
+            }
+            spin_unlock_irqrestore(&Syscall_state.proc_lock, lock_flags);
+
+            uint32_t max_entries = (uint32_t) frame->rsi;
+            uint32_t copy_count = snapshot_count;
+            if (copy_count > max_entries)
+                copy_count = max_entries;
+
+            syscall_proc_info_t* user_entries = (syscall_proc_info_t*) frame->rdi;
+            if (copy_count > 0U &&
+                !Syscall_copy_to_user(user_entries, snapshot, (size_t) copy_count * sizeof(snapshot[0])))
+            {
+                return (uint64_t) -1;
+            }
+
+            uint32_t* user_total = (uint32_t*) frame->rdx;
+            if (user_total && !Syscall_copy_to_user(user_total, &snapshot_count, sizeof(snapshot_count)))
+                return (uint64_t) -1;
+
+            return (uint64_t) copy_count;
+        }
+
         case SYS_CONSOLE_WRITE:
         {
             const char* user_buf = (const char*) frame->rdi;
