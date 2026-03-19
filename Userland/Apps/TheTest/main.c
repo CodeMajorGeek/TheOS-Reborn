@@ -10,9 +10,11 @@
 #include <stdint.h>
 #include <stdio.h>
 #include <sys/mman.h>
+#include <sys/ioctl.h>
 #include <syscall.h>
 #include <sys/wait.h>
 #include <unistd.h>
+#include <drm/drm_mode.h>
 
 #define SYS_UNDEFINED_TEST 9999L
 #define KERNEL_TEST_ADDR   0xFFFFFFFF80100000ULL
@@ -39,6 +41,7 @@
 // pthread API is expected to be true shared-address-space threading.
 #define TEST_PTHREAD_SHIM
 #define TEST_TLS_DYNAMIC
+#define TEST_DRM_KMS
 // #define TEST_READ_KERNEL
 // #define TEST_WRITE_KERNEL
 
@@ -1057,6 +1060,156 @@ static void thetest_tls_dynamic_probe(void)
                created);
 }
 
+static void thetest_drm_kms_probe(void)
+{
+    int card_fd = open(DRM_NODE_PATH, O_RDWR);
+    if (card_fd < 0)
+    {
+        printf("[TheTest] DRM open failed path=%s errno=%d\n", DRM_NODE_PATH, errno);
+        return;
+    }
+
+    drm_mode_get_resources_t resources;
+    memset(&resources, 0, sizeof(resources));
+    uint32_t connector_id = 0;
+    uint32_t crtc_id = 0;
+    uint32_t plane_id = 0;
+    resources.count_connectors = 1;
+    resources.count_crtcs = 1;
+    resources.count_planes = 1;
+    resources.connector_id_ptr = (uint64_t) (uintptr_t) &connector_id;
+    resources.crtc_id_ptr = (uint64_t) (uintptr_t) &crtc_id;
+    resources.plane_id_ptr = (uint64_t) (uintptr_t) &plane_id;
+    if (ioctl(card_fd, DRM_IOCTL_MODE_GET_RESOURCES, &resources) < 0)
+    {
+        printf("[TheTest] DRM get resources failed errno=%d\n", errno);
+        (void) close(card_fd);
+        return;
+    }
+
+    drm_mode_modeinfo_t mode;
+    memset(&mode, 0, sizeof(mode));
+    drm_mode_get_connector_t connector;
+    memset(&connector, 0, sizeof(connector));
+    connector.connector_id = connector_id;
+    connector.count_modes = 1;
+    connector.modes_ptr = (uint64_t) (uintptr_t) &mode;
+    if (ioctl(card_fd, DRM_IOCTL_MODE_GET_CONNECTOR, &connector) < 0)
+    {
+        printf("[TheTest] DRM get connector failed errno=%d\n", errno);
+        (void) close(card_fd);
+        return;
+    }
+
+    if (mode.hdisplay == 0 || mode.vdisplay == 0)
+    {
+        mode.hdisplay = (uint16_t) resources.max_width;
+        mode.vdisplay = (uint16_t) resources.max_height;
+        mode.vrefresh = 60U;
+    }
+
+    drm_mode_create_dumb_t dumb;
+    memset(&dumb, 0, sizeof(dumb));
+    dumb.width = mode.hdisplay;
+    dumb.height = mode.vdisplay;
+    dumb.bpp = 32U;
+    if (ioctl(card_fd, DRM_IOCTL_MODE_CREATE_DUMB, &dumb) < 0)
+    {
+        printf("[TheTest] DRM create dumb failed errno=%d\n", errno);
+        (void) close(card_fd);
+        return;
+    }
+
+    drm_prime_handle_t prime;
+    memset(&prime, 0, sizeof(prime));
+    prime.handle = dumb.handle;
+    prime.flags = DRM_CLOEXEC | DRM_RDWR;
+    if (ioctl(card_fd, DRM_IOCTL_PRIME_HANDLE_TO_FD, &prime) < 0)
+    {
+        printf("[TheTest] DRM handle->fd failed errno=%d\n", errno);
+        drm_mode_destroy_dumb_t destroy_dumb = { .handle = dumb.handle };
+        (void) ioctl(card_fd, DRM_IOCTL_MODE_DESTROY_DUMB, &destroy_dumb);
+        (void) close(card_fd);
+        return;
+    }
+
+    void* map = mmap(NULL, (size_t) dumb.size, PROT_READ | PROT_WRITE, MAP_SHARED, prime.fd, 0);
+    if (map == MAP_FAILED)
+    {
+        printf("[TheTest] DRM mmap failed errno=%d size=%llu\n",
+               errno,
+               (unsigned long long) dumb.size);
+        (void) close(prime.fd);
+        drm_mode_destroy_dumb_t destroy_dumb = { .handle = dumb.handle };
+        (void) ioctl(card_fd, DRM_IOCTL_MODE_DESTROY_DUMB, &destroy_dumb);
+        (void) close(card_fd);
+        return;
+    }
+
+    uint8_t* bytes = (uint8_t*) map;
+    for (uint32_t y = 0; y < dumb.height; y++)
+    {
+        for (uint32_t x = 0; x < dumb.width; x++)
+        {
+            uint8_t r = (uint8_t) ((x * 255U) / (dumb.width ? dumb.width : 1U));
+            uint8_t g = (uint8_t) ((y * 255U) / (dumb.height ? dumb.height : 1U));
+            uint8_t b = (uint8_t) (((x ^ y) * 255U) / ((dumb.width | dumb.height) ? (dumb.width | dumb.height) : 1U));
+            size_t off = (size_t) y * dumb.pitch + ((size_t) x * 4U);
+            bytes[off + 0U] = b;
+            bytes[off + 1U] = g;
+            bytes[off + 2U] = r;
+            bytes[off + 3U] = 0x00U;
+        }
+    }
+
+    drm_mode_create_blob_t blob;
+    memset(&blob, 0, sizeof(blob));
+    blob.data = (uint64_t) (uintptr_t) &mode;
+    blob.length = sizeof(mode);
+    if (ioctl(card_fd, DRM_IOCTL_MODE_CREATE_BLOB, &blob) < 0)
+    {
+        printf("[TheTest] DRM create mode blob failed errno=%d\n", errno);
+        (void) munmap(map, (size_t) dumb.size);
+        (void) close(prime.fd);
+        drm_mode_destroy_dumb_t destroy_dumb = { .handle = dumb.handle };
+        (void) ioctl(card_fd, DRM_IOCTL_MODE_DESTROY_DUMB, &destroy_dumb);
+        (void) close(card_fd);
+        return;
+    }
+
+    drm_mode_atomic_req_t atomic;
+    memset(&atomic, 0, sizeof(atomic));
+    atomic.flags = 0;
+    atomic.connector_id = connector_id;
+    atomic.crtc_id = crtc_id;
+    atomic.plane_id = plane_id;
+    atomic.fb_handle = dumb.handle;
+    atomic.mode_blob_id = blob.blob_id;
+    atomic.active = 1U;
+    atomic.src_x = 0U;
+    atomic.src_y = 0U;
+    atomic.src_w = (uint32_t) mode.hdisplay << 16;
+    atomic.src_h = (uint32_t) mode.vdisplay << 16;
+    atomic.crtc_x = 0;
+    atomic.crtc_y = 0;
+    atomic.crtc_w = mode.hdisplay;
+    atomic.crtc_h = mode.vdisplay;
+    if (ioctl(card_fd, DRM_IOCTL_MODE_ATOMIC, &atomic) < 0)
+        printf("[TheTest] DRM atomic commit failed errno=%d\n", errno);
+    else
+        printf("[TheTest] DRM/KMS atomic commit: OK (%ux%u)\n",
+               (unsigned int) mode.hdisplay,
+               (unsigned int) mode.vdisplay);
+
+    drm_mode_destroy_blob_t destroy_blob = { .blob_id = blob.blob_id };
+    (void) ioctl(card_fd, DRM_IOCTL_MODE_DESTROY_BLOB, &destroy_blob);
+    (void) munmap(map, (size_t) dumb.size);
+    (void) close(prime.fd);
+    drm_mode_destroy_dumb_t destroy_dumb = { .handle = dumb.handle };
+    (void) ioctl(card_fd, DRM_IOCTL_MODE_DESTROY_DUMB, &destroy_dumb);
+    (void) close(card_fd);
+}
+
 int main(int argc, char** argv, char** envp)
 {
     (void) argc;
@@ -1125,6 +1278,10 @@ int main(int argc, char** argv, char** envp)
 
 #ifdef TEST_TLS_DYNAMIC
     thetest_tls_dynamic_probe();
+#endif
+
+#ifdef TEST_DRM_KMS
+    thetest_drm_kms_probe();
 #endif
 
     volatile uint64_t* kernel_ptr = (volatile uint64_t*) (uintptr_t) KERNEL_TEST_ADDR;

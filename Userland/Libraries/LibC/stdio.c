@@ -1055,8 +1055,15 @@ int __printf(char* buff, size_t buff_len, const char* __restrict format, va_list
             char digits[32];
             lltoa(magnitude, digits, sizeof(digits), DECIMAL);
             size_t len = strlen(digits);
+            if (precision == 0 && magnitude == 0ULL)
+                len = 0U;
+            size_t digits_zero_pad = 0U;
+            if (precision > 0 && (size_t) precision > len)
+                digits_zero_pad = (size_t) precision - len;
+            if (precision >= 0)
+                zero_pad = false;
             size_t prefix = negative ? 1U : 0U;
-            size_t total = prefix + len;
+            size_t total = prefix + digits_zero_pad + len;
             size_t pad = (width > total) ? (width - total) : 0U;
 
             if (!zero_pad && printf_append_repeat(buff, write_limit, &written, ' ', pad) == EOF)
@@ -1068,7 +1075,10 @@ int __printf(char* buff, size_t buff_len, const char* __restrict format, va_list
             if (zero_pad && printf_append_repeat(buff, write_limit, &written, '0', pad) == EOF)
                 return EOF;
 
-            if (printf_append_string(buff, write_limit, &written, digits, len, false) == EOF)
+            if (printf_append_repeat(buff, write_limit, &written, '0', digits_zero_pad) == EOF)
+                return EOF;
+
+            if (len > 0U && printf_append_string(buff, write_limit, &written, digits, len, false) == EOF)
                 return EOF;
         }
         else if (spec == 'u')
@@ -1083,12 +1093,21 @@ int __printf(char* buff, size_t buff_len, const char* __restrict format, va_list
             char digits[32];
             lltoa(value, digits, sizeof(digits), DECIMAL);
             size_t len = strlen(digits);
-            size_t pad = (width > len) ? (width - len) : 0U;
+            if (precision == 0 && value == 0ULL)
+                len = 0U;
+            size_t digits_zero_pad = 0U;
+            if (precision > 0 && (size_t) precision > len)
+                digits_zero_pad = (size_t) precision - len;
+            if (precision >= 0)
+                zero_pad = false;
+            size_t total = digits_zero_pad + len;
+            size_t pad = (width > total) ? (width - total) : 0U;
 
-            char pad_char = zero_pad ? '0' : ' ';
-            if (printf_append_repeat(buff, write_limit, &written, pad_char, pad) == EOF)
+            if (printf_append_repeat(buff, write_limit, &written, zero_pad ? '0' : ' ', pad) == EOF)
                 return EOF;
-            if (printf_append_string(buff, write_limit, &written, digits, len, false) == EOF)
+            if (printf_append_repeat(buff, write_limit, &written, '0', digits_zero_pad) == EOF)
+                return EOF;
+            if (len > 0U && printf_append_string(buff, write_limit, &written, digits, len, false) == EOF)
                 return EOF;
         }
         else if (spec == 'x' || spec == 'X')
@@ -1104,12 +1123,21 @@ int __printf(char* buff, size_t buff_len, const char* __restrict format, va_list
             char digits[32];
             lltoa(value, digits, sizeof(digits), HEXADECIMAL);
             size_t len = strlen(digits);
-            size_t pad = (width > len) ? (width - len) : 0U;
+            if (precision == 0 && value == 0ULL)
+                len = 0U;
+            size_t digits_zero_pad = 0U;
+            if (precision > 0 && (size_t) precision > len)
+                digits_zero_pad = (size_t) precision - len;
+            if (precision >= 0)
+                zero_pad = false;
+            size_t total = digits_zero_pad + len;
+            size_t pad = (width > total) ? (width - total) : 0U;
 
-            char pad_char = zero_pad ? '0' : ' ';
-            if (printf_append_repeat(buff, write_limit, &written, pad_char, pad) == EOF)
+            if (printf_append_repeat(buff, write_limit, &written, zero_pad ? '0' : ' ', pad) == EOF)
                 return EOF;
-            if (printf_append_string(buff, write_limit, &written, digits, len, uppercase) == EOF)
+            if (printf_append_repeat(buff, write_limit, &written, '0', digits_zero_pad) == EOF)
+                return EOF;
+            if (len > 0U && printf_append_string(buff, write_limit, &written, digits, len, uppercase) == EOF)
                 return EOF;
         }
         else if (spec == 'p' || spec == 'P')

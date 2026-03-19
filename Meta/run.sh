@@ -14,6 +14,9 @@
 [ -z "$THEOS_QEMU_SERIAL" ] && THEOS_QEMU_SERIAL=0
 [ -z "$THEOS_QEMU_GDB_STUB" ] && THEOS_QEMU_GDB_STUB=0
 [ -z "$THEOS_QEMU_TELNET_MONITOR" ] && THEOS_QEMU_TELNET_MONITOR=0
+[ -z "$THEOS_QEMU_AUDIO" ] && THEOS_QEMU_AUDIO=1
+[ -z "$THEOS_QEMU_AUDIO_BACKEND" ] && THEOS_QEMU_AUDIO_BACKEND="pa"
+[ -z "$THEOS_QEMU_AUDIO_WAV_PATH" ] && THEOS_QEMU_AUDIO_WAV_PATH="theos-audio.wav"
 
 if [ ! -f "$THEOS_ISO_NAME" ]; then
 	echo "[run] missing '$THEOS_ISO_NAME' (build it first with: ninja -C Build iso)" >&2
@@ -81,6 +84,8 @@ echo "[run] kvm: $THEOS_QEMU_KVM"
 echo "[run] serial console: $THEOS_QEMU_SERIAL"
 echo "[run] gdb stub: $THEOS_QEMU_GDB_STUB"
 echo "[run] telnet monitor: $THEOS_QEMU_TELNET_MONITOR"
+echo "[run] audio hda: $THEOS_QEMU_AUDIO"
+echo "[run] audio backend: $THEOS_QEMU_AUDIO_BACKEND"
 
 KVM_ARGS=()
 if [ "$THEOS_QEMU_KVM" = "1" ]; then
@@ -106,6 +111,29 @@ if [ "$THEOS_QEMU_GDB_STUB" = "1" ]; then
 	GDB_ARGS=(-s)
 fi
 
+AUDIO_ARGS=()
+if [ "$THEOS_QEMU_AUDIO" = "1" ]; then
+	AUDIODEV_ARG=""
+	case "$THEOS_QEMU_AUDIO_BACKEND" in
+		none|alsa|dbus|jack|oss|pa|pipewire|sdl|spice)
+			AUDIODEV_ARG="$THEOS_QEMU_AUDIO_BACKEND,id=theos_audio0"
+			;;
+		wav|WAV)
+			AUDIODEV_ARG="wav,id=theos_audio0,path=$THEOS_QEMU_AUDIO_WAV_PATH"
+			;;
+		*)
+			echo "[run] invalid THEOS_QEMU_AUDIO_BACKEND='$THEOS_QEMU_AUDIO_BACKEND' (expected: none|alsa|dbus|jack|oss|pa|pipewire|sdl|spice|wav)" >&2
+			exit 1
+			;;
+	esac
+
+	AUDIO_ARGS=(
+		-audiodev "$AUDIODEV_ARG"
+		-device "ich9-intel-hda,id=hda"
+		-device "hda-output,audiodev=theos_audio0"
+	)
+fi
+
 qemu-system-x86_64 \
 	-m $THEOS_RAM_SIZE \
 	-cpu $THEOS_QEMU_CPU \
@@ -115,6 +143,7 @@ qemu-system-x86_64 \
 	"${MONITOR_ARGS[@]}" \
 	"${GDB_ARGS[@]}" \
 	"${GPU_ARGS[@]}" \
+	"${AUDIO_ARGS[@]}" \
 	"${NUMA_ARGS[@]}" \
 	"${KVM_ARGS[@]}" \
 	"${BOOT_MEDIA_ARGS[@]}"

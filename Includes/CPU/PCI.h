@@ -10,7 +10,10 @@
 #define PCI_CONF_DATA_IO_PORT   0xCFC
 
 #define PCI_DEV_CLASS_STORAGE   0x01
+#define PCI_DEV_CLASS_MULTIMEDIA 0x04
 #define PCI_DEV_CLASS_BRIDGE    0x06
+#define PCI_DEV_SUBCLASS_HDA    0x03
+#define PCI_DEV_PROGIF_HDA      0x00
 
 #define PCI_VENDOR_REG          0x00
 #define PCI_DEVICE_REG          0x02

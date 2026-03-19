@@ -1,5 +1,6 @@
 #include <errno.h>
 #include <fcntl.h>
+#include <libc_fd.h>
 #include <limits.h>
 #include <sched.h>
 #include <signal.h>
@@ -127,7 +128,7 @@ static int unistd_brk_ensure_initialized(void)
     return 0;
 }
 
-static int unistd_fd_alloc_slot(int kernel_fd)
+int libc_fd_adopt_kernel(int kernel_fd)
 {
     int fd = -1;
 
@@ -147,7 +148,7 @@ static int unistd_fd_alloc_slot(int kernel_fd)
     return fd;
 }
 
-static int unistd_fd_get_kernel(int fd)
+int libc_fd_get_kernel(int fd)
 {
     int kernel_fd = -1;
 
@@ -296,7 +297,7 @@ ssize_t read(int fd, void* buf, size_t count)
         return -1;
     }
 
-    int kernel_fd = unistd_fd_get_kernel(fd);
+    int kernel_fd = libc_fd_get_kernel(fd);
     if (kernel_fd < 0)
     {
         errno = EBADF;
@@ -337,7 +338,7 @@ ssize_t write(int fd, const void* buf, size_t count)
         return -1;
     }
 
-    int kernel_fd = unistd_fd_get_kernel(fd);
+    int kernel_fd = libc_fd_get_kernel(fd);
     if (kernel_fd < 0)
     {
         errno = EBADF;
@@ -407,7 +408,7 @@ int open(const char* path, int flags, ...)
         return -1;
     }
 
-    int fd = unistd_fd_alloc_slot(kernel_fd);
+    int fd = libc_fd_adopt_kernel(kernel_fd);
     if (fd < 0)
     {
         (void) sys_close(kernel_fd);
@@ -448,7 +449,7 @@ off_t lseek(int fd, off_t offset, int whence)
         return (off_t) -1;
     }
 
-    int kernel_fd = unistd_fd_get_kernel(fd);
+    int kernel_fd = libc_fd_get_kernel(fd);
     if (kernel_fd < 0)
     {
         errno = EBADF;
@@ -835,7 +836,7 @@ int fstat(int fd, struct stat* out_stat)
         return 0;
     }
 
-    int kernel_fd = unistd_fd_get_kernel(fd);
+    int kernel_fd = libc_fd_get_kernel(fd);
     if (kernel_fd < 0)
     {
         errno = EBADF;
@@ -912,19 +913,19 @@ void* mmap(void* addr, size_t len, int prot, int flags, int fd, off_t offset)
         errno = EINVAL;
         return MAP_FAILED;
     }
-    if ((flags & MAP_ANONYMOUS) == 0)
-    {
-        errno = ENOTSUP;
-        return MAP_FAILED;
-    }
-
-    if (fd != -1 || offset != 0)
-    {
-        errno = ENOTSUP;
-        return MAP_FAILED;
-    }
+    bool is_anonymous = (flags & MAP_ANONYMOUS) != 0;
 
     if (addr && (((uintptr_t) addr & (LIBC_BRK_PAGE_SIZE - 1U)) != 0U))
+    {
+        errno = EINVAL;
+        return MAP_FAILED;
+    }
+    if (offset < 0)
+    {
+        errno = EINVAL;
+        return MAP_FAILED;
+    }
+    if (((uint64_t) offset & (LIBC_BRK_PAGE_SIZE - 1U)) != 0U)
     {
         errno = EINVAL;
         return MAP_FAILED;
@@ -944,10 +945,40 @@ void* mmap(void* addr, size_t len, int prot, int flags, int fd, off_t offset)
     if ((prot & PROT_EXEC) != 0)
         sys_prot |= SYS_PROT_EXEC;
 
-    void* rc = sys_map(addr, len, sys_prot);
+    int kernel_fd = -1;
+    if (is_anonymous)
+    {
+        if (fd != -1 || offset != 0)
+        {
+            errno = EINVAL;
+            return MAP_FAILED;
+        }
+    }
+    else
+    {
+        if (fd < 0)
+        {
+            errno = EBADF;
+            return MAP_FAILED;
+        }
+
+        kernel_fd = libc_fd_get_kernel(fd);
+        if (kernel_fd < 0)
+        {
+            errno = EBADF;
+            return MAP_FAILED;
+        }
+    }
+
+    void* rc = sys_map_ex(addr,
+                          len,
+                          sys_prot,
+                          (uint64_t) flags,
+                          kernel_fd,
+                          (uint64_t) offset);
     if (!rc)
     {
-        errno = ENOMEM;
+        errno = is_anonymous ? ENOMEM : EINVAL;
         return MAP_FAILED;
     }
 

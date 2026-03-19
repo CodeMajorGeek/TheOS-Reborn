@@ -13,6 +13,7 @@ file(GLOB EMBEDDEDDOOM_SOURCES CONFIGURE_DEPENDS
 
 list(REMOVE_ITEM EMBEDDEDDOOM_SOURCES
     ${EMBEDDEDDOOM_SRC_DIR}/i_video.c
+    ${EMBEDDEDDOOM_SRC_DIR}/i_video_console.c
     ${EMBEDDEDDOOM_SRC_DIR}/XDriver.c
     ${EMBEDDEDDOOM_SRC_DIR}/DrawFunctions.c
     ${EMBEDDEDDOOM_SRC_DIR}/os_generic.c
@@ -20,6 +21,7 @@ list(REMOVE_ITEM EMBEDDEDDOOM_SOURCES
 
 list(APPEND EMBEDDEDDOOM_SOURCES
     ${EMBEDDEDDOOM_CRT0}
+    ${CMAKE_CURRENT_SOURCE_DIR}/i_video_theos.c
     ${EMBEDDEDDOOM_SRC_DIR}/support/rawwad.c
 )
 
@@ -37,6 +39,7 @@ target_compile_definitions(embeddedDOOM
     PRIVATE
         NORMALUNIX
         LINUX
+        THEOS_RUNTIME
         MAXPLAYERS=1
         RANGECHECK
         DISABLE_NETWORK

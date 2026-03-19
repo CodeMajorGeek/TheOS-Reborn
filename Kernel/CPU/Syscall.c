@@ -8,6 +8,8 @@
 #include <CPU/SMP.h>
 #include <Device/HPET.h>
 #include <Device/Keyboard.h>
+#include <Device/DRM.h>
+#include <Device/HDA.h>
 #include <Debug/KDebug.h>
 #include <Debug/Spinlock.h>
 #include <FileSystem/ext4.h>
@@ -593,6 +595,23 @@ static bool Syscall_normalize_write_path(const char* path, char* out_path, size_
     return true;
 }
 
+static bool Syscall_is_drm_card_path(const char* path)
+{
+    if (!path)
+        return false;
+
+    return strcmp(path, DRM_NODE_PATH) == 0;
+}
+
+static bool Syscall_is_audio_dsp_path(const char* path)
+{
+    if (!path)
+        return false;
+
+    return strcmp(path, HDA_DSP_NODE_PATH) == 0 ||
+           strcmp(path, HDA_AUDIO_NODE_PATH) == 0;
+}
+
 static int32_t Syscall_fd_alloc_locked(void)
 {
     for (uint32_t i = 0; i < SYSCALL_MAX_OPEN_FILES; i++)
@@ -626,7 +645,7 @@ static bool Syscall_fd_path_conflicts_locked(const char* path, bool want_exclusi
 
 static uint64_t Syscall_handle_open(uint32_t cpu_index, const syscall_frame_t* frame)
 {
-    if (!frame || !Syscall_state.fd_lock_ready || !Syscall_state.fs_lock_ready)
+    if (!frame || !Syscall_state.fd_lock_ready)
         return (uint64_t) -1;
 
     uint32_t owner_pid = Syscall_proc_current_pid(cpu_index, frame);
@@ -653,6 +672,72 @@ static uint64_t Syscall_handle_open(uint32_t cpu_index, const syscall_frame_t* f
     if ((want_create || want_trunc) && !can_write)
         return (uint64_t) -1;
 
+    if (Syscall_is_audio_dsp_path(path))
+    {
+        if (want_create || want_trunc || want_exclusive)
+            return (uint64_t) -1;
+        if (!can_write)
+            return (uint64_t) -1;
+        if (!HDA_is_available())
+            return (uint64_t) -1;
+        if (!HDA_dsp_open(owner_pid))
+            return (uint64_t) -1;
+
+        spin_lock(&Syscall_state.fd_lock);
+        int32_t fd = Syscall_fd_alloc_locked();
+        if (fd < 0)
+        {
+            spin_unlock(&Syscall_state.fd_lock);
+            HDA_dsp_close(owner_pid);
+            return (uint64_t) -1;
+        }
+
+        syscall_file_desc_t* entry = &Syscall_state.fds[(uint32_t) fd];
+        memset(entry, 0, sizeof(*entry));
+        entry->used = true;
+        entry->type = SYSCALL_FD_TYPE_AUDIO_DSP;
+        entry->owner_pid = owner_pid;
+        entry->can_read = false;
+        entry->can_write = true;
+        memcpy(entry->path, HDA_DSP_NODE_PATH, sizeof(HDA_DSP_NODE_PATH));
+        spin_unlock(&Syscall_state.fd_lock);
+        return (uint64_t) fd;
+    }
+
+    if (Syscall_is_drm_card_path(path))
+    {
+        if (want_create || want_trunc || want_exclusive)
+            return (uint64_t) -1;
+
+        uint32_t drm_file_id = 0;
+        if (!DRM_open_file(owner_pid, &drm_file_id))
+            return (uint64_t) -1;
+
+        spin_lock(&Syscall_state.fd_lock);
+        int32_t fd = Syscall_fd_alloc_locked();
+        if (fd < 0)
+        {
+            spin_unlock(&Syscall_state.fd_lock);
+            DRM_close_file(drm_file_id);
+            return (uint64_t) -1;
+        }
+
+        syscall_file_desc_t* entry = &Syscall_state.fds[(uint32_t) fd];
+        memset(entry, 0, sizeof(*entry));
+        entry->used = true;
+        entry->type = SYSCALL_FD_TYPE_DRM_CARD;
+        entry->owner_pid = owner_pid;
+        entry->drm_file_id = drm_file_id;
+        entry->can_read = true;
+        entry->can_write = true;
+        memcpy(entry->path, DRM_NODE_PATH, sizeof(DRM_NODE_PATH));
+        spin_unlock(&Syscall_state.fd_lock);
+        return (uint64_t) fd;
+    }
+
+    if (!Syscall_state.fs_lock_ready)
+        return (uint64_t) -1;
+
     char lock_path[SYSCALL_USER_CSTR_MAX] = { 0 };
     bool lock_path_is_normalized = Syscall_normalize_write_path(path, lock_path, sizeof(lock_path));
     if (can_write || want_exclusive)
@@ -667,10 +752,6 @@ static uint64_t Syscall_handle_open(uint32_t cpu_index, const syscall_frame_t* f
             return (uint64_t) -1;
         memcpy(lock_path, path, raw_len + 1U);
     }
-
-    char write_path[SYSCALL_USER_CSTR_MAX] = { 0 };
-    if (can_write)
-        memcpy(write_path, lock_path, sizeof(write_path));
 
     int32_t fd = -1;
     spin_lock(&Syscall_state.fd_lock);
@@ -690,6 +771,7 @@ static uint64_t Syscall_handle_open(uint32_t cpu_index, const syscall_frame_t* f
     syscall_file_desc_t* entry = &Syscall_state.fds[(uint32_t) fd];
     memset(entry, 0, sizeof(*entry));
     entry->used = true;
+    entry->type = SYSCALL_FD_TYPE_REGULAR;
     entry->owner_pid = owner_pid;
     entry->exclusive = want_exclusive;
     entry->io_busy = true;
@@ -772,7 +854,7 @@ open_fail_slot:
 
 static uint64_t Syscall_handle_close(uint32_t cpu_index, const syscall_frame_t* frame)
 {
-    if (!frame || !Syscall_state.fd_lock_ready || !Syscall_state.fs_lock_ready)
+    if (!frame || !Syscall_state.fd_lock_ready)
         return (uint64_t) -1;
 
     int64_t fd = (int64_t) frame->rdi;
@@ -780,21 +862,53 @@ static uint64_t Syscall_handle_close(uint32_t cpu_index, const syscall_frame_t* 
     if (fd < 0 || (uint64_t) fd >= SYSCALL_MAX_OPEN_FILES || owner_pid == 0)
         return (uint64_t) -1;
 
-    bool flush_needed = false;
-    bool flush_ok = true;
-    char flush_path[SYSCALL_USER_CSTR_MAX];
-    size_t flush_size = 0;
-    const uint8_t* flush_data = NULL;
-
     spin_lock(&Syscall_state.fd_lock);
     syscall_file_desc_t* entry = &Syscall_state.fds[(uint32_t) fd];
-    if (!entry->used || entry->owner_pid != owner_pid || entry->io_busy)
+    if (!entry->used || entry->owner_pid != owner_pid || entry->io_busy ||
+        entry->type != SYSCALL_FD_TYPE_REGULAR)
     {
         spin_unlock(&Syscall_state.fd_lock);
         return (uint64_t) -1;
     }
 
-    flush_needed = entry->can_write && entry->dirty;
+    uint32_t entry_type = entry->type;
+    if (entry_type == SYSCALL_FD_TYPE_DRM_CARD)
+    {
+        uint32_t drm_file_id = entry->drm_file_id;
+        memset(entry, 0, sizeof(*entry));
+        spin_unlock(&Syscall_state.fd_lock);
+        DRM_close_file(drm_file_id);
+        return 0;
+    }
+
+    if (entry_type == SYSCALL_FD_TYPE_DMABUF)
+    {
+        uint32_t dmabuf_id = entry->drm_dmabuf_id;
+        memset(entry, 0, sizeof(*entry));
+        spin_unlock(&Syscall_state.fd_lock);
+        DRM_dmabuf_unref_fd(dmabuf_id);
+        return 0;
+    }
+
+    if (entry_type == SYSCALL_FD_TYPE_AUDIO_DSP)
+    {
+        memset(entry, 0, sizeof(*entry));
+        spin_unlock(&Syscall_state.fd_lock);
+        HDA_dsp_close(owner_pid);
+        return 0;
+    }
+
+    if (entry_type != SYSCALL_FD_TYPE_REGULAR)
+    {
+        spin_unlock(&Syscall_state.fd_lock);
+        return (uint64_t) -1;
+    }
+
+    bool flush_needed = entry->can_write && entry->dirty;
+    bool flush_ok = true;
+    char flush_path[SYSCALL_USER_CSTR_MAX];
+    size_t flush_size = 0;
+    const uint8_t* flush_data = NULL;
     if (flush_needed)
     {
         memcpy(flush_path, entry->path, sizeof(flush_path));
@@ -811,6 +925,16 @@ static uint64_t Syscall_handle_close(uint32_t cpu_index, const syscall_frame_t* 
         return 0;
     }
     spin_unlock(&Syscall_state.fd_lock);
+
+    if (!Syscall_state.fs_lock_ready)
+    {
+        spin_lock(&Syscall_state.fd_lock);
+        entry = &Syscall_state.fds[(uint32_t) fd];
+        if (entry->used && entry->owner_pid == owner_pid && entry->type == SYSCALL_FD_TYPE_REGULAR)
+            entry->io_busy = false;
+        spin_unlock(&Syscall_state.fd_lock);
+        return (uint64_t) -1;
+    }
 
     spin_lock(&Syscall_state.fs_lock);
     ext4_fs_t* fs = ext4_get_active();
@@ -858,7 +982,9 @@ static uint64_t Syscall_handle_read(uint32_t cpu_index, const syscall_frame_t* f
 
     spin_lock(&Syscall_state.fd_lock);
     syscall_file_desc_t* entry = &Syscall_state.fds[(uint32_t) fd];
-    if (!entry->used || entry->owner_pid != owner_pid || !entry->can_read || entry->io_busy)
+    if (!entry->used || entry->owner_pid != owner_pid ||
+        entry->type != SYSCALL_FD_TYPE_REGULAR ||
+        !entry->can_read || entry->io_busy)
     {
         spin_unlock(&Syscall_state.fd_lock);
         return (uint64_t) -1;
@@ -902,6 +1028,57 @@ static uint64_t Syscall_handle_write(uint32_t cpu_index, const syscall_frame_t* 
     spin_lock(&Syscall_state.fd_lock);
     syscall_file_desc_t* entry = &Syscall_state.fds[(uint32_t) fd];
     if (!entry->used || entry->owner_pid != owner_pid || !entry->can_write || entry->io_busy)
+    {
+        spin_unlock(&Syscall_state.fd_lock);
+        return (uint64_t) -1;
+    }
+
+    uint32_t entry_type = entry->type;
+    if (entry_type == SYSCALL_FD_TYPE_AUDIO_DSP)
+    {
+        entry->io_busy = true;
+        spin_unlock(&Syscall_state.fd_lock);
+
+        size_t copied_total = 0;
+        uint8_t chunk_buf[1024];
+        while (copied_total < len)
+        {
+            size_t chunk = len - copied_total;
+            if (chunk > sizeof(chunk_buf))
+                chunk = sizeof(chunk_buf);
+
+            if (!Syscall_copy_from_user(chunk_buf, (const uint8_t*) user_buf + copied_total, chunk))
+            {
+                spin_lock(&Syscall_state.fd_lock);
+                entry = &Syscall_state.fds[(uint32_t) fd];
+                if (entry->used && entry->owner_pid == owner_pid && entry->type == SYSCALL_FD_TYPE_AUDIO_DSP)
+                    entry->io_busy = false;
+                spin_unlock(&Syscall_state.fd_lock);
+                return (copied_total > 0) ? (uint64_t) copied_total : (uint64_t) -1;
+            }
+
+            size_t pushed = HDA_dsp_write(chunk_buf, chunk);
+            copied_total += pushed;
+            if (pushed < chunk)
+            {
+                spin_lock(&Syscall_state.fd_lock);
+                entry = &Syscall_state.fds[(uint32_t) fd];
+                if (entry->used && entry->owner_pid == owner_pid && entry->type == SYSCALL_FD_TYPE_AUDIO_DSP)
+                    entry->io_busy = false;
+                spin_unlock(&Syscall_state.fd_lock);
+                return (copied_total > 0) ? (uint64_t) copied_total : (uint64_t) -1;
+            }
+        }
+
+        spin_lock(&Syscall_state.fd_lock);
+        entry = &Syscall_state.fds[(uint32_t) fd];
+        if (entry->used && entry->owner_pid == owner_pid && entry->type == SYSCALL_FD_TYPE_AUDIO_DSP)
+            entry->io_busy = false;
+        spin_unlock(&Syscall_state.fd_lock);
+        return (uint64_t) copied_total;
+    }
+
+    if (entry_type != SYSCALL_FD_TYPE_REGULAR)
     {
         spin_unlock(&Syscall_state.fd_lock);
         return (uint64_t) -1;
@@ -1011,6 +1188,342 @@ static uint64_t Syscall_handle_lseek(uint32_t cpu_index, const syscall_frame_t* 
     entry->offset = new_pos;
     spin_unlock(&Syscall_state.fd_lock);
     return (uint64_t) new_pos;
+}
+
+static uint64_t Syscall_handle_audio_ioctl(unsigned long request, void* user_arg)
+{
+    switch (request)
+    {
+        case SNDCTL_DSP_RESET:
+        case SNDCTL_DSP_SYNC:
+            return HDA_dsp_ioctl(request, NULL) ? 0 : (uint64_t) -1;
+
+        case SNDCTL_DSP_SPEED:
+        case SNDCTL_DSP_STEREO:
+        case SNDCTL_DSP_SETFMT:
+        case SNDCTL_DSP_SETFRAGMENT:
+        case SNDCTL_DSP_GETFMTS:
+        {
+            if (!user_arg)
+                return (uint64_t) -1;
+
+            int32_t value = 0;
+            if (!Syscall_copy_from_user(&value, user_arg, sizeof(value)))
+                return (uint64_t) -1;
+            if (!HDA_dsp_ioctl(request, &value))
+                return (uint64_t) -1;
+            if (!Syscall_copy_to_user(user_arg, &value, sizeof(value)))
+                return (uint64_t) -1;
+            return 0;
+        }
+
+        default:
+            return (uint64_t) -1;
+    }
+}
+
+static uint64_t Syscall_handle_ioctl(uint32_t cpu_index, const syscall_frame_t* frame)
+{
+    if (!frame || !Syscall_state.fd_lock_ready)
+        return (uint64_t) -1;
+
+    int64_t fd = (int64_t) frame->rdi;
+    unsigned long request = (unsigned long) ((uint32_t) frame->rsi);
+    void* user_arg = (void*) frame->rdx;
+    uint32_t owner_pid = Syscall_proc_current_pid(cpu_index, frame);
+    if (fd < 0 || (uint64_t) fd >= SYSCALL_MAX_OPEN_FILES || owner_pid == 0)
+        return (uint64_t) -1;
+
+    uint32_t fd_type = SYSCALL_FD_TYPE_NONE;
+    uint32_t drm_file_id = 0;
+    spin_lock(&Syscall_state.fd_lock);
+    syscall_file_desc_t* entry = &Syscall_state.fds[(uint32_t) fd];
+    if (!entry->used || entry->owner_pid != owner_pid || entry->io_busy)
+    {
+        spin_unlock(&Syscall_state.fd_lock);
+        return (uint64_t) -1;
+    }
+
+    fd_type = entry->type;
+    drm_file_id = entry->drm_file_id;
+    spin_unlock(&Syscall_state.fd_lock);
+
+    if (fd_type == SYSCALL_FD_TYPE_AUDIO_DSP)
+        return Syscall_handle_audio_ioctl(request, user_arg);
+
+    if (fd_type != SYSCALL_FD_TYPE_DRM_CARD || drm_file_id == 0)
+        return (uint64_t) -1;
+
+    switch (request)
+    {
+        case DRM_IOCTL_MODE_GET_RESOURCES:
+        {
+            if (!user_arg)
+                return (uint64_t) -1;
+
+            drm_mode_get_resources_t io;
+            if (!Syscall_copy_from_user(&io, user_arg, sizeof(io)))
+                return (uint64_t) -1;
+            if (!DRM_get_resources(drm_file_id, &io))
+                return (uint64_t) -1;
+
+            if (io.crtc_id_ptr != 0)
+            {
+                uint32_t crtc_id = DRM_CRTC_ID;
+                if (!Syscall_copy_to_user((void*) (uintptr_t) io.crtc_id_ptr, &crtc_id, sizeof(crtc_id)))
+                    return (uint64_t) -1;
+            }
+            if (io.connector_id_ptr != 0)
+            {
+                uint32_t connector_id = DRM_CONNECTOR_ID;
+                if (!Syscall_copy_to_user((void*) (uintptr_t) io.connector_id_ptr, &connector_id, sizeof(connector_id)))
+                    return (uint64_t) -1;
+            }
+            if (io.plane_id_ptr != 0)
+            {
+                uint32_t plane_id = DRM_PLANE_ID;
+                if (!Syscall_copy_to_user((void*) (uintptr_t) io.plane_id_ptr, &plane_id, sizeof(plane_id)))
+                    return (uint64_t) -1;
+            }
+
+            return Syscall_copy_to_user(user_arg, &io, sizeof(io)) ? 0 : (uint64_t) -1;
+        }
+
+        case DRM_IOCTL_MODE_GET_CONNECTOR:
+        {
+            if (!user_arg)
+                return (uint64_t) -1;
+
+            drm_mode_get_connector_t io;
+            if (!Syscall_copy_from_user(&io, user_arg, sizeof(io)))
+                return (uint64_t) -1;
+
+            uint32_t modes_capacity = io.count_modes;
+            drm_mode_modeinfo_t mode;
+            uint32_t modes_written = 0;
+            if (!DRM_get_connector(drm_file_id,
+                                   &io,
+                                   (modes_capacity > 0) ? &mode : NULL,
+                                   (modes_capacity > 0) ? 1U : 0U,
+                                   &modes_written))
+            {
+                return (uint64_t) -1;
+            }
+
+            if (io.modes_ptr != 0 && modes_capacity > 0 && modes_written > 0)
+            {
+                if (!Syscall_copy_to_user((void*) (uintptr_t) io.modes_ptr, &mode, sizeof(mode)))
+                    return (uint64_t) -1;
+            }
+
+            return Syscall_copy_to_user(user_arg, &io, sizeof(io)) ? 0 : (uint64_t) -1;
+        }
+
+        case DRM_IOCTL_MODE_GET_CRTC:
+        {
+            if (!user_arg)
+                return (uint64_t) -1;
+
+            drm_mode_get_crtc_t io;
+            if (!Syscall_copy_from_user(&io, user_arg, sizeof(io)))
+                return (uint64_t) -1;
+            if (!DRM_get_crtc(drm_file_id, &io))
+                return (uint64_t) -1;
+            return Syscall_copy_to_user(user_arg, &io, sizeof(io)) ? 0 : (uint64_t) -1;
+        }
+
+        case DRM_IOCTL_MODE_GET_PLANE:
+        {
+            if (!user_arg)
+                return (uint64_t) -1;
+
+            drm_mode_get_plane_t io;
+            if (!Syscall_copy_from_user(&io, user_arg, sizeof(io)))
+                return (uint64_t) -1;
+
+            uint32_t formats_capacity = io.count_format_types;
+            uint32_t format = DRM_FORMAT_XRGB8888;
+            uint32_t formats_written = 0;
+            if (!DRM_get_plane(drm_file_id,
+                               &io,
+                               (formats_capacity > 0) ? &format : NULL,
+                               (formats_capacity > 0) ? 1U : 0U,
+                               &formats_written))
+            {
+                return (uint64_t) -1;
+            }
+
+            if (io.format_type_ptr != 0 && formats_capacity > 0 && formats_written > 0)
+            {
+                if (!Syscall_copy_to_user((void*) (uintptr_t) io.format_type_ptr, &format, sizeof(format)))
+                    return (uint64_t) -1;
+            }
+
+            return Syscall_copy_to_user(user_arg, &io, sizeof(io)) ? 0 : (uint64_t) -1;
+        }
+
+        case DRM_IOCTL_MODE_CREATE_DUMB:
+        {
+            if (!user_arg)
+                return (uint64_t) -1;
+
+            drm_mode_create_dumb_t io;
+            if (!Syscall_copy_from_user(&io, user_arg, sizeof(io)))
+                return (uint64_t) -1;
+            if (!DRM_create_dumb(drm_file_id, &io))
+                return (uint64_t) -1;
+            return Syscall_copy_to_user(user_arg, &io, sizeof(io)) ? 0 : (uint64_t) -1;
+        }
+
+        case DRM_IOCTL_MODE_DESTROY_DUMB:
+        {
+            if (!user_arg)
+                return (uint64_t) -1;
+
+            drm_mode_destroy_dumb_t io;
+            if (!Syscall_copy_from_user(&io, user_arg, sizeof(io)))
+                return (uint64_t) -1;
+            return DRM_destroy_dumb(drm_file_id, io.handle) ? 0 : (uint64_t) -1;
+        }
+
+        case DRM_IOCTL_MODE_CREATE_BLOB:
+        {
+            if (!user_arg)
+                return (uint64_t) -1;
+
+            drm_mode_create_blob_t io;
+            if (!Syscall_copy_from_user(&io, user_arg, sizeof(io)))
+                return (uint64_t) -1;
+            if (io.length != sizeof(drm_mode_modeinfo_t) || io.data == 0)
+                return (uint64_t) -1;
+
+            drm_mode_modeinfo_t mode;
+            if (!Syscall_copy_from_user(&mode, (const void*) (uintptr_t) io.data, sizeof(mode)))
+                return (uint64_t) -1;
+
+            uint32_t blob_id = 0;
+            if (!DRM_create_mode_blob(drm_file_id, &mode, sizeof(mode), &blob_id))
+                return (uint64_t) -1;
+
+            io.blob_id = blob_id;
+            return Syscall_copy_to_user(user_arg, &io, sizeof(io)) ? 0 : (uint64_t) -1;
+        }
+
+        case DRM_IOCTL_MODE_DESTROY_BLOB:
+        {
+            if (!user_arg)
+                return (uint64_t) -1;
+
+            drm_mode_destroy_blob_t io;
+            if (!Syscall_copy_from_user(&io, user_arg, sizeof(io)))
+                return (uint64_t) -1;
+            return DRM_destroy_mode_blob(drm_file_id, io.blob_id) ? 0 : (uint64_t) -1;
+        }
+
+        case DRM_IOCTL_PRIME_HANDLE_TO_FD:
+        {
+            if (!user_arg)
+                return (uint64_t) -1;
+
+            drm_prime_handle_t io;
+            if (!Syscall_copy_from_user(&io, user_arg, sizeof(io)))
+                return (uint64_t) -1;
+
+            uint32_t dmabuf_id = 0;
+            if (!DRM_prime_handle_to_dmabuf(drm_file_id, io.handle, &dmabuf_id))
+                return (uint64_t) -1;
+            if (!DRM_dmabuf_ref_fd(dmabuf_id))
+                return (uint64_t) -1;
+
+            int32_t dma_fd = -1;
+            spin_lock(&Syscall_state.fd_lock);
+            dma_fd = Syscall_fd_alloc_locked();
+            if (dma_fd >= 0)
+            {
+                syscall_file_desc_t* dma_entry = &Syscall_state.fds[(uint32_t) dma_fd];
+                memset(dma_entry, 0, sizeof(*dma_entry));
+                dma_entry->used = true;
+                dma_entry->type = SYSCALL_FD_TYPE_DMABUF;
+                dma_entry->owner_pid = owner_pid;
+                dma_entry->drm_dmabuf_id = dmabuf_id;
+                dma_entry->can_read = true;
+                dma_entry->can_write = true;
+            }
+            spin_unlock(&Syscall_state.fd_lock);
+
+            if (dma_fd < 0)
+            {
+                DRM_dmabuf_unref_fd(dmabuf_id);
+                return (uint64_t) -1;
+            }
+
+            io.fd = dma_fd;
+            if (!Syscall_copy_to_user(user_arg, &io, sizeof(io)))
+            {
+                spin_lock(&Syscall_state.fd_lock);
+                syscall_file_desc_t* dma_entry = &Syscall_state.fds[(uint32_t) dma_fd];
+                if (dma_entry->used && dma_entry->owner_pid == owner_pid &&
+                    dma_entry->type == SYSCALL_FD_TYPE_DMABUF &&
+                    dma_entry->drm_dmabuf_id == dmabuf_id)
+                {
+                    memset(dma_entry, 0, sizeof(*dma_entry));
+                }
+                spin_unlock(&Syscall_state.fd_lock);
+                DRM_dmabuf_unref_fd(dmabuf_id);
+                return (uint64_t) -1;
+            }
+            return 0;
+        }
+
+        case DRM_IOCTL_PRIME_FD_TO_HANDLE:
+        {
+            if (!user_arg)
+                return (uint64_t) -1;
+
+            drm_prime_handle_t io;
+            if (!Syscall_copy_from_user(&io, user_arg, sizeof(io)))
+                return (uint64_t) -1;
+
+            int32_t dma_fd = io.fd;
+            if (dma_fd < 0 || (uint64_t) dma_fd >= SYSCALL_MAX_OPEN_FILES)
+                return (uint64_t) -1;
+
+            uint32_t dmabuf_id = 0;
+            spin_lock(&Syscall_state.fd_lock);
+            syscall_file_desc_t* dma_entry = &Syscall_state.fds[(uint32_t) dma_fd];
+            if (dma_entry->used && dma_entry->owner_pid == owner_pid &&
+                dma_entry->type == SYSCALL_FD_TYPE_DMABUF)
+            {
+                dmabuf_id = dma_entry->drm_dmabuf_id;
+            }
+            spin_unlock(&Syscall_state.fd_lock);
+
+            if (dmabuf_id == 0)
+                return (uint64_t) -1;
+
+            uint32_t handle = 0;
+            if (!DRM_prime_dmabuf_to_handle(drm_file_id, dmabuf_id, &handle))
+                return (uint64_t) -1;
+
+            io.handle = handle;
+            return Syscall_copy_to_user(user_arg, &io, sizeof(io)) ? 0 : (uint64_t) -1;
+        }
+
+        case DRM_IOCTL_MODE_ATOMIC:
+        {
+            if (!user_arg)
+                return (uint64_t) -1;
+
+            drm_mode_atomic_req_t io;
+            if (!Syscall_copy_from_user(&io, user_arg, sizeof(io)))
+                return (uint64_t) -1;
+
+            return DRM_atomic_commit(drm_file_id, &io) ? 0 : (uint64_t) -1;
+        }
+
+        default:
+            return (uint64_t) -1;
+    }
 }
 
 static inline uintptr_t Syscall_read_cr3_phys(void)
@@ -1211,6 +1724,12 @@ static void Syscall_free_user_pt(uintptr_t pt_phys)
         if (page_phys == 0)
             continue;
 
+        if ((entry & SYSCALL_PTE_DMABUF) != 0)
+        {
+            (void) DRM_dmabuf_unref_map_pages_by_phys(page_phys, 1U);
+            continue;
+        }
+
         if ((entry & SYSCALL_PTE_COW) != 0)
         {
             bool ref_zero = false;
@@ -1309,6 +1828,18 @@ static bool Syscall_clone_user_pt(uintptr_t src_pt_phys, uintptr_t* out_dst_pt_p
         uintptr_t src_page_phys = src_entry & FRAME;
         if (src_page_phys == 0)
         {
+            dst_pt->entries[i] = src_entry;
+            continue;
+        }
+
+        if ((src_entry & SYSCALL_PTE_DMABUF) != 0)
+        {
+            if (!DRM_dmabuf_ref_map_pages_by_phys(src_page_phys, 1U))
+            {
+                Syscall_free_user_pt(dst_pt_phys);
+                return false;
+            }
+
             dst_pt->entries[i] = src_entry;
             continue;
         }
@@ -1719,11 +2250,48 @@ static void Syscall_fd_cleanup_owner(uint32_t owner_pid)
         size_t flush_size = 0;
         const uint8_t* flush_data = NULL;
         char flush_path[SYSCALL_USER_CSTR_MAX];
+        uint32_t entry_type = SYSCALL_FD_TYPE_NONE;
+        uint32_t drm_file_id = 0;
+        uint32_t dmabuf_id = 0;
 
         spin_lock(&Syscall_state.fd_lock);
         syscall_file_desc_t* entry = &Syscall_state.fds[i];
         if (!entry->used || entry->owner_pid != owner_pid)
         {
+            spin_unlock(&Syscall_state.fd_lock);
+            continue;
+        }
+
+        entry_type = entry->type;
+        if (entry_type == SYSCALL_FD_TYPE_DRM_CARD)
+        {
+            drm_file_id = entry->drm_file_id;
+            memset(entry, 0, sizeof(*entry));
+            spin_unlock(&Syscall_state.fd_lock);
+            DRM_close_file(drm_file_id);
+            continue;
+        }
+
+        if (entry_type == SYSCALL_FD_TYPE_DMABUF)
+        {
+            dmabuf_id = entry->drm_dmabuf_id;
+            memset(entry, 0, sizeof(*entry));
+            spin_unlock(&Syscall_state.fd_lock);
+            DRM_dmabuf_unref_fd(dmabuf_id);
+            continue;
+        }
+
+        if (entry_type == SYSCALL_FD_TYPE_AUDIO_DSP)
+        {
+            memset(entry, 0, sizeof(*entry));
+            spin_unlock(&Syscall_state.fd_lock);
+            HDA_dsp_close(owner_pid);
+            continue;
+        }
+
+        if (entry_type != SYSCALL_FD_TYPE_REGULAR)
+        {
+            memset(entry, 0, sizeof(*entry));
             spin_unlock(&Syscall_state.fd_lock);
             continue;
         }
@@ -2247,6 +2815,7 @@ void Syscall_init(void)
     MSR_set(IA32_FMASK, SYSCALL_FMASK_TF_BIT | SYSCALL_FMASK_DF_BIT);
 
     enable_syscall_ext();
+    DRM_init();
 }
 
 void Syscall_on_timer_tick(uint32_t cpu_index)
@@ -2377,12 +2946,6 @@ uint64_t Syscall_interrupt_handler(uint64_t syscall_num, syscall_frame_t* frame,
     uint64_t count = __atomic_add_fetch(&Syscall_state.count_per_cpu[cpu_index], 1, __ATOMIC_RELAXED);
     if (cpu_local)
         __atomic_store_n(&cpu_local->syscall_count, count, __ATOMIC_RELAXED);
-
-    if ((count % 1024ULL) == 0)
-        kdebug_printf("[SYSCALL] cpu=%u apic=%u count=%llu\n",
-                      cpu_index,
-                      apic_id,
-                      (unsigned long long) count);
 
     switch (syscall_num)
     {
@@ -2828,6 +3391,9 @@ uint64_t Syscall_interrupt_handler(uint64_t syscall_num, syscall_frame_t* frame,
             uintptr_t requested = (uintptr_t) frame->rdi;
             size_t len = (size_t) frame->rsi;
             uint64_t prot = frame->rdx;
+            uint64_t map_flags = frame->r10;
+            int64_t map_fd = (int64_t) frame->r8;
+            uint64_t map_offset = frame->r9;
             const uint64_t prot_mask = SYS_PROT_READ | SYS_PROT_WRITE | SYS_PROT_EXEC;
             if (len == 0 || (prot & SYS_PROT_READ) == 0 || (prot & ~prot_mask) != 0)
                 return (uint64_t) -1;
@@ -2837,6 +3403,35 @@ uint64_t Syscall_interrupt_handler(uint64_t syscall_num, syscall_frame_t* frame,
             size_t page_count = (len + (SYSCALL_PAGE_SIZE - 1U)) / SYSCALL_PAGE_SIZE;
             if (page_count == 0 || page_count > SYSCALL_MAP_MAX_PAGES)
                 return (uint64_t) -1;
+
+            bool legacy_map = (map_flags == 0 && map_fd == 0 && map_offset == 0);
+            if (legacy_map)
+            {
+                map_flags = SYS_MAP_PRIVATE | SYS_MAP_ANONYMOUS;
+                map_fd = -1;
+            }
+
+            const uint64_t supported_map_flags = SYS_MAP_PRIVATE | SYS_MAP_SHARED | SYS_MAP_ANONYMOUS;
+            if ((map_flags & ~supported_map_flags) != 0)
+                return (uint64_t) -1;
+
+            bool is_private = (map_flags & SYS_MAP_PRIVATE) != 0;
+            bool is_shared = (map_flags & SYS_MAP_SHARED) != 0;
+            bool is_anon = (map_flags & SYS_MAP_ANONYMOUS) != 0;
+            if (is_private == is_shared)
+                return (uint64_t) -1;
+            if (is_anon)
+            {
+                if (map_fd != -1 || map_offset != 0)
+                    return (uint64_t) -1;
+            }
+            else
+            {
+                if (!is_shared || map_fd < 0)
+                    return (uint64_t) -1;
+                if ((map_offset & (SYSCALL_PAGE_SIZE - 1U)) != 0)
+                    return (uint64_t) -1;
+            }
 
             if (!Syscall_state.vm_lock_ready)
                 return (uint64_t) -1;
@@ -2865,42 +3460,128 @@ uint64_t Syscall_interrupt_handler(uint64_t syscall_num, syscall_frame_t* frame,
             bool executable = (prot & SYS_PROT_EXEC) != 0;
             if (writable && executable)
                 goto map_out;
-            size_t mapped_pages = 0;
-            for (size_t i = 0; i < page_count; i++)
+            uintptr_t set_bits = 0;
+            uintptr_t clear_bits = 0;
+            if (!writable)
+                clear_bits |= WRITABLE;
+            if (!executable)
+                set_bits |= NO_EXECUTE;
+            else
+                clear_bits |= NO_EXECUTE;
+
+            if (is_anon)
             {
-                uintptr_t virt = base + (i * SYSCALL_PAGE_SIZE);
-                uintptr_t phys = (uintptr_t) PMM_alloc_page();
-                if (phys == 0)
-                    break;
-
-                VMM_map_user_page(virt, phys);
-                mapped_pages++;
-                memset((void*) virt, 0, SYSCALL_PAGE_SIZE);
-
-                uintptr_t set_bits = 0;
-                uintptr_t clear_bits = 0;
-                if (!writable)
-                    clear_bits |= WRITABLE;
-                if (!executable)
-                    set_bits |= NO_EXECUTE;
-                else
-                    clear_bits |= NO_EXECUTE;
-
-                if ((set_bits | clear_bits) != 0 &&
-                    !VMM_update_page_flags(virt, set_bits, clear_bits))
-                    break;
-            }
-
-            if (mapped_pages != page_count)
-            {
-                for (size_t i = 0; i < mapped_pages; i++)
+                size_t mapped_pages = 0;
+                for (size_t i = 0; i < page_count; i++)
                 {
                     uintptr_t virt = base + (i * SYSCALL_PAGE_SIZE);
-                    uintptr_t phys = 0;
-                    if (VMM_unmap_page(virt, &phys) && phys != 0)
-                        PMM_dealloc_page((void*) phys);
+                    uintptr_t phys = (uintptr_t) PMM_alloc_page();
+                    if (phys == 0)
+                        break;
+
+                    VMM_map_user_page(virt, phys);
+                    mapped_pages++;
+                    memset((void*) virt, 0, SYSCALL_PAGE_SIZE);
+
+                    if ((set_bits | clear_bits) != 0 &&
+                        !VMM_update_page_flags(virt, set_bits, clear_bits))
+                        break;
                 }
-                goto map_out;
+
+                if (mapped_pages != page_count)
+                {
+                    for (size_t i = 0; i < mapped_pages; i++)
+                    {
+                        uintptr_t virt = base + (i * SYSCALL_PAGE_SIZE);
+                        uintptr_t phys = 0;
+                        if (VMM_unmap_page(virt, &phys) && phys != 0)
+                            PMM_dealloc_page((void*) phys);
+                    }
+                    goto map_out;
+                }
+            }
+            else
+            {
+                uint32_t owner_pid = Syscall_proc_current_pid(cpu_index, frame);
+                if (owner_pid == 0 || (uint64_t) map_fd >= SYSCALL_MAX_OPEN_FILES)
+                    goto map_out;
+
+                uint32_t dmabuf_id = 0;
+                spin_lock(&Syscall_state.fd_lock);
+                syscall_file_desc_t* map_entry = &Syscall_state.fds[(uint32_t) map_fd];
+                if (map_entry->used &&
+                    map_entry->owner_pid == owner_pid &&
+                    map_entry->type == SYSCALL_FD_TYPE_DMABUF)
+                {
+                    dmabuf_id = map_entry->drm_dmabuf_id;
+                }
+                spin_unlock(&Syscall_state.fd_lock);
+                if (dmabuf_id == 0)
+                    goto map_out;
+
+                uint64_t dmabuf_size = 0;
+                uint32_t dmabuf_pages = 0;
+                if (!DRM_dmabuf_get_layout(dmabuf_id, &dmabuf_size, &dmabuf_pages))
+                    goto map_out;
+                uint64_t request_len = (uint64_t) len;
+                if (request_len > (uint64_t) -1 - map_offset)
+                    goto map_out;
+                uint64_t request_end = map_offset + request_len;
+                if (request_end > dmabuf_size)
+                    goto map_out;
+
+                if ((uint64_t) map_size > (uint64_t) -1 - map_offset)
+                    goto map_out;
+                uint64_t map_end = map_offset + (uint64_t) map_size;
+                uint64_t dmabuf_mappable_end = (uint64_t) dmabuf_pages * (uint64_t) SYSCALL_PAGE_SIZE;
+                if (map_end > dmabuf_mappable_end)
+                    goto map_out;
+
+                size_t mapped_pages = 0;
+                uint32_t start_page = (uint32_t) (map_offset / SYSCALL_PAGE_SIZE);
+                for (size_t i = 0; i < page_count; i++)
+                {
+                    uint32_t page_index = start_page + (uint32_t) i;
+                    if (page_index >= dmabuf_pages)
+                        break;
+
+                    uintptr_t phys = 0;
+                    if (!DRM_dmabuf_get_page_phys(dmabuf_id, page_index, &phys) || phys == 0)
+                        break;
+
+                    uintptr_t virt = base + (i * SYSCALL_PAGE_SIZE);
+                    VMM_map_page_flags(virt, phys, USER_MODE);
+                    mapped_pages++;
+
+                    uint64_t* pte = Syscall_get_user_pte_ptr(Syscall_read_cr3_phys(), virt);
+                    if (!pte)
+                        break;
+                    *pte |= SYSCALL_PTE_DMABUF;
+
+                    if ((set_bits | clear_bits) != 0 &&
+                        !VMM_update_page_flags(virt, set_bits, clear_bits))
+                        break;
+                }
+
+                if (mapped_pages != page_count)
+                {
+                    for (size_t i = 0; i < mapped_pages; i++)
+                    {
+                        uintptr_t virt = base + (i * SYSCALL_PAGE_SIZE);
+                        (void) VMM_unmap_page(virt, NULL);
+                    }
+                    goto map_out;
+                }
+
+                if (!DRM_dmabuf_ref_map_pages(dmabuf_id, (uint32_t) page_count))
+                {
+                    for (size_t i = 0; i < mapped_pages; i++)
+                    {
+                        uintptr_t virt = base + (i * SYSCALL_PAGE_SIZE);
+                        (void) VMM_unmap_page(virt, NULL);
+                    }
+                    goto map_out;
+                }
             }
 
             ret = (uint64_t) base;
@@ -2943,14 +3624,21 @@ map_out:
                 uintptr_t virt = base + (i * SYSCALL_PAGE_SIZE);
                 uintptr_t phys = 0;
                 bool was_cow = false;
+                bool was_dmabuf = false;
                 uint64_t* pte = Syscall_get_user_pte_ptr(Syscall_read_cr3_phys(), virt);
                 if (pte && ((*pte & SYSCALL_PTE_COW) != 0))
                     was_cow = true;
+                if (pte && ((*pte & SYSCALL_PTE_DMABUF) != 0))
+                    was_dmabuf = true;
                 if (!VMM_unmap_page(virt, &phys))
                     goto unmap_out;
                 if (phys != 0)
                 {
-                    if (was_cow)
+                    if (was_dmabuf)
+                    {
+                        (void) DRM_dmabuf_unref_map_pages_by_phys(phys, 1U);
+                    }
+                    else if (was_cow)
                     {
                         bool ref_zero = false;
                         if (Syscall_cow_ref_sub(phys, &ref_zero) && ref_zero)
@@ -3047,6 +3735,9 @@ mprotect_out:
 
         case SYS_LSEEK:
             return Syscall_handle_lseek(cpu_index, frame);
+
+        case SYS_IOCTL:
+            return Syscall_handle_ioctl(cpu_index, frame);
 
         case SYS_KBD_GET_SCANCODE:
             return (uint64_t) Keyboard_get_scancode();

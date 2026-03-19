@@ -53,6 +53,8 @@ set(KERNEL_DEVICES_SOURCES
     Device/TTY.c
     Device/TTYVGA.c
     Device/TTYFramebuffer.c
+    Device/DRM.c
+    Device/HDA.c
     Device/PIC.c
     Device/HPET.c
     Device/PIT.c

@@ -209,8 +209,20 @@ void IRQ_handler(interrupt_frame_t *frame)
         uint32_t cpu_id = APIC_is_enabled() ? (uint32_t) APIC_get_current_lapic_id() : 0;
         tick_cpu_slot = cpu_id & 0xFFU;
         uint64_t cpu_ticks = __atomic_add_fetch(&ISR_state.tick_cpu_hits[tick_cpu_slot], 1, __ATOMIC_RELAXED);
-        uint64_t total_ticks = __atomic_add_fetch(&ISR_state.timer_ticks, 1, __ATOMIC_RELAXED);
         tick_source_t source = __atomic_load_n(&ISR_state.tick_source, __ATOMIC_RELAXED);
+        bool contributes_to_wall_clock = true;
+        if (source == TICK_SOURCE_LAPIC_TIMER && APIC_is_enabled())
+        {
+            uint8_t bsp_lapic_id = APIC_get_bsp_lapic_id();
+            if (bsp_lapic_id != 0xFFU)
+                contributes_to_wall_clock = ((uint8_t) cpu_id == bsp_lapic_id);
+        }
+
+        uint64_t total_ticks;
+        if (contributes_to_wall_clock)
+            total_ticks = __atomic_add_fetch(&ISR_state.timer_ticks, 1, __ATOMIC_RELAXED);
+        else
+            total_ticks = __atomic_load_n(&ISR_state.timer_ticks, __ATOMIC_RELAXED);
 
         Syscall_on_timer_tick(tick_cpu_slot);
 

@@ -36,6 +36,7 @@
 #define SYSCALL_ELF_CANONICAL_LOW_MAX  0x0000800000000000ULL
 #define SYSCALL_PTE_PS                 (1ULL << 7)
 #define SYSCALL_PTE_COW                (1ULL << 9)
+#define SYSCALL_PTE_DMABUF             (1ULL << 10)
 #define SYSCALL_ELF_PF_X               (1U << 0)
 #define SYSCALL_ELF_PF_W               (1U << 1)
 #define SYSCALL_PAGE_FAULT_PRESENT     (1ULL << 0)
@@ -43,6 +44,12 @@
 #define SYSCALL_PREEMPT_QUANTUM_TICKS  4U
 #define SYSCALL_COW_MAX_REFS           32768U
 #define SYSCALL_RFLAGS_IF              (1ULL << 9)
+
+#define SYSCALL_FD_TYPE_NONE     0U
+#define SYSCALL_FD_TYPE_REGULAR  1U
+#define SYSCALL_FD_TYPE_DRM_CARD 2U
+#define SYSCALL_FD_TYPE_DMABUF   3U
+#define SYSCALL_FD_TYPE_AUDIO_DSP 4U
 
 extern void enable_syscall_ext(void);
 extern void syscall_handler_stub(void);
@@ -70,7 +77,10 @@ typedef struct syscall_frame
 typedef struct syscall_file_desc
 {
     bool used;
+    uint32_t type;
     uint32_t owner_pid;
+    uint32_t drm_file_id;
+    uint32_t drm_dmabuf_id;
     bool can_read;
     bool can_write;
     bool exclusive;

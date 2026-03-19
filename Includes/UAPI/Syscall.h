@@ -39,6 +39,7 @@
 #define SYS_THREAD_SET_FSBASE 32
 #define SYS_THREAD_GET_FSBASE 33
 #define SYS_PROC_INFO_GET     34
+#define SYS_IOCTL             35
 
 #define SYS_PROT_READ    (1ULL << 0)
 #define SYS_PROT_WRITE   (1ULL << 1)
@@ -49,6 +50,10 @@
 #define SYS_OPEN_CREATE  (1ULL << 2)
 #define SYS_OPEN_TRUNC   (1ULL << 3)
 #define SYS_OPEN_LOCK    (1ULL << 4)
+
+#define SYS_MAP_SHARED    0x01U
+#define SYS_MAP_PRIVATE   0x02U
+#define SYS_MAP_ANONYMOUS 0x20U
 
 #define SYS_SEEK_SET     0
 #define SYS_SEEK_CUR     1

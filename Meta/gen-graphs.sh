@@ -21,10 +21,9 @@ count_lines() {
 kernel_lines=$(count_lines "Kernel")
 userland_all_lines=$(count_lines "Userland")
 micropython_lines=$(count_lines "Userland/Apps/MicroPython")
+embeddeddoom_lines=$(count_lines "Userland/Apps/embeddedDOOM")
 
-# Userland natif = tout Userland moins le port MicroPython (3rd‑party),
-# qui est ignoré dans le graphe.
-userland_native_lines=$((userland_all_lines - micropython_lines))
+userland_native_lines=$((userland_all_lines - micropython_lines - embeddeddoom_lines))
 if [ "${userland_native_lines}" -lt 0 ]; then
   userland_native_lines=0
 fi
