@@ -12,6 +12,7 @@ set -euo pipefail
 [ -z "${THEOS_USERLAND_POWERMANAGER:-}" ] && THEOS_USERLAND_POWERMANAGER="Userland/Apps/ThePowerManager/ThePowerManager"
 [ -z "${THEOS_USERLAND_SYSTEMMONITOR:-}" ] && THEOS_USERLAND_SYSTEMMONITOR="Userland/Apps/TheSystemMonitor/TheSystemMonitor"
 [ -z "${THEOS_USERLAND_MICROPY:-}" ] && THEOS_USERLAND_MICROPY="Userland/Apps/TheMicroPython/TheMicroPython"
+[ -z "${THEOS_USERLAND_EMBEDDEDDOOM:-}" ] && THEOS_USERLAND_EMBEDDEDDOOM="Userland/Apps/embeddedDOOM/embeddedDOOM"
 
 
 if [ ! -f "$THEOS_USERLAND_APP" ] && [ -f "Build/Userland/Apps/TheApp/TheApp" ]; then
@@ -31,6 +32,9 @@ if [ ! -f "$THEOS_USERLAND_SYSTEMMONITOR" ] && [ -f "Build/Userland/Apps/TheSyst
 fi
 if [ ! -f "$THEOS_USERLAND_MICROPY" ] && [ -f "Build/Userland/Apps/TheMicroPython/TheMicroPython" ]; then
 	THEOS_USERLAND_MICROPY="Build/Userland/Apps/TheMicroPython/TheMicroPython"
+fi
+if [ ! -f "$THEOS_USERLAND_EMBEDDEDDOOM" ] && [ -f "Build/Userland/Apps/embeddedDOOM/embeddedDOOM" ]; then
+	THEOS_USERLAND_EMBEDDEDDOOM="Build/Userland/Apps/embeddedDOOM/embeddedDOOM"
 fi
 
 STAGE_DIR="$(mktemp -d)"
@@ -86,6 +90,13 @@ if [ -f "$THEOS_USERLAND_MICROPY" ]; then
 	cp "$THEOS_USERLAND_MICROPY" "$STAGE_DIR/bin/TheMicroPython"
 else
 	echo "[disk] warning: TheMicroPython binary not found at '$THEOS_USERLAND_MICROPY'"
+fi
+
+if [ -f "$THEOS_USERLAND_EMBEDDEDDOOM" ]; then
+	echo "[disk] install embeddedDOOM -> /bin/embeddedDOOM from '$THEOS_USERLAND_EMBEDDEDDOOM'"
+	cp "$THEOS_USERLAND_EMBEDDEDDOOM" "$STAGE_DIR/bin/embeddedDOOM"
+else
+	echo "[disk] warning: embeddedDOOM binary not found at '$THEOS_USERLAND_EMBEDDEDDOOM'"
 fi
 
 echo "[disk] create image '$THEOS_DISK_NAME' size=$THEOS_DISK_SIZE"

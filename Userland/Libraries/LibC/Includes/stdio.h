@@ -25,6 +25,12 @@ extern FILE* stdin;
 extern FILE* stdout;
 extern FILE* stderr;
 
+FILE* fopen(const char* path, const char* mode);
+int fclose(FILE* stream);
+int fflush(FILE* stream);
+int fileno(FILE* stream);
+void setbuf(FILE* stream, char* buf);
+
 int putc(int c);
 int puts(const char* s);
 int getchar(void);

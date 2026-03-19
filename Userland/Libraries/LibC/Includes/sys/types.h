@@ -4,6 +4,7 @@
 typedef unsigned long dev_t;
 typedef unsigned long ino_t;
 typedef unsigned long nlink_t;
+typedef int key_t;
 typedef int pid_t;
 typedef unsigned int mode_t;
 typedef unsigned int uid_t;

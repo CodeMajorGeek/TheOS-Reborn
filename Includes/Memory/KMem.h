@@ -11,7 +11,7 @@
 #define MEM_STATE_AVAILABLE 2
 #define MEM_STATE_AVALIABLE MEM_STATE_AVAILABLE
 
-#define KMEM_HEAP_SIZE      (2 * 1024 * 1024)
+#define KMEM_HEAP_SIZE      (16 * 1024 * 1024)
 
 typedef struct malloc_header
 {

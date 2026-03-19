@@ -43,6 +43,7 @@ if(THEOS_AUTO_PULL_SUBMODULES)
 	if(GIT_FOUND AND EXISTS "${CMAKE_SOURCE_DIR}/.git")
 		set(THEOS_REQUIRED_SUBMODULES
 			Userland/Libraries/EasyArgs
+			Userland/Apps/embeddedDOOM
 		)
 		message(STATUS "Auto-updating submodules: ${THEOS_REQUIRED_SUBMODULES}")
 		execute_process(
@@ -152,9 +153,11 @@ add_dependencies(iso TheTest)
 add_dependencies(iso ThePowerManager)
 add_dependencies(iso TheSystemMonitor)
 add_dependencies(iso TheMicroPythonApp)
+add_dependencies(iso embeddedDOOM)
 add_dependencies(create-disk TheApp)
 add_dependencies(create-disk TheShell)
 add_dependencies(create-disk TheTest)
 add_dependencies(create-disk ThePowerManager)
 add_dependencies(create-disk TheSystemMonitor)
 add_dependencies(create-disk TheMicroPythonApp)
+add_dependencies(create-disk embeddedDOOM)

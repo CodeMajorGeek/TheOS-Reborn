@@ -4,3 +4,6 @@
 [submodule "Userland/Libraries/EasyArgs"]
 	path = Userland/Libraries/EasyArgs
 	url = https://github.com/gouwsxander/easy-args.git
+[submodule "Userland/Apps/embeddedDOOM"]
+	path = Userland/Apps/embeddedDOOM
+	url = https://github.com/cnlohr/embeddedDOOM.git

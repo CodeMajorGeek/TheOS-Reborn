@@ -9,9 +9,12 @@
 #include <syscall.h>
 #endif
 
+#include <errno.h>
+#include <fcntl.h>
 #include <stdbool.h>
 #include <stdint.h>
 #include <limits.h>
+#include <stdlib.h>
 #include <string.h>
 #include <unistd.h>
 
@@ -24,6 +27,143 @@ static FILE stdio_stderr_stream = { .fd = STDERR_FILENO };
 FILE* stdin = &stdio_stdin_stream;
 FILE* stdout = &stdio_stdout_stream;
 FILE* stderr = &stdio_stderr_stream;
+
+#if !defined(__THEOS_KERNEL)
+typedef struct stdio_open_mode
+{
+    int flags;
+    bool seek_end;
+} stdio_open_mode_t;
+
+static bool stdio_parse_open_mode(const char* mode, stdio_open_mode_t* out_mode)
+{
+    if (!mode || !out_mode || mode[0] == '\0')
+    {
+        errno = EINVAL;
+        return false;
+    }
+
+    char access = mode[0];
+    bool plus = false;
+    for (size_t i = 1; mode[i] != '\0'; i++)
+    {
+        if (mode[i] == '+')
+        {
+            plus = true;
+            continue;
+        }
+        if (mode[i] == 'b' || mode[i] == 't')
+            continue;
+
+        errno = EINVAL;
+        return false;
+    }
+
+    out_mode->seek_end = false;
+    switch (access)
+    {
+        case 'r':
+            out_mode->flags = plus ? O_RDWR : O_RDONLY;
+            return true;
+        case 'w':
+            out_mode->flags = (plus ? O_RDWR : O_WRONLY) | O_CREAT | O_TRUNC;
+            return true;
+        case 'a':
+            out_mode->flags = (plus ? O_RDWR : O_WRONLY) | O_CREAT;
+            out_mode->seek_end = true;
+            return true;
+        default:
+            errno = EINVAL;
+            return false;
+    }
+}
+
+FILE* fopen(const char* path, const char* mode)
+{
+    stdio_open_mode_t open_mode;
+    if (!path || !stdio_parse_open_mode(mode, &open_mode))
+        return NULL;
+
+    int fd = open(path, open_mode.flags, 0);
+    if (fd < 0)
+        return NULL;
+
+    if (open_mode.seek_end && lseek(fd, 0, SEEK_END) < 0)
+    {
+        (void) close(fd);
+        return NULL;
+    }
+
+    FILE* stream = (FILE*) malloc(sizeof(FILE));
+    if (!stream)
+    {
+        (void) close(fd);
+        errno = ENOMEM;
+        return NULL;
+    }
+
+    stream->fd = fd;
+    return stream;
+}
+
+int fclose(FILE* stream)
+{
+    if (!stream)
+    {
+        errno = EINVAL;
+        return EOF;
+    }
+
+    int fd = stream->fd;
+    if (fd < 0)
+    {
+        errno = EBADF;
+        return EOF;
+    }
+
+    int rc = close(fd);
+    stream->fd = -1;
+
+    if (stream != stdin && stream != stdout && stream != stderr)
+        free(stream);
+
+    if (rc < 0)
+        return EOF;
+
+    return 0;
+}
+
+int fflush(FILE* stream)
+{
+    if (!stream)
+        return 0;
+
+    if (stream->fd < 0)
+    {
+        errno = EBADF;
+        return EOF;
+    }
+
+    return 0;
+}
+
+int fileno(FILE* stream)
+{
+    if (!stream)
+    {
+        errno = EINVAL;
+        return -1;
+    }
+
+    return stream->fd;
+}
+
+void setbuf(FILE* stream, char* buf)
+{
+    (void) stream;
+    (void) buf;
+}
+#endif
 
 int putc(int c)
 {

@@ -3,6 +3,11 @@ set(LIBC_SOURCES
     errno.c
     malloc.c
     pthread.c
+    signal.c
+    sys/ipc.c
+    sys/ioctl.c
+    sys/termios.c
+    sys/time.c
     string.c
     stdlib.c
     stdlib_parse.c
@@ -19,6 +24,11 @@ add_library(UserLibC STATIC
     errno.c
     malloc.c
     pthread.c
+    signal.c
+    sys/ipc.c
+    sys/ioctl.c
+    sys/termios.c
+    sys/time.c
     string.c
     stdlib_parse.c
     stdio.c

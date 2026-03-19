@@ -807,6 +807,71 @@ int stat(const char* path, struct stat* out_stat)
     return 0;
 }
 
+int fstat(int fd, struct stat* out_stat)
+{
+    if (!out_stat)
+    {
+        errno = EINVAL;
+        return -1;
+    }
+
+    memset(out_stat, 0, sizeof(*out_stat));
+    out_stat->st_dev = (dev_t) 1;
+    out_stat->st_uid = (uid_t) 0;
+    out_stat->st_gid = (gid_t) 0;
+    out_stat->st_rdev = (dev_t) 0;
+    out_stat->st_blksize = LIBC_STAT_BLKSIZE;
+    out_stat->st_atime = (time_t) 0;
+    out_stat->st_mtime = (time_t) 0;
+    out_stat->st_ctime = (time_t) 0;
+
+    if (fd == STDIN_FILENO || fd == STDOUT_FILENO || fd == STDERR_FILENO)
+    {
+        out_stat->st_ino = (ino_t) (fd + 1);
+        out_stat->st_mode = S_IFCHR | S_IRUSR | S_IWUSR | S_IRGRP | S_IWGRP | S_IROTH | S_IWOTH;
+        out_stat->st_nlink = 1;
+        out_stat->st_size = 0;
+        out_stat->st_blocks = 0;
+        return 0;
+    }
+
+    int kernel_fd = unistd_fd_get_kernel(fd);
+    if (kernel_fd < 0)
+    {
+        errno = EBADF;
+        return -1;
+    }
+
+    int64_t current = sys_lseek(kernel_fd, 0, SEEK_CUR);
+    if (current < 0)
+    {
+        errno = EINVAL;
+        return -1;
+    }
+
+    int64_t end = sys_lseek(kernel_fd, 0, SEEK_END);
+    if (end < 0)
+    {
+        errno = EINVAL;
+        return -1;
+    }
+
+    if (sys_lseek(kernel_fd, current, SEEK_SET) < 0)
+    {
+        errno = EINVAL;
+        return -1;
+    }
+
+    out_stat->st_ino = (ino_t) (kernel_fd + 1);
+    out_stat->st_mode = S_IFREG | S_IRUSR | S_IWUSR | S_IRGRP | S_IROTH;
+    out_stat->st_nlink = 1;
+    out_stat->st_size = (off_t) ((end > 0) ? end : 0);
+    out_stat->st_blocks = (blkcnt_t) ((out_stat->st_size > 0)
+                                          ? ((out_stat->st_size + LIBC_STAT_BLKSIZE - 1) / LIBC_STAT_BLKSIZE)
+                                          : 0);
+    return 0;
+}
+
 int mkdir(const char* path, mode_t mode)
 {
     (void) mode;

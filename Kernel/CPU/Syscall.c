@@ -1574,6 +1574,7 @@ static bool Syscall_load_elf_current(const char* path, uintptr_t* out_entry, uin
     if (!fs)
     {
         spin_unlock(&Syscall_state.fs_lock);
+        kdebug_printf("[USER] exec reject '%s': no active ext4 filesystem\n", path);
         return false;
     }
 
@@ -1582,9 +1583,16 @@ static bool Syscall_load_elf_current(const char* path, uintptr_t* out_entry, uin
     bool read_ok = ext4_read_file(fs, path, &elf_image, &elf_size);
     spin_unlock(&Syscall_state.fs_lock);
     if (!read_ok)
+    {
+        kdebug_printf("[USER] exec reject '%s': read failed\n", path);
         return false;
+    }
     if (!elf_image || elf_size < sizeof(syscall_elf64_ehdr_t) || elf_size > SYSCALL_ELF_MAX_SIZE)
     {
+        kdebug_printf("[USER] exec reject '%s': ELF size=%llu (max=%llu)\n",
+                      path,
+                      (unsigned long long) elf_size,
+                      (unsigned long long) SYSCALL_ELF_MAX_SIZE);
         if (elf_image)
             kfree(elf_image);
         return false;
@@ -1600,12 +1608,16 @@ static bool Syscall_load_elf_current(const char* path, uintptr_t* out_entry, uin
         ehdr->e_type != 2U ||
         ehdr->e_machine != 0x3EU)
     {
+        kdebug_printf("[USER] exec reject '%s': invalid ELF header\n", path);
         kfree(elf_image);
         return false;
     }
 
     if (!Syscall_is_canonical_low(ehdr->e_entry) || ehdr->e_entry < SYSCALL_USER_VADDR_MIN)
     {
+        kdebug_printf("[USER] exec reject '%s': entry out of user range (0x%llX)\n",
+                      path,
+                      (unsigned long long) ehdr->e_entry);
         kfree(elf_image);
         return false;
     }
@@ -1614,6 +1626,7 @@ static bool Syscall_load_elf_current(const char* path, uintptr_t* out_entry, uin
         ehdr->e_phentsize < sizeof(syscall_elf64_phdr_t) ||
         ehdr->e_phoff > elf_size)
     {
+        kdebug_printf("[USER] exec reject '%s': invalid program header table\n", path);
         kfree(elf_image);
         return false;
     }
@@ -1621,6 +1634,7 @@ static bool Syscall_load_elf_current(const char* path, uintptr_t* out_entry, uin
     uint64_t ph_table_size = (uint64_t) ehdr->e_phnum * (uint64_t) ehdr->e_phentsize;
     if (ph_table_size > (uint64_t) elf_size - ehdr->e_phoff)
     {
+        kdebug_printf("[USER] exec reject '%s': program headers out of bounds\n", path);
         kfree(elf_image);
         return false;
     }
@@ -1636,6 +1650,9 @@ static bool Syscall_load_elf_current(const char* path, uintptr_t* out_entry, uin
         has_load = true;
         if (!Syscall_load_elf_segment_current(elf_image, elf_size, phdr))
         {
+            kdebug_printf("[USER] exec reject '%s': failed to load PT_LOAD segment #%u\n",
+                          path,
+                          (unsigned int) i);
             kfree(elf_image);
             return false;
         }
@@ -1643,6 +1660,7 @@ static bool Syscall_load_elf_current(const char* path, uintptr_t* out_entry, uin
 
     if (!has_load)
     {
+        kdebug_printf("[USER] exec reject '%s': no PT_LOAD segments\n", path);
         kfree(elf_image);
         return false;
     }
@@ -1650,6 +1668,9 @@ static bool Syscall_load_elf_current(const char* path, uintptr_t* out_entry, uin
     uintptr_t stack_bottom = SYSCALL_ELF_STACK_TOP - SYSCALL_ELF_STACK_SIZE;
     if (!Syscall_map_user_range_current(stack_bottom, SYSCALL_ELF_STACK_SIZE))
     {
+        kdebug_printf("[USER] exec reject '%s': failed to map user stack (%llu bytes)\n",
+                      path,
+                      (unsigned long long) SYSCALL_ELF_STACK_SIZE);
         kfree(elf_image);
         return false;
     }

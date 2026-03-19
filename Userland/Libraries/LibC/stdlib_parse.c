@@ -3,6 +3,28 @@
 #include <ctype.h>
 #include <errno.h>
 #include <limits.h>
+#include <stddef.h>
+#include <unistd.h>
+
+#define LIBC_ATEXIT_MAX_HANDLERS 64U
+
+static void (*LibC_atexit_handlers[LIBC_ATEXIT_MAX_HANDLERS])(void);
+static size_t LibC_atexit_count = 0U;
+static volatile unsigned char LibC_atexit_lock = 0U;
+
+static void stdlib_atexit_lock(void)
+{
+    while (__atomic_test_and_set(&LibC_atexit_lock, __ATOMIC_ACQUIRE))
+    {
+        while (__atomic_load_n(&LibC_atexit_lock, __ATOMIC_RELAXED) != 0U)
+            __asm__ __volatile__("pause");
+    }
+}
+
+static void stdlib_atexit_unlock(void)
+{
+    __atomic_clear(&LibC_atexit_lock, __ATOMIC_RELEASE);
+}
 
 static const char* stdlib_skip_space(const char* p)
 {
@@ -302,4 +324,89 @@ float strtof(const char* nptr, char** endptr)
         return -__FLT_MAX__;
     }
     return (float) value;
+}
+
+int atoi(const char* nptr)
+{
+    char* endptr = NULL;
+    long long value = strtoll(nptr, &endptr, 10);
+    if (endptr == nptr)
+        return 0;
+    if (value > (long long) INT_MAX)
+        return INT_MAX;
+    if (value < (long long) INT_MIN)
+        return INT_MIN;
+    return (int) value;
+}
+
+long atol(const char* nptr)
+{
+    char* endptr = NULL;
+    long long value = strtoll(nptr, &endptr, 10);
+    if (endptr == nptr)
+        return 0L;
+    if (value > (long long) LONG_MAX)
+        return LONG_MAX;
+    if (value < (long long) LONG_MIN)
+        return LONG_MIN;
+    return (long) value;
+}
+
+long long atoll(const char* nptr)
+{
+    char* endptr = NULL;
+    long long value = strtoll(nptr, &endptr, 10);
+    if (endptr == nptr)
+        return 0LL;
+    return value;
+}
+
+int abs(int value)
+{
+    return (value < 0) ? -value : value;
+}
+
+int atexit(void (*function)(void))
+{
+    if (!function)
+    {
+        errno = EINVAL;
+        return -1;
+    }
+
+    stdlib_atexit_lock();
+    if (LibC_atexit_count >= LIBC_ATEXIT_MAX_HANDLERS)
+    {
+        stdlib_atexit_unlock();
+        errno = ENOMEM;
+        return -1;
+    }
+
+    LibC_atexit_handlers[LibC_atexit_count++] = function;
+    stdlib_atexit_unlock();
+    return 0;
+}
+
+__attribute__((__noreturn__)) void exit(int status)
+{
+    for (;;)
+    {
+        void (*handler)(void) = NULL;
+
+        stdlib_atexit_lock();
+        if (LibC_atexit_count > 0U)
+        {
+            LibC_atexit_count--;
+            handler = LibC_atexit_handlers[LibC_atexit_count];
+            LibC_atexit_handlers[LibC_atexit_count] = NULL;
+        }
+        stdlib_atexit_unlock();
+
+        if (!handler)
+            break;
+
+        handler();
+    }
+
+    _exit(status);
 }

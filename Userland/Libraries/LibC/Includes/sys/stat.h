@@ -56,6 +56,7 @@ struct stat
 };
 
 int stat(const char* path, struct stat* out_stat);
+int fstat(int fd, struct stat* out_stat);
 int mkdir(const char* path, mode_t mode);
 
 #endif
