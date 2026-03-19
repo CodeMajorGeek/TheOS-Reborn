@@ -8,7 +8,7 @@
 
 TheOS-Reborn is a freestanding x86_64 operating system project with a Limine boot path, custom PMM/VMM, SMP, ACPI/APIC, AHCI/ext4, ring3 userland, a minimal libc, and a MicroPython port (validated on both QEMU and VirtualBox with AHCI SATA/ATAPI storage).
 
-> This README reflects repository behavior as of **March 12, 2026**.
+> This README reflects repository behavior as of **March 19, 2026**.
 
 ---
 
@@ -97,7 +97,12 @@ Core features currently implemented:
   - early VGA path,
   - PSF2 font loading,
   - deferred framebuffer switch,
-  - optional double buffering.
+  - optional double buffering,
+  - minimal DRM/KMS stack for userland (`/dev/dri/card0`, resources/connectors/CRTC/plane ioctls, dumb buffers, mmap, atomic commit).
+- Audio:
+  - Intel HDA playback path (`/dev/dsp`, `/dev/audio`) with OSS-style ioctls (`RESET/SYNC/SPEED/STEREO/SETFMT/GETFMTS/SETFRAGMENT`),
+  - fragment-aware buffering in kernel HDA path (lower-latency queue depth control),
+  - embeddedDOOM software music backend (MUS event playback + software synth mixed with SFX).
 - Userland/runtime:
   - ring3 ELF launch,
   - process syscalls (`fork/execve/waitpid/kill`) with COW fork handling,
@@ -106,7 +111,7 @@ Core features currently implemented:
   - thread-safe userland heap (`malloc/calloc/realloc/free`, `posix_memalign`, `aligned_alloc`),
   - TLS-backed `errno` and dynamic TLS module plumbing (`__libc_tls_module_register`, `__tls_get_addr`, unregister),
   - `pthread` layer backed by shared-address-space kernel threads (no `fork/waitpid` emulation),
-  - shell, tests, power manager, system monitor, and MicroPython app.
+  - shell, tests, power manager, system monitor, MicroPython, and embeddedDOOM app.
 
 ---
 
@@ -332,7 +337,7 @@ ninja graphs        # regenerate project graphs
 
 Main environment controls:
 
-- `THEOS_RAM_SIZE` (default `128M`)
+- `THEOS_RAM_SIZE` (default `256M`)
 - `THEOS_QEMU_CPU` (default `max`)
 - `THEOS_QEMU_GPU` (`vga` or `virtio`, default `vga`)
 - `THEOS_QEMU_NUMA` (`0`/`1`)
@@ -340,6 +345,9 @@ Main environment controls:
 - `THEOS_QEMU_SERIAL` (`0`/`1`)
 - `THEOS_QEMU_GDB_STUB` (`0`/`1`)
 - `THEOS_QEMU_TELNET_MONITOR` (`0`/`1`)
+- `THEOS_QEMU_AUDIO` (`0`/`1`, default `1`)
+- `THEOS_QEMU_AUDIO_BACKEND` (`none|alsa|dbus|jack|oss|pa|pipewire|sdl|spice|wav`, default `pa`)
+- `THEOS_QEMU_AUDIO_WAV_PATH` (default `theos-audio.wav`, used with backend `wav`)
 - `THEOS_BOOT_FROM_ISO_DISK` (`1` embedded disk in ISO, `0` external disk image)
 
 Limine config (`Kernel/Boot/limine.conf`) currently enables serial output:
@@ -361,6 +369,7 @@ serial_baudrate: 115200
 - `/bin/ThePowerManager`
 - `/bin/TheSystemMonitor`
 - `/bin/TheMicroPython`
+- `/bin/embeddedDOOM`
 
 Runtime resources:
 
@@ -464,6 +473,9 @@ Current public syscall IDs are `1..34` (`Includes/UAPI/Syscall.h`).
 - `pthread` coverage remains partial (focus on create/join/exit/self + basic mutex; no condvars/rwlocks/detach/cancel yet).
 - Dynamic TLS removes monotonic module-ID exhaustion, but runtime still has compile-time ceilings (`LIBC_TLS_MAX_MODULES`, `LIBC_TLS_MAX_THREADS`, `LIBC_PTHREAD_MAX_TRACKED`).
 - Dynamic TLS module unregister eagerly unmaps per-thread module blocks; pointers into an unregistered module become invalid immediately.
+- OSS audio compatibility is intentionally minimal (`/dev/dsp`-style subset only); ALSA/PulseAudio native user APIs are not provided by libc/kernel yet.
+- Current embeddedDOOM music is software-synth based (MUS parser + lightweight oscillator mixer), so timbre is functional but not yet faithful to OPL/General MIDI playback.
+- Audio quality defaults are intentionally conservative for stability/latency tuning (8-bit SFX assets + 11025 Hz mix path inherited from this DOOM port), so output fidelity remains limited.
 - Signal model is still minimal.
 - Legacy IDE/PIIX storage path is not implemented; storage discovery currently targets AHCI-class controllers.
 - Some components (x2APIC SMP mode, parts of scheduler stress paths) are experimental.
