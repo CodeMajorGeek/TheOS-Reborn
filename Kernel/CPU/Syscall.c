@@ -1298,21 +1298,34 @@ static uint64_t Syscall_handle_ioctl(uint32_t cpu_index, const syscall_frame_t* 
             if (!Syscall_copy_from_user(&io, user_arg, sizeof(io)))
                 return (uint64_t) -1;
 
-            uint32_t modes_capacity = io.count_modes;
-            drm_mode_modeinfo_t mode;
+            uint32_t user_modes_capacity = io.count_modes;
+            uint32_t kernel_modes_capacity = user_modes_capacity;
+            if (kernel_modes_capacity > DRM_MAX_CONNECTOR_MODES)
+                kernel_modes_capacity = DRM_MAX_CONNECTOR_MODES;
+
+            drm_mode_modeinfo_t modes[DRM_MAX_CONNECTOR_MODES];
+            memset(modes, 0, sizeof(modes));
             uint32_t modes_written = 0;
             if (!DRM_get_connector(drm_file_id,
                                    &io,
-                                   (modes_capacity > 0) ? &mode : NULL,
-                                   (modes_capacity > 0) ? 1U : 0U,
+                                   (kernel_modes_capacity > 0) ? modes : NULL,
+                                   kernel_modes_capacity,
                                    &modes_written))
             {
                 return (uint64_t) -1;
             }
 
-            if (io.modes_ptr != 0 && modes_capacity > 0 && modes_written > 0)
+            if (io.modes_ptr != 0 && user_modes_capacity > 0 && modes_written > 0)
             {
-                if (!Syscall_copy_to_user((void*) (uintptr_t) io.modes_ptr, &mode, sizeof(mode)))
+                uint32_t to_copy = modes_written;
+                if (to_copy > kernel_modes_capacity)
+                    to_copy = kernel_modes_capacity;
+                if (to_copy > user_modes_capacity)
+                    to_copy = user_modes_capacity;
+
+                if (!Syscall_copy_to_user((void*) (uintptr_t) io.modes_ptr,
+                                          modes,
+                                          (size_t) to_copy * sizeof(modes[0])))
                     return (uint64_t) -1;
             }
 

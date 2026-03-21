@@ -15,7 +15,33 @@
 #define DRM_MAX_FILE_HANDLES     256U
 #define DRM_MAX_BUFFERS          128U
 #define DRM_MAX_MODE_BLOBS       128U
+#define DRM_MAX_CONNECTOR_MODES  128U
 #define DRM_MAX_PAGES_PER_BUFFER 8192U
+
+#define DRM_BOCHS_DISPI_INDEX_PORT  0x01CEU
+#define DRM_BOCHS_DISPI_DATA_PORT   0x01CFU
+#define DRM_BOCHS_DISPI_REG_ID      0x0U
+#define DRM_BOCHS_DISPI_REG_XRES    0x1U
+#define DRM_BOCHS_DISPI_REG_YRES    0x2U
+#define DRM_BOCHS_DISPI_REG_BPP     0x3U
+#define DRM_BOCHS_DISPI_REG_ENABLE  0x4U
+#define DRM_BOCHS_DISPI_REG_BANK    0x5U
+#define DRM_BOCHS_DISPI_REG_VIRT_W  0x6U
+#define DRM_BOCHS_DISPI_REG_VIRT_H  0x7U
+#define DRM_BOCHS_DISPI_REG_XOFF    0x8U
+#define DRM_BOCHS_DISPI_REG_YOFF    0x9U
+
+#define DRM_BOCHS_DISPI_ID0 0xB0C0U
+#define DRM_BOCHS_DISPI_ID1 0xB0C1U
+#define DRM_BOCHS_DISPI_ID2 0xB0C2U
+#define DRM_BOCHS_DISPI_ID3 0xB0C3U
+#define DRM_BOCHS_DISPI_ID4 0xB0C4U
+#define DRM_BOCHS_DISPI_ID5 0xB0C5U
+
+#define DRM_BOCHS_DISPI_DISABLED      0x00U
+#define DRM_BOCHS_DISPI_ENABLED       0x01U
+#define DRM_BOCHS_DISPI_LFB_ENABLED   0x40U
+#define DRM_BOCHS_DISPI_NOCLEARMEM    0x80U
 
 typedef struct drm_file_handle
 {
@@ -104,6 +130,11 @@ typedef struct drm_runtime_state
     drm_plane_state_t plane;
     drm_connector_state_t connector;
     drm_mode_modeinfo_t preferred_mode;
+    drm_mode_modeinfo_t connector_modes[DRM_MAX_CONNECTOR_MODES];
+    uint32_t connector_mode_count;
+    bool bochs_probe_done;
+    bool bochs_available;
+    uint16_t bochs_id;
 } drm_runtime_state_t;
 
 void DRM_init(void);

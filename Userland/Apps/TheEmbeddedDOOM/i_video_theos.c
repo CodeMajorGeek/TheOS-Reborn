@@ -42,6 +42,45 @@ static doom_drm_state_t DoomDRM = {
     .dmabuf_fd = -1
 };
 
+static bool doom_pick_current_mode(int card_fd,
+                                   uint32_t connector_id,
+                                   uint32_t crtc_id,
+                                   drm_mode_modeinfo_t* out_mode)
+{
+    if (card_fd < 0 || connector_id == 0 || crtc_id == 0 || !out_mode)
+        return false;
+
+    drm_mode_get_crtc_t crtc;
+    memset(&crtc, 0, sizeof(crtc));
+    crtc.crtc_id = crtc_id;
+    if (ioctl(card_fd, DRM_IOCTL_MODE_GET_CRTC, &crtc) >= 0 &&
+        crtc.mode_valid != 0 &&
+        crtc.mode.hdisplay != 0 &&
+        crtc.mode.vdisplay != 0)
+    {
+        *out_mode = crtc.mode;
+        return true;
+    }
+
+    drm_mode_modeinfo_t fallback_mode;
+    memset(&fallback_mode, 0, sizeof(fallback_mode));
+    drm_mode_get_connector_t connector;
+    memset(&connector, 0, sizeof(connector));
+    connector.connector_id = connector_id;
+    connector.count_modes = 1U;
+    connector.modes_ptr = (uint64_t) (uintptr_t) &fallback_mode;
+    if (ioctl(card_fd, DRM_IOCTL_MODE_GET_CONNECTOR, &connector) < 0 ||
+        connector.count_modes == 0 ||
+        fallback_mode.hdisplay == 0 ||
+        fallback_mode.vdisplay == 0)
+    {
+        return false;
+    }
+
+    *out_mode = fallback_mode;
+    return true;
+}
+
 static void doom_post_key_event(int key, bool down)
 {
     if (key == 0)
@@ -319,14 +358,9 @@ static bool doom_drm_init(void)
 
     drm_mode_modeinfo_t mode;
     memset(&mode, 0, sizeof(mode));
-    drm_mode_get_connector_t connector;
-    memset(&connector, 0, sizeof(connector));
-    connector.connector_id = connector_id;
-    connector.count_modes = 1;
-    connector.modes_ptr = (uint64_t) (uintptr_t) &mode;
-    if (ioctl(DoomDRM.card_fd, DRM_IOCTL_MODE_GET_CONNECTOR, &connector) < 0)
+    if (!doom_pick_current_mode(DoomDRM.card_fd, connector_id, crtc_id, &mode))
     {
-        printf("[DOOM] DRM get connector failed errno=%d\n", errno);
+        printf("[DOOM] DRM get mode failed errno=%d\n", errno);
         doom_drm_destroy();
         return false;
     }

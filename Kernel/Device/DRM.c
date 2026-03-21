@@ -1,5 +1,6 @@
 #include <Device/DRM.h>
 
+#include <CPU/IO.h>
 #include <Device/TTY.h>
 #include <Device/TTYFramebuffer.h>
 #include <Memory/KMem.h>
@@ -29,6 +30,119 @@ static uint32_t DRM_align_up_u32(uint32_t value, uint32_t align)
 
     uint32_t mask = align - 1U;
     return (value + mask) & ~mask;
+}
+
+static uint64_t DRM_mode_score(uint32_t width, uint32_t height, uint32_t bpp)
+{
+    uint64_t pixels = 0;
+    if (width != 0 && height != 0 && width <= (UINT32_MAX / height))
+        pixels = (uint64_t) width * (uint64_t) height;
+
+    return (pixels << 8) | (uint64_t) (bpp & 0xFFU);
+}
+
+static bool DRM_mode_valid(const drm_mode_modeinfo_t* mode)
+{
+    if (!mode)
+        return false;
+
+    if (mode->hdisplay == 0 || mode->vdisplay == 0)
+        return false;
+
+    return true;
+}
+
+static bool DRM_mode_matches(const drm_mode_modeinfo_t* lhs, const drm_mode_modeinfo_t* rhs)
+{
+    if (!lhs || !rhs)
+        return false;
+
+    return lhs->hdisplay == rhs->hdisplay &&
+           lhs->vdisplay == rhs->vdisplay;
+}
+
+static bool DRM_mode_from_dimensions(uint32_t width,
+                                     uint32_t height,
+                                     uint32_t bpp,
+                                     const char* name,
+                                     drm_mode_modeinfo_t* out_mode)
+{
+    if (!out_mode || width == 0 || height == 0 || bpp == 0)
+        return false;
+    if (width > UINT16_MAX || height > UINT16_MAX)
+        return false;
+
+    memset(out_mode, 0, sizeof(*out_mode));
+    out_mode->hdisplay = (uint16_t) width;
+    out_mode->hsync_start = out_mode->hdisplay;
+    out_mode->hsync_end = out_mode->hdisplay;
+    out_mode->htotal = out_mode->hdisplay;
+    out_mode->vdisplay = (uint16_t) height;
+    out_mode->vsync_start = out_mode->vdisplay;
+    out_mode->vsync_end = out_mode->vdisplay;
+    out_mode->vtotal = out_mode->vdisplay;
+    out_mode->vrefresh = 60U;
+
+    if (name && name[0] != '\0')
+    {
+        size_t mode_name_len = strlen(name);
+        if (mode_name_len >= sizeof(out_mode->name))
+            mode_name_len = sizeof(out_mode->name) - 1U;
+        memcpy(out_mode->name, name, mode_name_len);
+        out_mode->name[mode_name_len] = '\0';
+    }
+
+    (void) bpp;
+    return true;
+}
+
+static bool DRM_mode_from_bochs_candidate(uint16_t width,
+                                          uint16_t height,
+                                          drm_mode_modeinfo_t* out_mode)
+{
+    return DRM_mode_from_dimensions(width, height, 32U, "BOCHS", out_mode);
+}
+
+static void DRM_mode_list_add_unique(drm_mode_modeinfo_t* modes,
+                                     uint32_t capacity,
+                                     uint32_t* inout_count,
+                                     const drm_mode_modeinfo_t* mode)
+{
+    if (!modes || !inout_count || !mode || !DRM_mode_valid(mode))
+        return;
+
+    for (uint32_t i = 0; i < *inout_count; i++)
+    {
+        if (DRM_mode_matches(&modes[i], mode))
+            return;
+    }
+
+    if (*inout_count >= capacity)
+        return;
+
+    modes[*inout_count] = *mode;
+    (*inout_count)++;
+}
+
+static void DRM_mode_list_sort_best_first(drm_mode_modeinfo_t* modes, uint32_t count)
+{
+    if (!modes || count < 2U)
+        return;
+
+    for (uint32_t i = 0; i + 1U < count; i++)
+    {
+        for (uint32_t j = i + 1U; j < count; j++)
+        {
+            uint64_t score_i = DRM_mode_score(modes[i].hdisplay, modes[i].vdisplay, 32U);
+            uint64_t score_j = DRM_mode_score(modes[j].hdisplay, modes[j].vdisplay, 32U);
+            if (score_j <= score_i)
+                continue;
+
+            drm_mode_modeinfo_t tmp = modes[i];
+            modes[i] = modes[j];
+            modes[j] = tmp;
+        }
+    }
 }
 
 static uint32_t DRM_scale_channel(uint8_t value, uint8_t bits)
@@ -87,6 +201,46 @@ static void DRM_store_fb_pixel(const TTYFB_runtime_state_t* fb, uint8_t* target,
     }
 }
 
+static bool DRM_bochs_id_supported(uint16_t id)
+{
+    switch (id)
+    {
+        case DRM_BOCHS_DISPI_ID0:
+        case DRM_BOCHS_DISPI_ID1:
+        case DRM_BOCHS_DISPI_ID2:
+        case DRM_BOCHS_DISPI_ID3:
+        case DRM_BOCHS_DISPI_ID4:
+        case DRM_BOCHS_DISPI_ID5:
+            return true;
+        default:
+            return false;
+    }
+}
+
+static uint16_t DRM_bochs_read_reg(uint16_t reg)
+{
+    IO_outw(DRM_BOCHS_DISPI_INDEX_PORT, reg);
+    return IO_inw(DRM_BOCHS_DISPI_DATA_PORT);
+}
+
+static void DRM_bochs_write_reg(uint16_t reg, uint16_t value)
+{
+    IO_outw(DRM_BOCHS_DISPI_INDEX_PORT, reg);
+    IO_outw(DRM_BOCHS_DISPI_DATA_PORT, value);
+}
+
+static bool DRM_bochs_detect_locked(void)
+{
+    if (DRM_state.bochs_probe_done)
+        return DRM_state.bochs_available;
+
+    uint16_t bochs_id = DRM_bochs_read_reg(DRM_BOCHS_DISPI_REG_ID);
+    DRM_state.bochs_id = bochs_id;
+    DRM_state.bochs_available = DRM_bochs_id_supported(bochs_id);
+    DRM_state.bochs_probe_done = true;
+    return DRM_state.bochs_available;
+}
+
 static bool DRM_get_runtime_mode(drm_mode_modeinfo_t* out_mode, TTYFB_runtime_state_t* out_fb)
 {
     TTYFB_runtime_state_t fb;
@@ -116,20 +270,179 @@ static bool DRM_get_runtime_mode(drm_mode_modeinfo_t* out_mode, TTYFB_runtime_st
     return true;
 }
 
+static bool DRM_build_mode_fb_info_locked(const drm_mode_modeinfo_t* mode, TTY_framebuffer_info_t* out_info)
+{
+    if (!mode || !out_info || !DRM_mode_valid(mode))
+        return false;
+
+    TTYFB_runtime_state_t fb;
+    if (!TTYFB_get_runtime_state(&fb) || !fb.ready || fb.phys_addr == 0)
+        return false;
+
+    uint32_t mode_bpp = 32U;
+    uint32_t bytes_per_pixel = mode_bpp / 8U;
+    uint64_t pitch64 = (uint64_t) mode->hdisplay * (uint64_t) bytes_per_pixel;
+    if (pitch64 == 0 || pitch64 > UINT32_MAX)
+        return false;
+
+    memset(out_info, 0, sizeof(*out_info));
+    out_info->phys_addr = (uint64_t) fb.phys_addr;
+    out_info->pitch = (uint32_t) pitch64;
+    out_info->width = mode->hdisplay;
+    out_info->height = mode->vdisplay;
+    out_info->bpp = (uint8_t) mode_bpp;
+    out_info->type = TTY_FRAMEBUFFER_TYPE_RGB;
+    out_info->red_field_position = (fb.red_size != 0) ? fb.red_pos : 16U;
+    out_info->red_mask_size = (fb.red_size != 0) ? fb.red_size : 8U;
+    out_info->green_field_position = (fb.green_size != 0) ? fb.green_pos : 8U;
+    out_info->green_mask_size = (fb.green_size != 0) ? fb.green_size : 8U;
+    out_info->blue_field_position = (fb.blue_size != 0) ? fb.blue_pos : 0U;
+    out_info->blue_mask_size = (fb.blue_size != 0) ? fb.blue_size : 8U;
+    return true;
+}
+
+static bool DRM_mode_supported_locked(const drm_mode_modeinfo_t* mode)
+{
+    if (!DRM_mode_valid(mode))
+        return false;
+
+    for (uint32_t i = 0; i < DRM_state.connector_mode_count; i++)
+    {
+        if (DRM_mode_matches(&DRM_state.connector_modes[i], mode))
+            return true;
+    }
+
+    drm_mode_modeinfo_t runtime_mode;
+    if (!DRM_get_runtime_mode(&runtime_mode, NULL))
+        return false;
+
+    return DRM_mode_matches(&runtime_mode, mode);
+}
+
+static bool DRM_bochs_modeset_locked(const drm_mode_modeinfo_t* mode, TTY_framebuffer_info_t* out_info)
+{
+    if (!mode || !out_info || !DRM_mode_valid(mode))
+        return false;
+    if (mode->hdisplay > UINT16_MAX || mode->vdisplay > UINT16_MAX)
+        return false;
+    if (!DRM_bochs_detect_locked())
+        return false;
+
+    uint16_t width = mode->hdisplay;
+    uint16_t height = mode->vdisplay;
+    uint16_t bpp = 32U;
+
+    DRM_bochs_write_reg(DRM_BOCHS_DISPI_REG_ENABLE, DRM_BOCHS_DISPI_DISABLED);
+    DRM_bochs_write_reg(DRM_BOCHS_DISPI_REG_XRES, width);
+    DRM_bochs_write_reg(DRM_BOCHS_DISPI_REG_YRES, height);
+    DRM_bochs_write_reg(DRM_BOCHS_DISPI_REG_BPP, bpp);
+    DRM_bochs_write_reg(DRM_BOCHS_DISPI_REG_VIRT_W, width);
+    DRM_bochs_write_reg(DRM_BOCHS_DISPI_REG_VIRT_H, height);
+    DRM_bochs_write_reg(DRM_BOCHS_DISPI_REG_XOFF, 0U);
+    DRM_bochs_write_reg(DRM_BOCHS_DISPI_REG_YOFF, 0U);
+    DRM_bochs_write_reg(DRM_BOCHS_DISPI_REG_ENABLE,
+                        DRM_BOCHS_DISPI_ENABLED | DRM_BOCHS_DISPI_LFB_ENABLED | DRM_BOCHS_DISPI_NOCLEARMEM);
+    DRM_bochs_write_reg(DRM_BOCHS_DISPI_REG_BANK, 0U);
+
+    uint16_t programmed_w = DRM_bochs_read_reg(DRM_BOCHS_DISPI_REG_XRES);
+    uint16_t programmed_h = DRM_bochs_read_reg(DRM_BOCHS_DISPI_REG_YRES);
+    uint16_t programmed_bpp = DRM_bochs_read_reg(DRM_BOCHS_DISPI_REG_BPP);
+    uint16_t programmed_virt_w = DRM_bochs_read_reg(DRM_BOCHS_DISPI_REG_VIRT_W);
+    if (programmed_virt_w == 0U)
+        programmed_virt_w = programmed_w;
+
+    if (programmed_w != width || programmed_h != height || programmed_bpp != bpp)
+        return false;
+
+    if (!DRM_build_mode_fb_info_locked(mode, out_info))
+        return false;
+
+    uint64_t pitch64 = (uint64_t) programmed_virt_w * ((uint64_t) programmed_bpp / 8ULL);
+    if (pitch64 == 0 || pitch64 > UINT32_MAX)
+        return false;
+    out_info->pitch = (uint32_t) pitch64;
+    out_info->width = programmed_w;
+    out_info->height = programmed_h;
+    out_info->bpp = (uint8_t) programmed_bpp;
+    return true;
+}
+
+static void DRM_rebuild_connector_modes_locked(const drm_mode_modeinfo_t* active_mode)
+{
+    DRM_state.connector_mode_count = 0;
+    memset(DRM_state.connector_modes, 0, sizeof(DRM_state.connector_modes));
+
+    bool can_modeset = DRM_bochs_detect_locked();
+    if (can_modeset)
+    {
+        static const struct
+        {
+            uint16_t width;
+            uint16_t height;
+        } bochs_modes[] = {
+            { 640U, 480U },
+            { 800U, 600U },
+            { 1024U, 768U },
+            { 1152U, 864U },
+            { 1280U, 720U },
+            { 1280U, 800U },
+            { 1280U, 1024U },
+            { 1366U, 768U },
+            { 1440U, 900U },
+            { 1600U, 900U },
+            { 1680U, 1050U },
+            { 1920U, 1080U },
+            { 1920U, 1200U },
+            { 2560U, 1440U },
+            { 3440U, 1440U },
+            { 3840U, 2160U },
+            { 4096U, 2160U },
+            { 5120U, 2160U }
+        };
+
+        for (size_t i = 0; i < (sizeof(bochs_modes) / sizeof(bochs_modes[0])); i++)
+        {
+            drm_mode_modeinfo_t mode;
+            if (!DRM_mode_from_bochs_candidate(bochs_modes[i].width, bochs_modes[i].height, &mode))
+                continue;
+
+            DRM_mode_list_add_unique(DRM_state.connector_modes,
+                                     DRM_MAX_CONNECTOR_MODES,
+                                     &DRM_state.connector_mode_count,
+                                     &mode);
+        }
+    }
+
+    if (active_mode)
+    {
+        DRM_mode_list_add_unique(DRM_state.connector_modes,
+                                 DRM_MAX_CONNECTOR_MODES,
+                                 &DRM_state.connector_mode_count,
+                                 active_mode);
+    }
+
+    DRM_mode_list_sort_best_first(DRM_state.connector_modes, DRM_state.connector_mode_count);
+}
+
 static bool DRM_refresh_mode_locked(void)
 {
-    drm_mode_modeinfo_t mode;
-    if (!DRM_get_runtime_mode(&mode, NULL))
+    drm_mode_modeinfo_t active_mode;
+    if (!DRM_get_runtime_mode(&active_mode, NULL))
     {
         DRM_state.ready = false;
+        DRM_state.connector_mode_count = 0;
         return false;
     }
 
     DRM_state.ready = true;
-    DRM_state.preferred_mode = mode;
+    DRM_rebuild_connector_modes_locked(&active_mode);
+    if (DRM_state.connector_mode_count != 0)
+        DRM_state.preferred_mode = DRM_state.connector_modes[0];
+    else
+        DRM_state.preferred_mode = active_mode;
     if (!DRM_state.crtc.mode_valid)
     {
-        DRM_state.crtc.mode = mode;
+        DRM_state.crtc.mode = active_mode;
         DRM_state.crtc.mode_valid = true;
         DRM_state.crtc.active = false;
         DRM_state.crtc.fb_handle = 0;
@@ -141,12 +454,12 @@ static bool DRM_refresh_mode_locked(void)
         DRM_state.plane.crtc_id = DRM_CRTC_ID;
         DRM_state.plane.src_x = 0;
         DRM_state.plane.src_y = 0;
-        DRM_state.plane.src_w = (uint32_t) mode.hdisplay << 16;
-        DRM_state.plane.src_h = (uint32_t) mode.vdisplay << 16;
+        DRM_state.plane.src_w = (uint32_t) active_mode.hdisplay << 16;
+        DRM_state.plane.src_h = (uint32_t) active_mode.vdisplay << 16;
         DRM_state.plane.crtc_x = 0;
         DRM_state.plane.crtc_y = 0;
-        DRM_state.plane.crtc_w = mode.hdisplay;
-        DRM_state.plane.crtc_h = mode.vdisplay;
+        DRM_state.plane.crtc_w = active_mode.hdisplay;
+        DRM_state.plane.crtc_h = active_mode.vdisplay;
 
         DRM_state.connector.crtc_id = 0;
     }
@@ -598,17 +911,21 @@ bool DRM_get_connector(uint32_t file_id,
 
     io->connector_id = DRM_CONNECTOR_ID;
     io->connection = DRM_MODE_CONNECTED;
-    io->count_modes = 1U;
+    io->count_modes = DRM_state.connector_mode_count;
     io->mm_width = (DRM_state.preferred_mode.hdisplay * 254U) / 960U;
     io->mm_height = (DRM_state.preferred_mode.vdisplay * 254U) / 960U;
 
     if (out_modes_written)
         *out_modes_written = 0;
-    if (out_modes && modes_capacity > 0)
+    if (out_modes && modes_capacity > 0 && DRM_state.connector_mode_count > 0)
     {
-        out_modes[0] = DRM_state.preferred_mode;
+        uint32_t to_copy = DRM_state.connector_mode_count;
+        if (to_copy > modes_capacity)
+            to_copy = modes_capacity;
+
+        memcpy(out_modes, DRM_state.connector_modes, (size_t) to_copy * sizeof(out_modes[0]));
         if (out_modes_written)
-            *out_modes_written = 1;
+            *out_modes_written = to_copy;
     }
 
     spin_unlock(&DRM_state.lock);
@@ -966,6 +1283,31 @@ bool DRM_prime_dmabuf_to_handle(uint32_t file_id, uint32_t dmabuf_id, uint32_t* 
     return true;
 }
 
+static bool DRM_apply_mode_locked(const drm_mode_modeinfo_t* mode)
+{
+    if (!mode || !DRM_mode_valid(mode))
+        return false;
+
+    drm_mode_modeinfo_t runtime_mode;
+    if (!DRM_get_runtime_mode(&runtime_mode, NULL))
+        return false;
+
+    if (DRM_mode_matches(&runtime_mode, mode))
+        return true;
+
+    if (!DRM_mode_supported_locked(mode))
+        return false;
+
+    TTY_framebuffer_info_t info;
+    if (!DRM_bochs_modeset_locked(mode, &info))
+        return false;
+
+    if (!TTY_init_framebuffer(&info))
+        return false;
+
+    return true;
+}
+
 bool DRM_atomic_commit(uint32_t file_id, const drm_mode_atomic_req_t* req)
 {
     if (!req || !DRM_state.lock_ready)
@@ -985,6 +1327,12 @@ bool DRM_atomic_commit(uint32_t file_id, const drm_mode_atomic_req_t* req)
         return false;
     }
 
+    if (!DRM_refresh_mode_locked())
+    {
+        spin_unlock(&DRM_state.lock);
+        return false;
+    }
+
     drm_mode_modeinfo_t mode = DRM_state.crtc.mode_valid ? DRM_state.crtc.mode : DRM_state.preferred_mode;
     if (req->mode_blob_id != 0)
     {
@@ -995,6 +1343,12 @@ bool DRM_atomic_commit(uint32_t file_id, const drm_mode_atomic_req_t* req)
             return false;
         }
         mode = blob->mode;
+    }
+
+    if (!DRM_mode_supported_locked(&mode))
+    {
+        spin_unlock(&DRM_state.lock);
+        return false;
     }
 
     drm_buffer_t* buffer = NULL;
@@ -1015,14 +1369,34 @@ bool DRM_atomic_commit(uint32_t file_id, const drm_mode_atomic_req_t* req)
         }
     }
 
+    drm_mode_modeinfo_t runtime_mode;
+    bool mode_change_requested = false;
+    if (!DRM_get_runtime_mode(&runtime_mode, NULL))
+    {
+        spin_unlock(&DRM_state.lock);
+        return false;
+    }
+    mode_change_requested = req->active != 0 && !DRM_mode_matches(&runtime_mode, &mode);
+
     if ((req->flags & DRM_MODE_ATOMIC_TEST_ONLY) != 0)
     {
+        if (mode_change_requested && !DRM_bochs_detect_locked())
+        {
+            spin_unlock(&DRM_state.lock);
+            return false;
+        }
         spin_unlock(&DRM_state.lock);
         return true;
     }
 
     if (req->active != 0)
     {
+        if (mode_change_requested && !DRM_apply_mode_locked(&mode))
+        {
+            spin_unlock(&DRM_state.lock);
+            return false;
+        }
+
         if (!DRM_refresh_mode_locked())
         {
             spin_unlock(&DRM_state.lock);

@@ -8,7 +8,7 @@
 
 TheOS-Reborn is a freestanding x86_64 operating system project with a Limine boot path, custom PMM/VMM, SMP, ACPI/APIC, AHCI/ext4, ring3 userland, a minimal libc, and a MicroPython port (validated on both QEMU and VirtualBox with AHCI SATA/ATAPI storage).
 
-> This README reflects repository behavior as of **March 19, 2026**.
+> This README reflects repository behavior as of **March 21, 2026**.
 
 ---
 
@@ -98,7 +98,8 @@ Core features currently implemented:
   - PSF2 font loading,
   - deferred framebuffer switch,
   - optional double buffering,
-  - minimal DRM/KMS stack for userland (`/dev/dri/card0`, resources/connectors/CRTC/plane ioctls, dumb buffers, mmap, atomic commit).
+  - minimal DRM/KMS stack for userland (`/dev/dri/card0`, resources/connectors/CRTC/plane ioctls, dumb buffers, mmap, atomic commit),
+  - Bochs/QEMU VGA mode-set path wired through DRM atomic mode blobs (connector mode list from Limine + runtime reprogramming in kernel).
 - Audio:
   - Intel HDA playback path (`/dev/dsp`, `/dev/audio`) with OSS-style ioctls (`RESET/SYNC/SPEED/STEREO/SETFMT/GETFMTS/SETFRAGMENT`),
   - fragment-aware buffering in kernel HDA path (lower-latency queue depth control),
@@ -323,7 +324,19 @@ ninja graphs        # regenerate project graphs
 - `THEOS_RUN_GDB_STUB` (default `OFF`)
 - `THEOS_RUN_TELNET_MONITOR` (default `OFF`)
 - `THEOS_AUTO_PULL_SUBMODULES` (default `ON`)
-  - auto-updates required submodules (currently `EasyArgs`) during configure.
+  - initializes required submodules to pinned revisions during configure.
+- `THEOS_AUTO_PULL_SUBMODULES_REMOTE` (default `OFF`)
+  - optional remote-head update for selected tracked submodules (currently `EasyArgs` only).
+- `THEOS_APPLY_EMBEDDEDDOOM_PATCHSET` (default `ON`)
+  - auto-applies `Meta/patches/embeddedDOOM/*.patch` on top of the pinned `embeddedDOOM` submodule.
+
+### embeddedDOOM patch persistence
+
+The repository keeps `Userland/Apps/embeddedDOOM` as a submodule and versions TheOS-specific changes as patches in:
+
+- `Meta/patches/embeddedDOOM/`
+
+At configure time (`cmake ..`), `Meta/apply-embeddeddoom-patches.sh` applies that patchset. This keeps TheOS DOOM changes reproducible after a fresh `clone/pull`, without requiring a private fork.
 
 ### Kernel CMake options
 
