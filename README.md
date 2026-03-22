@@ -135,7 +135,10 @@ Core features currently implemented:
   - Intel E1000e (82574L) PCI path on QEMU (`-device e1000e`) with RX/TX descriptor rings and MSI/MSI-X/legacy fallback,
   - raw Ethernet device node (`/dev/net0`) with `read/write` for full L2 frames,
   - Linux-style ioctls for raw net path (`FIONREAD`, `FIONBIO`, `NET_RAW_IOCTL_GET_STATS`) and ARP table ops (`SIOCGARP`, `SIOCSARP`, `SIOCDARP`),
-  - in-kernel ARP table with dynamic learning/expiry and Driverland-gated mutation ioctls (`SIOCSARP`/`SIOCDARP`).
+  - in-kernel ARP table with dynamic learning/expiry and Driverland-gated mutation ioctls (`SIOCSARP`/`SIOCDARP`),
+  - AF_INET socket baseline in kernel/libc with UNIX-like wrappers (`socket`, `bind`, `connect`, `listen`, `accept`, `send`, `recv`, `sendto`, `recvfrom`, `getsockname`, `getpeername`),
+  - UDP baseline (datagram sockets) with loopback and E1000/ARP-backed L2 emission path,
+  - TCP baseline (stream sockets) with SYN handshake, listen/accept, connected send/recv, and non-blocking controls (`FIONBIO`/`FIONREAD`).
 - Userland/runtime:
   - ring3 ELF launch,
   - process execution domains (`Userland` and `Driverland`), with driver services installed under `/drv`,
@@ -293,6 +296,21 @@ flowchart TD
 - IRQ overrides handled from MADT records.
 - MSI/MSI-X path for AHCI when available.
 - HPET-backed LAPIC calibration preferred; PIT fallback remains available.
+
+### Network stack (current baseline)
+
+- L2:
+  - Intel E1000e driver with RX/TX descriptor rings and IRQ delivery (MSI/MSI-X with fallback).
+  - raw Ethernet endpoint exposed as `/dev/net0`.
+- L3:
+  - IPv4 framing/parsing path.
+  - ARP table with learning, expiry, lookup, and Driverland-gated mutation.
+- L4:
+  - UDP datagram sockets (loopback + NIC egress).
+  - TCP stream sockets (SYN handshake, listen/accept, connected send/recv baseline).
+- User-facing APIs:
+  - UNIX-like libc wrappers for AF_INET sockets (`socket`, `bind`, `connect`, `listen`, `accept`, `send`, `recv`, `sendto`, `recvfrom`),
+  - `ioctl(FIONREAD/FIONBIO)` support on socket-backed descriptors.
 
 ### Userland model
 
@@ -473,6 +491,8 @@ Runtime resources:
 - DRM/KMS probe (`/dev/dri/card0`, dumb buffer + dma-buf export/import + atomic test/commit/disable)
 - OSS audio probe (`/dev/dsp`/`/dev/audio`, `SNDCTL_DSP_SETFRAGMENT` + tone playback)
 - raw net probe (`/dev/net0`, tx/rx, `FIONREAD/FIONBIO`, driver stats)
+- UDP socket probe (`AF_INET/SOCK_DGRAM`, bind/sendto/recvfrom, connected-UDP send/recv path, `FIONREAD/FIONBIO`)
+- TCP socket probe (`AF_INET/SOCK_STREAM`, listen/accept/connect/send/recv loopback path)
 - ARP table ioctl probe (`SIOCGARP/SIOCSARP/SIOCDARP`, Driverland-only mutation path)
 - shared-object probe (`dlopen("/lib/libthetestdyn.so")`, symbol resolution, missing-symbol/missing-lib paths, open/close churn)
 
@@ -492,7 +512,7 @@ At boot, root mount does:
 
 ## Syscalls
 
-Current public syscall IDs are `1..35` (`Includes/UAPI/Syscall.h`).
+Current public syscall IDs are `1..44` (`Includes/UAPI/Syscall.h`).
 
 - `1` `SYS_SLEEP_MS`
 - `2` `SYS_TICK_GET`
@@ -529,12 +549,21 @@ Current public syscall IDs are `1..35` (`Includes/UAPI/Syscall.h`).
 - `33` `SYS_THREAD_GET_FSBASE`
 - `34` `SYS_PROC_INFO_GET`
 - `35` `SYS_IOCTL`
+- `36` `SYS_SOCKET`
+- `37` `SYS_BIND`
+- `38` `SYS_SENDTO`
+- `39` `SYS_RECVFROM`
+- `40` `SYS_CONNECT`
+- `41` `SYS_GETSOCKNAME`
+- `42` `SYS_GETPEERNAME`
+- `43` `SYS_LISTEN`
+- `44` `SYS_ACCEPT`
 
 Behavior notes:
 
 - `SYS_PROC_INFO_GET` returns per-entry `domain`, `flags`, `current_cpu`, `term_signal`, and `exit_status`.
 - Unknown syscall numbers are treated as bad syscalls and terminate the owner process with `SIGSYS`.
-- `SYS_IOCTL` currently multiplexes DRM (`/dev/dri/card0`), OSS audio (`/dev/dsp`/`/dev/audio`), and raw net (`/dev/net0`) requests.
+- `SYS_IOCTL` currently multiplexes DRM (`/dev/dri/card0`), OSS audio (`/dev/dsp`/`/dev/audio`), raw net (`/dev/net0`), and AF_INET socket (`FIONREAD`/`FIONBIO`) requests.
 - ARP mutation ioctls (`SIOCSARP`, `SIOCDARP`) are accepted only for Driverland-domain owners.
 
 ---
@@ -592,7 +621,11 @@ Behavior notes:
   - userland `libdl` relocation coverage remains narrower (`RELATIVE`, `64`, `GLOB_DAT`, `JUMP_SLOT`, `DTPMOD64`, `DTPOFF64`),
   - no full `PT_INTERP`/`ld.so` userspace loader flow yet (the kernel-side exec path performs the current dynamic-link work),
   - lazy binding and advanced symbol-visibility semantics remain incomplete.
-- Networking is currently raw-L2 oriented (`/dev/net0`) with ARP helper table; no full socket API (`AF_INET`/UDP/TCP stack) yet.
+- Networking now includes an AF_INET socket baseline (UDP + TCP stream), but remains intentionally scoped:
+  - IPv4 only (no IPv6 path yet),
+  - no `select/poll/epoll` socket readiness API yet,
+  - limited socket-option coverage (`getsockopt/setsockopt` subset),
+  - TCP reliability/state-machine coverage is still partial (no full retransmission/congestion-control/TIME-WAIT behavior yet, and no advanced out-of-order handling).
 - Driverland DHCP daemon is intentionally early-stage:
   - sends DHCPDISCOVER and parses OFFER/ACK/NAK frames,
   - REQUEST/lease commit/network interface configuration path is not implemented yet.
@@ -621,3 +654,4 @@ Behavior notes:
 - Expand libc coverage for larger userland compatibility.
 - Continue stabilizing MicroPython script execution behavior.
 - Improve scheduling and multi-process runtime capabilities.
+- Extend networking from baseline AF_INET support to fuller UNIX-like behavior (poll/select readiness, richer socket options, stronger TCP reliability and close-state handling).

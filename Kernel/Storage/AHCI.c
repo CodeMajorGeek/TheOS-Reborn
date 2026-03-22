@@ -589,10 +589,16 @@ static void AHCI_irq_handler(interrupt_frame_t* frame)
     }
 
     uint64_t irq_count = __atomic_add_fetch(&AHCI_state.irq_count, 1, __ATOMIC_RELAXED);
-    if ((irq_count == 1 || (irq_count % 512ULL) == 0) &&
-        (hba_is != 0 || hba_is_after != 0 || port_stuck_mask != 0))
+    if (irq_count == 1ULL)
     {
-        kdebug_printf("[AHCI] irq mode=%s count=%llu hba_is=0x%X hba_is_after=0x%X px_stuck=0x%X\n",
+        kdebug_printf("[AHCI] irq mode=%s count=%llu\n",
+                      AHCI_get_irq_mode_name(),
+                      (unsigned long long) irq_count);
+    }
+
+    if (hba_is_after != 0U || port_stuck_mask != 0U)
+    {
+        kdebug_printf("[AHCI] irq anomaly mode=%s count=%llu hba_is=0x%X hba_is_after=0x%X px_stuck=0x%X\n",
                       AHCI_get_irq_mode_name(),
                       (unsigned long long) irq_count,
                       hba_is,
