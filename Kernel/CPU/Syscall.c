@@ -542,6 +542,30 @@ static bool Syscall_pick_user_map_base(size_t page_count, uintptr_t* out_base)
     return true;
 }
 
+static bool Syscall_pick_user_map_base_from_hint(size_t page_count,
+                                                 uintptr_t hint,
+                                                 uintptr_t* out_base)
+{
+    if (!out_base || page_count == 0)
+        return false;
+
+    if (hint < SYSCALL_MAP_HINT_BASE || hint >= SYSCALL_MAP_HINT_LIMIT)
+        hint = SYSCALL_MAP_HINT_BASE;
+
+    bool found = Syscall_find_free_user_range(page_count, hint, SYSCALL_MAP_HINT_LIMIT, out_base);
+    if (!found)
+        found = Syscall_find_free_user_range(page_count, SYSCALL_MAP_HINT_BASE, hint, out_base);
+
+    if (!found)
+        return false;
+
+    uintptr_t next_hint = *out_base + (page_count * SYSCALL_PAGE_SIZE);
+    if (next_hint < *out_base || next_hint >= SYSCALL_MAP_HINT_LIMIT)
+        next_hint = SYSCALL_MAP_HINT_BASE;
+    __atomic_store_n(&Syscall_state.user_map_hint, next_hint, __ATOMIC_RELAXED);
+    return true;
+}
+
 static bool Syscall_normalize_write_path(const char* path, char* out_path, size_t out_size)
 {
     if (!path || !out_path || out_size < 2)
@@ -4795,9 +4819,18 @@ uint64_t Syscall_interrupt_handler(uint64_t syscall_num, syscall_frame_t* frame,
                     goto map_out;
                 if (!Syscall_mmap_window_in_bounds(requested, map_size))
                     goto map_out;
-                if (!Syscall_user_range_unmapped(requested, map_size))
-                    goto map_out;
-                base = requested;
+
+                // UNIX-like hint behavior: when addr is non-null but MAP_FIXED is not requested,
+                // prefer the hinted address and fall back to another free range in the mmap window.
+                if (Syscall_user_range_unmapped(requested, map_size))
+                {
+                    base = requested;
+                }
+                else
+                {
+                    if (!Syscall_pick_user_map_base_from_hint(page_count, requested, &base))
+                        goto map_out;
+                }
             }
 
             bool writable = (prot & SYS_PROT_WRITE) != 0;
