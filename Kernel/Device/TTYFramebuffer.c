@@ -800,3 +800,12 @@ void TTYFB_get_grid(uint32_t* cols, uint32_t* rows)
     if (rows)
         *rows = TTYFB_state.rows;
 }
+
+bool TTYFB_get_runtime_state(TTYFB_runtime_state_t* out_state)
+{
+    if (!out_state)
+        return false;
+
+    *out_state = TTYFB_state;
+    return true;
+}

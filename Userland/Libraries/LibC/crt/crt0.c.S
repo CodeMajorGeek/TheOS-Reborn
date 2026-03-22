@@ -16,7 +16,7 @@ _start:
     leaq 8(%rsp), %rsi         # argv
     leaq 16(%rsp,%rdi,8), %rdx # envp
     call main
-    movq %rax, %rdi    # main return code
+    movq %rax, %rdi
     movq $SYS_EXIT, %rax
     syscall
 

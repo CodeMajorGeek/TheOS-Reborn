@@ -8,6 +8,8 @@
 #include <CPU/SMP.h>
 #include <Device/HPET.h>
 #include <Device/Keyboard.h>
+#include <Device/DRM.h>
+#include <Device/HDA.h>
 #include <Debug/KDebug.h>
 #include <Debug/Spinlock.h>
 #include <FileSystem/ext4.h>
@@ -32,6 +34,20 @@ static syscall_runtime_state_t Syscall_state = {
 static inline uintptr_t Syscall_align_up_page(uintptr_t value)
 {
     return (value + (SYSCALL_PAGE_SIZE - 1U)) & ~(uintptr_t) (SYSCALL_PAGE_SIZE - 1U);
+}
+
+static inline uintptr_t Syscall_align_down_page(uintptr_t value)
+{
+    return value & ~(uintptr_t) (SYSCALL_PAGE_SIZE - 1U);
+}
+
+static inline uintptr_t Syscall_align_up_pow2(uintptr_t value, uintptr_t align)
+{
+    if (align == 0 || (align & (align - 1U)) != 0)
+        return 0;
+    if (value > UINTPTR_MAX - (align - 1U))
+        return 0;
+    return (value + (align - 1U)) & ~(uintptr_t) (align - 1U);
 }
 
 static uint8_t Syscall_dirent_type_from_ext4(uint8_t ext4_type)
@@ -89,7 +105,6 @@ static bool Syscall_copy_to_user(void* user_dst, const void* kernel_src, size_t 
         spin_lock(&Syscall_state.vm_lock);
 
     size_t copied = 0;
-    bool tlb_needs_reload = false;
     while (copied < size)
     {
         uintptr_t user_addr = (uintptr_t) user_dst + copied;
@@ -111,6 +126,7 @@ static bool Syscall_copy_to_user(void* user_dst, const void* kernel_src, size_t 
         }
 
         uintptr_t entry = *pte;
+        bool pte_updated = false;
         if ((entry & SYSCALL_PTE_COW) != 0)
         {
             uintptr_t old_phys = entry & FRAME;
@@ -129,7 +145,7 @@ static bool Syscall_copy_to_user(void* user_dst, const void* kernel_src, size_t 
                 entry &= ~SYSCALL_PTE_COW;
                 entry |= WRITABLE;
                 *pte = entry;
-                tlb_needs_reload = true;
+                pte_updated = true;
             }
             else
             {
@@ -147,12 +163,17 @@ static bool Syscall_copy_to_user(void* user_dst, const void* kernel_src, size_t 
                 entry &= ~SYSCALL_PTE_COW;
                 entry |= WRITABLE;
                 *pte = entry;
-                tlb_needs_reload = true;
+                pte_updated = true;
 
                 bool ref_zero = false;
                 if (Syscall_cow_ref_sub(old_phys, &ref_zero) && ref_zero)
                     PMM_dealloc_page((void*) old_phys);
             }
+
+            /* We are about to write into the same user page. Make the new PTE
+             * visible immediately to avoid writing through a stale read-only TLB entry. */
+            if (pte_updated)
+                Syscall_write_cr3_phys(current_cr3);
 
             entry = *pte;
         }
@@ -172,9 +193,6 @@ static bool Syscall_copy_to_user(void* user_dst, const void* kernel_src, size_t 
         memcpy((void*) user_addr, (const uint8_t*) kernel_src + copied, chunk);
         copied += chunk;
     }
-
-    if (tlb_needs_reload)
-        Syscall_write_cr3_phys(Syscall_read_cr3_phys());
 
     if (Syscall_state.vm_lock_ready)
         spin_unlock(&Syscall_state.vm_lock);
@@ -593,6 +611,23 @@ static bool Syscall_normalize_write_path(const char* path, char* out_path, size_
     return true;
 }
 
+static bool Syscall_is_drm_card_path(const char* path)
+{
+    if (!path)
+        return false;
+
+    return strcmp(path, DRM_NODE_PATH) == 0;
+}
+
+static bool Syscall_is_audio_dsp_path(const char* path)
+{
+    if (!path)
+        return false;
+
+    return strcmp(path, HDA_DSP_NODE_PATH) == 0 ||
+           strcmp(path, HDA_AUDIO_NODE_PATH) == 0;
+}
+
 static int32_t Syscall_fd_alloc_locked(void)
 {
     for (uint32_t i = 0; i < SYSCALL_MAX_OPEN_FILES; i++)
@@ -626,7 +661,7 @@ static bool Syscall_fd_path_conflicts_locked(const char* path, bool want_exclusi
 
 static uint64_t Syscall_handle_open(uint32_t cpu_index, const syscall_frame_t* frame)
 {
-    if (!frame || !Syscall_state.fd_lock_ready || !Syscall_state.fs_lock_ready)
+    if (!frame || !Syscall_state.fd_lock_ready)
         return (uint64_t) -1;
 
     uint32_t owner_pid = Syscall_proc_current_pid(cpu_index, frame);
@@ -653,6 +688,72 @@ static uint64_t Syscall_handle_open(uint32_t cpu_index, const syscall_frame_t* f
     if ((want_create || want_trunc) && !can_write)
         return (uint64_t) -1;
 
+    if (Syscall_is_audio_dsp_path(path))
+    {
+        if (want_create || want_trunc || want_exclusive)
+            return (uint64_t) -1;
+        if (!can_write)
+            return (uint64_t) -1;
+        if (!HDA_is_available())
+            return (uint64_t) -1;
+        if (!HDA_dsp_open(owner_pid))
+            return (uint64_t) -1;
+
+        spin_lock(&Syscall_state.fd_lock);
+        int32_t fd = Syscall_fd_alloc_locked();
+        if (fd < 0)
+        {
+            spin_unlock(&Syscall_state.fd_lock);
+            HDA_dsp_close(owner_pid);
+            return (uint64_t) -1;
+        }
+
+        syscall_file_desc_t* entry = &Syscall_state.fds[(uint32_t) fd];
+        memset(entry, 0, sizeof(*entry));
+        entry->used = true;
+        entry->type = SYSCALL_FD_TYPE_AUDIO_DSP;
+        entry->owner_pid = owner_pid;
+        entry->can_read = false;
+        entry->can_write = true;
+        memcpy(entry->path, HDA_DSP_NODE_PATH, sizeof(HDA_DSP_NODE_PATH));
+        spin_unlock(&Syscall_state.fd_lock);
+        return (uint64_t) fd;
+    }
+
+    if (Syscall_is_drm_card_path(path))
+    {
+        if (want_create || want_trunc || want_exclusive)
+            return (uint64_t) -1;
+
+        uint32_t drm_file_id = 0;
+        if (!DRM_open_file(owner_pid, &drm_file_id))
+            return (uint64_t) -1;
+
+        spin_lock(&Syscall_state.fd_lock);
+        int32_t fd = Syscall_fd_alloc_locked();
+        if (fd < 0)
+        {
+            spin_unlock(&Syscall_state.fd_lock);
+            DRM_close_file(drm_file_id);
+            return (uint64_t) -1;
+        }
+
+        syscall_file_desc_t* entry = &Syscall_state.fds[(uint32_t) fd];
+        memset(entry, 0, sizeof(*entry));
+        entry->used = true;
+        entry->type = SYSCALL_FD_TYPE_DRM_CARD;
+        entry->owner_pid = owner_pid;
+        entry->drm_file_id = drm_file_id;
+        entry->can_read = true;
+        entry->can_write = true;
+        memcpy(entry->path, DRM_NODE_PATH, sizeof(DRM_NODE_PATH));
+        spin_unlock(&Syscall_state.fd_lock);
+        return (uint64_t) fd;
+    }
+
+    if (!Syscall_state.fs_lock_ready)
+        return (uint64_t) -1;
+
     char lock_path[SYSCALL_USER_CSTR_MAX] = { 0 };
     bool lock_path_is_normalized = Syscall_normalize_write_path(path, lock_path, sizeof(lock_path));
     if (can_write || want_exclusive)
@@ -667,10 +768,6 @@ static uint64_t Syscall_handle_open(uint32_t cpu_index, const syscall_frame_t* f
             return (uint64_t) -1;
         memcpy(lock_path, path, raw_len + 1U);
     }
-
-    char write_path[SYSCALL_USER_CSTR_MAX] = { 0 };
-    if (can_write)
-        memcpy(write_path, lock_path, sizeof(write_path));
 
     int32_t fd = -1;
     spin_lock(&Syscall_state.fd_lock);
@@ -690,6 +787,7 @@ static uint64_t Syscall_handle_open(uint32_t cpu_index, const syscall_frame_t* f
     syscall_file_desc_t* entry = &Syscall_state.fds[(uint32_t) fd];
     memset(entry, 0, sizeof(*entry));
     entry->used = true;
+    entry->type = SYSCALL_FD_TYPE_REGULAR;
     entry->owner_pid = owner_pid;
     entry->exclusive = want_exclusive;
     entry->io_busy = true;
@@ -772,19 +870,13 @@ open_fail_slot:
 
 static uint64_t Syscall_handle_close(uint32_t cpu_index, const syscall_frame_t* frame)
 {
-    if (!frame || !Syscall_state.fd_lock_ready || !Syscall_state.fs_lock_ready)
+    if (!frame || !Syscall_state.fd_lock_ready)
         return (uint64_t) -1;
 
     int64_t fd = (int64_t) frame->rdi;
     uint32_t owner_pid = Syscall_proc_current_pid(cpu_index, frame);
     if (fd < 0 || (uint64_t) fd >= SYSCALL_MAX_OPEN_FILES || owner_pid == 0)
         return (uint64_t) -1;
-
-    bool flush_needed = false;
-    bool flush_ok = true;
-    char flush_path[SYSCALL_USER_CSTR_MAX];
-    size_t flush_size = 0;
-    const uint8_t* flush_data = NULL;
 
     spin_lock(&Syscall_state.fd_lock);
     syscall_file_desc_t* entry = &Syscall_state.fds[(uint32_t) fd];
@@ -794,7 +886,44 @@ static uint64_t Syscall_handle_close(uint32_t cpu_index, const syscall_frame_t* 
         return (uint64_t) -1;
     }
 
-    flush_needed = entry->can_write && entry->dirty;
+    uint32_t entry_type = entry->type;
+    if (entry_type == SYSCALL_FD_TYPE_DRM_CARD)
+    {
+        uint32_t drm_file_id = entry->drm_file_id;
+        memset(entry, 0, sizeof(*entry));
+        spin_unlock(&Syscall_state.fd_lock);
+        DRM_close_file(drm_file_id);
+        return 0;
+    }
+
+    if (entry_type == SYSCALL_FD_TYPE_DMABUF)
+    {
+        uint32_t dmabuf_id = entry->drm_dmabuf_id;
+        memset(entry, 0, sizeof(*entry));
+        spin_unlock(&Syscall_state.fd_lock);
+        DRM_dmabuf_unref_fd(dmabuf_id);
+        return 0;
+    }
+
+    if (entry_type == SYSCALL_FD_TYPE_AUDIO_DSP)
+    {
+        memset(entry, 0, sizeof(*entry));
+        spin_unlock(&Syscall_state.fd_lock);
+        HDA_dsp_close(owner_pid);
+        return 0;
+    }
+
+    if (entry_type != SYSCALL_FD_TYPE_REGULAR)
+    {
+        spin_unlock(&Syscall_state.fd_lock);
+        return (uint64_t) -1;
+    }
+
+    bool flush_needed = entry->can_write && entry->dirty;
+    bool flush_ok = true;
+    char flush_path[SYSCALL_USER_CSTR_MAX];
+    size_t flush_size = 0;
+    const uint8_t* flush_data = NULL;
     if (flush_needed)
     {
         memcpy(flush_path, entry->path, sizeof(flush_path));
@@ -811,6 +940,16 @@ static uint64_t Syscall_handle_close(uint32_t cpu_index, const syscall_frame_t* 
         return 0;
     }
     spin_unlock(&Syscall_state.fd_lock);
+
+    if (!Syscall_state.fs_lock_ready)
+    {
+        spin_lock(&Syscall_state.fd_lock);
+        entry = &Syscall_state.fds[(uint32_t) fd];
+        if (entry->used && entry->owner_pid == owner_pid && entry->type == SYSCALL_FD_TYPE_REGULAR)
+            entry->io_busy = false;
+        spin_unlock(&Syscall_state.fd_lock);
+        return (uint64_t) -1;
+    }
 
     spin_lock(&Syscall_state.fs_lock);
     ext4_fs_t* fs = ext4_get_active();
@@ -858,7 +997,9 @@ static uint64_t Syscall_handle_read(uint32_t cpu_index, const syscall_frame_t* f
 
     spin_lock(&Syscall_state.fd_lock);
     syscall_file_desc_t* entry = &Syscall_state.fds[(uint32_t) fd];
-    if (!entry->used || entry->owner_pid != owner_pid || !entry->can_read || entry->io_busy)
+    if (!entry->used || entry->owner_pid != owner_pid ||
+        entry->type != SYSCALL_FD_TYPE_REGULAR ||
+        !entry->can_read || entry->io_busy)
     {
         spin_unlock(&Syscall_state.fd_lock);
         return (uint64_t) -1;
@@ -902,6 +1043,57 @@ static uint64_t Syscall_handle_write(uint32_t cpu_index, const syscall_frame_t* 
     spin_lock(&Syscall_state.fd_lock);
     syscall_file_desc_t* entry = &Syscall_state.fds[(uint32_t) fd];
     if (!entry->used || entry->owner_pid != owner_pid || !entry->can_write || entry->io_busy)
+    {
+        spin_unlock(&Syscall_state.fd_lock);
+        return (uint64_t) -1;
+    }
+
+    uint32_t entry_type = entry->type;
+    if (entry_type == SYSCALL_FD_TYPE_AUDIO_DSP)
+    {
+        entry->io_busy = true;
+        spin_unlock(&Syscall_state.fd_lock);
+
+        size_t copied_total = 0;
+        uint8_t chunk_buf[1024];
+        while (copied_total < len)
+        {
+            size_t chunk = len - copied_total;
+            if (chunk > sizeof(chunk_buf))
+                chunk = sizeof(chunk_buf);
+
+            if (!Syscall_copy_from_user(chunk_buf, (const uint8_t*) user_buf + copied_total, chunk))
+            {
+                spin_lock(&Syscall_state.fd_lock);
+                entry = &Syscall_state.fds[(uint32_t) fd];
+                if (entry->used && entry->owner_pid == owner_pid && entry->type == SYSCALL_FD_TYPE_AUDIO_DSP)
+                    entry->io_busy = false;
+                spin_unlock(&Syscall_state.fd_lock);
+                return (copied_total > 0) ? (uint64_t) copied_total : (uint64_t) -1;
+            }
+
+            size_t pushed = HDA_dsp_write(chunk_buf, chunk);
+            copied_total += pushed;
+            if (pushed < chunk)
+            {
+                spin_lock(&Syscall_state.fd_lock);
+                entry = &Syscall_state.fds[(uint32_t) fd];
+                if (entry->used && entry->owner_pid == owner_pid && entry->type == SYSCALL_FD_TYPE_AUDIO_DSP)
+                    entry->io_busy = false;
+                spin_unlock(&Syscall_state.fd_lock);
+                return (copied_total > 0) ? (uint64_t) copied_total : (uint64_t) -1;
+            }
+        }
+
+        spin_lock(&Syscall_state.fd_lock);
+        entry = &Syscall_state.fds[(uint32_t) fd];
+        if (entry->used && entry->owner_pid == owner_pid && entry->type == SYSCALL_FD_TYPE_AUDIO_DSP)
+            entry->io_busy = false;
+        spin_unlock(&Syscall_state.fd_lock);
+        return (uint64_t) copied_total;
+    }
+
+    if (entry_type != SYSCALL_FD_TYPE_REGULAR)
     {
         spin_unlock(&Syscall_state.fd_lock);
         return (uint64_t) -1;
@@ -1011,6 +1203,355 @@ static uint64_t Syscall_handle_lseek(uint32_t cpu_index, const syscall_frame_t* 
     entry->offset = new_pos;
     spin_unlock(&Syscall_state.fd_lock);
     return (uint64_t) new_pos;
+}
+
+static uint64_t Syscall_handle_audio_ioctl(unsigned long request, void* user_arg)
+{
+    switch (request)
+    {
+        case SNDCTL_DSP_RESET:
+        case SNDCTL_DSP_SYNC:
+            return HDA_dsp_ioctl(request, NULL) ? 0 : (uint64_t) -1;
+
+        case SNDCTL_DSP_SPEED:
+        case SNDCTL_DSP_STEREO:
+        case SNDCTL_DSP_SETFMT:
+        case SNDCTL_DSP_SETFRAGMENT:
+        case SNDCTL_DSP_GETFMTS:
+        {
+            if (!user_arg)
+                return (uint64_t) -1;
+
+            int32_t value = 0;
+            if (!Syscall_copy_from_user(&value, user_arg, sizeof(value)))
+                return (uint64_t) -1;
+            if (!HDA_dsp_ioctl(request, &value))
+                return (uint64_t) -1;
+            if (!Syscall_copy_to_user(user_arg, &value, sizeof(value)))
+                return (uint64_t) -1;
+            return 0;
+        }
+
+        default:
+            return (uint64_t) -1;
+    }
+}
+
+static uint64_t Syscall_handle_ioctl(uint32_t cpu_index, const syscall_frame_t* frame)
+{
+    if (!frame || !Syscall_state.fd_lock_ready)
+        return (uint64_t) -1;
+
+    int64_t fd = (int64_t) frame->rdi;
+    unsigned long request = (unsigned long) ((uint32_t) frame->rsi);
+    void* user_arg = (void*) frame->rdx;
+    uint32_t owner_pid = Syscall_proc_current_pid(cpu_index, frame);
+    if (fd < 0 || (uint64_t) fd >= SYSCALL_MAX_OPEN_FILES || owner_pid == 0)
+        return (uint64_t) -1;
+
+    uint32_t fd_type = SYSCALL_FD_TYPE_NONE;
+    uint32_t drm_file_id = 0;
+    spin_lock(&Syscall_state.fd_lock);
+    syscall_file_desc_t* entry = &Syscall_state.fds[(uint32_t) fd];
+    if (!entry->used || entry->owner_pid != owner_pid || entry->io_busy)
+    {
+        spin_unlock(&Syscall_state.fd_lock);
+        return (uint64_t) -1;
+    }
+
+    fd_type = entry->type;
+    drm_file_id = entry->drm_file_id;
+    spin_unlock(&Syscall_state.fd_lock);
+
+    if (fd_type == SYSCALL_FD_TYPE_AUDIO_DSP)
+        return Syscall_handle_audio_ioctl(request, user_arg);
+
+    if (fd_type != SYSCALL_FD_TYPE_DRM_CARD || drm_file_id == 0)
+        return (uint64_t) -1;
+
+    switch (request)
+    {
+        case DRM_IOCTL_MODE_GET_RESOURCES:
+        {
+            if (!user_arg)
+                return (uint64_t) -1;
+
+            drm_mode_get_resources_t io;
+            if (!Syscall_copy_from_user(&io, user_arg, sizeof(io)))
+                return (uint64_t) -1;
+            if (!DRM_get_resources(drm_file_id, &io))
+                return (uint64_t) -1;
+
+            if (io.crtc_id_ptr != 0)
+            {
+                uint32_t crtc_id = DRM_CRTC_ID;
+                if (!Syscall_copy_to_user((void*) (uintptr_t) io.crtc_id_ptr, &crtc_id, sizeof(crtc_id)))
+                    return (uint64_t) -1;
+            }
+            if (io.connector_id_ptr != 0)
+            {
+                uint32_t connector_id = DRM_CONNECTOR_ID;
+                if (!Syscall_copy_to_user((void*) (uintptr_t) io.connector_id_ptr, &connector_id, sizeof(connector_id)))
+                    return (uint64_t) -1;
+            }
+            if (io.plane_id_ptr != 0)
+            {
+                uint32_t plane_id = DRM_PLANE_ID;
+                if (!Syscall_copy_to_user((void*) (uintptr_t) io.plane_id_ptr, &plane_id, sizeof(plane_id)))
+                    return (uint64_t) -1;
+            }
+
+            return Syscall_copy_to_user(user_arg, &io, sizeof(io)) ? 0 : (uint64_t) -1;
+        }
+
+        case DRM_IOCTL_MODE_GET_CONNECTOR:
+        {
+            if (!user_arg)
+                return (uint64_t) -1;
+
+            drm_mode_get_connector_t io;
+            if (!Syscall_copy_from_user(&io, user_arg, sizeof(io)))
+                return (uint64_t) -1;
+
+            uint32_t user_modes_capacity = io.count_modes;
+            uint32_t kernel_modes_capacity = user_modes_capacity;
+            if (kernel_modes_capacity > DRM_MAX_CONNECTOR_MODES)
+                kernel_modes_capacity = DRM_MAX_CONNECTOR_MODES;
+
+            drm_mode_modeinfo_t modes[DRM_MAX_CONNECTOR_MODES];
+            memset(modes, 0, sizeof(modes));
+            uint32_t modes_written = 0;
+            if (!DRM_get_connector(drm_file_id,
+                                   &io,
+                                   (kernel_modes_capacity > 0) ? modes : NULL,
+                                   kernel_modes_capacity,
+                                   &modes_written))
+            {
+                return (uint64_t) -1;
+            }
+
+            if (io.modes_ptr != 0 && user_modes_capacity > 0 && modes_written > 0)
+            {
+                uint32_t to_copy = modes_written;
+                if (to_copy > kernel_modes_capacity)
+                    to_copy = kernel_modes_capacity;
+                if (to_copy > user_modes_capacity)
+                    to_copy = user_modes_capacity;
+
+                if (!Syscall_copy_to_user((void*) (uintptr_t) io.modes_ptr,
+                                          modes,
+                                          (size_t) to_copy * sizeof(modes[0])))
+                    return (uint64_t) -1;
+            }
+
+            return Syscall_copy_to_user(user_arg, &io, sizeof(io)) ? 0 : (uint64_t) -1;
+        }
+
+        case DRM_IOCTL_MODE_GET_CRTC:
+        {
+            if (!user_arg)
+                return (uint64_t) -1;
+
+            drm_mode_get_crtc_t io;
+            if (!Syscall_copy_from_user(&io, user_arg, sizeof(io)))
+                return (uint64_t) -1;
+            if (!DRM_get_crtc(drm_file_id, &io))
+                return (uint64_t) -1;
+            return Syscall_copy_to_user(user_arg, &io, sizeof(io)) ? 0 : (uint64_t) -1;
+        }
+
+        case DRM_IOCTL_MODE_GET_PLANE:
+        {
+            if (!user_arg)
+                return (uint64_t) -1;
+
+            drm_mode_get_plane_t io;
+            if (!Syscall_copy_from_user(&io, user_arg, sizeof(io)))
+                return (uint64_t) -1;
+
+            uint32_t formats_capacity = io.count_format_types;
+            uint32_t format = DRM_FORMAT_XRGB8888;
+            uint32_t formats_written = 0;
+            if (!DRM_get_plane(drm_file_id,
+                               &io,
+                               (formats_capacity > 0) ? &format : NULL,
+                               (formats_capacity > 0) ? 1U : 0U,
+                               &formats_written))
+            {
+                return (uint64_t) -1;
+            }
+
+            if (io.format_type_ptr != 0 && formats_capacity > 0 && formats_written > 0)
+            {
+                if (!Syscall_copy_to_user((void*) (uintptr_t) io.format_type_ptr, &format, sizeof(format)))
+                    return (uint64_t) -1;
+            }
+
+            return Syscall_copy_to_user(user_arg, &io, sizeof(io)) ? 0 : (uint64_t) -1;
+        }
+
+        case DRM_IOCTL_MODE_CREATE_DUMB:
+        {
+            if (!user_arg)
+                return (uint64_t) -1;
+
+            drm_mode_create_dumb_t io;
+            if (!Syscall_copy_from_user(&io, user_arg, sizeof(io)))
+                return (uint64_t) -1;
+            if (!DRM_create_dumb(drm_file_id, &io))
+                return (uint64_t) -1;
+            return Syscall_copy_to_user(user_arg, &io, sizeof(io)) ? 0 : (uint64_t) -1;
+        }
+
+        case DRM_IOCTL_MODE_DESTROY_DUMB:
+        {
+            if (!user_arg)
+                return (uint64_t) -1;
+
+            drm_mode_destroy_dumb_t io;
+            if (!Syscall_copy_from_user(&io, user_arg, sizeof(io)))
+                return (uint64_t) -1;
+            return DRM_destroy_dumb(drm_file_id, io.handle) ? 0 : (uint64_t) -1;
+        }
+
+        case DRM_IOCTL_MODE_CREATE_BLOB:
+        {
+            if (!user_arg)
+                return (uint64_t) -1;
+
+            drm_mode_create_blob_t io;
+            if (!Syscall_copy_from_user(&io, user_arg, sizeof(io)))
+                return (uint64_t) -1;
+            if (io.length != sizeof(drm_mode_modeinfo_t) || io.data == 0)
+                return (uint64_t) -1;
+
+            drm_mode_modeinfo_t mode;
+            if (!Syscall_copy_from_user(&mode, (const void*) (uintptr_t) io.data, sizeof(mode)))
+                return (uint64_t) -1;
+
+            uint32_t blob_id = 0;
+            if (!DRM_create_mode_blob(drm_file_id, &mode, sizeof(mode), &blob_id))
+                return (uint64_t) -1;
+
+            io.blob_id = blob_id;
+            return Syscall_copy_to_user(user_arg, &io, sizeof(io)) ? 0 : (uint64_t) -1;
+        }
+
+        case DRM_IOCTL_MODE_DESTROY_BLOB:
+        {
+            if (!user_arg)
+                return (uint64_t) -1;
+
+            drm_mode_destroy_blob_t io;
+            if (!Syscall_copy_from_user(&io, user_arg, sizeof(io)))
+                return (uint64_t) -1;
+            return DRM_destroy_mode_blob(drm_file_id, io.blob_id) ? 0 : (uint64_t) -1;
+        }
+
+        case DRM_IOCTL_PRIME_HANDLE_TO_FD:
+        {
+            if (!user_arg)
+                return (uint64_t) -1;
+
+            drm_prime_handle_t io;
+            if (!Syscall_copy_from_user(&io, user_arg, sizeof(io)))
+                return (uint64_t) -1;
+
+            uint32_t dmabuf_id = 0;
+            if (!DRM_prime_handle_to_dmabuf(drm_file_id, io.handle, &dmabuf_id))
+                return (uint64_t) -1;
+            if (!DRM_dmabuf_ref_fd(dmabuf_id))
+                return (uint64_t) -1;
+
+            int32_t dma_fd = -1;
+            spin_lock(&Syscall_state.fd_lock);
+            dma_fd = Syscall_fd_alloc_locked();
+            if (dma_fd >= 0)
+            {
+                syscall_file_desc_t* dma_entry = &Syscall_state.fds[(uint32_t) dma_fd];
+                memset(dma_entry, 0, sizeof(*dma_entry));
+                dma_entry->used = true;
+                dma_entry->type = SYSCALL_FD_TYPE_DMABUF;
+                dma_entry->owner_pid = owner_pid;
+                dma_entry->drm_dmabuf_id = dmabuf_id;
+                dma_entry->can_read = true;
+                dma_entry->can_write = true;
+            }
+            spin_unlock(&Syscall_state.fd_lock);
+
+            if (dma_fd < 0)
+            {
+                DRM_dmabuf_unref_fd(dmabuf_id);
+                return (uint64_t) -1;
+            }
+
+            io.fd = dma_fd;
+            if (!Syscall_copy_to_user(user_arg, &io, sizeof(io)))
+            {
+                spin_lock(&Syscall_state.fd_lock);
+                syscall_file_desc_t* dma_entry = &Syscall_state.fds[(uint32_t) dma_fd];
+                if (dma_entry->used && dma_entry->owner_pid == owner_pid &&
+                    dma_entry->type == SYSCALL_FD_TYPE_DMABUF &&
+                    dma_entry->drm_dmabuf_id == dmabuf_id)
+                {
+                    memset(dma_entry, 0, sizeof(*dma_entry));
+                }
+                spin_unlock(&Syscall_state.fd_lock);
+                DRM_dmabuf_unref_fd(dmabuf_id);
+                return (uint64_t) -1;
+            }
+            return 0;
+        }
+
+        case DRM_IOCTL_PRIME_FD_TO_HANDLE:
+        {
+            if (!user_arg)
+                return (uint64_t) -1;
+
+            drm_prime_handle_t io;
+            if (!Syscall_copy_from_user(&io, user_arg, sizeof(io)))
+                return (uint64_t) -1;
+
+            int32_t dma_fd = io.fd;
+            if (dma_fd < 0 || (uint64_t) dma_fd >= SYSCALL_MAX_OPEN_FILES)
+                return (uint64_t) -1;
+
+            uint32_t dmabuf_id = 0;
+            spin_lock(&Syscall_state.fd_lock);
+            syscall_file_desc_t* dma_entry = &Syscall_state.fds[(uint32_t) dma_fd];
+            if (dma_entry->used && dma_entry->owner_pid == owner_pid &&
+                dma_entry->type == SYSCALL_FD_TYPE_DMABUF)
+            {
+                dmabuf_id = dma_entry->drm_dmabuf_id;
+            }
+            spin_unlock(&Syscall_state.fd_lock);
+
+            if (dmabuf_id == 0)
+                return (uint64_t) -1;
+
+            uint32_t handle = 0;
+            if (!DRM_prime_dmabuf_to_handle(drm_file_id, dmabuf_id, &handle))
+                return (uint64_t) -1;
+
+            io.handle = handle;
+            return Syscall_copy_to_user(user_arg, &io, sizeof(io)) ? 0 : (uint64_t) -1;
+        }
+
+        case DRM_IOCTL_MODE_ATOMIC:
+        {
+            if (!user_arg)
+                return (uint64_t) -1;
+
+            drm_mode_atomic_req_t io;
+            if (!Syscall_copy_from_user(&io, user_arg, sizeof(io)))
+                return (uint64_t) -1;
+
+            return DRM_atomic_commit(drm_file_id, &io) ? 0 : (uint64_t) -1;
+        }
+
+        default:
+            return (uint64_t) -1;
+    }
 }
 
 static inline uintptr_t Syscall_read_cr3_phys(void)
@@ -1211,6 +1752,12 @@ static void Syscall_free_user_pt(uintptr_t pt_phys)
         if (page_phys == 0)
             continue;
 
+        if ((entry & SYSCALL_PTE_DMABUF) != 0)
+        {
+            (void) DRM_dmabuf_unref_map_pages_by_phys(page_phys, 1U);
+            continue;
+        }
+
         if ((entry & SYSCALL_PTE_COW) != 0)
         {
             bool ref_zero = false;
@@ -1309,6 +1856,18 @@ static bool Syscall_clone_user_pt(uintptr_t src_pt_phys, uintptr_t* out_dst_pt_p
         uintptr_t src_page_phys = src_entry & FRAME;
         if (src_page_phys == 0)
         {
+            dst_pt->entries[i] = src_entry;
+            continue;
+        }
+
+        if ((src_entry & SYSCALL_PTE_DMABUF) != 0)
+        {
+            if (!DRM_dmabuf_ref_map_pages_by_phys(src_page_phys, 1U))
+            {
+                Syscall_free_user_pt(dst_pt_phys);
+                return false;
+            }
+
             dst_pt->entries[i] = src_entry;
             continue;
         }
@@ -1496,7 +2055,7 @@ static bool Syscall_map_user_range_current(uintptr_t base, size_t size)
                 return false;
 
             VMM_map_user_page(page, new_page);
-            memset((void*) page, 0, SYSCALL_PAGE_SIZE);
+            memset((void*) P2V(new_page), 0, SYSCALL_PAGE_SIZE);
         }
         else if (!VMM_is_user_accessible(page))
             return false;
@@ -1505,11 +2064,252 @@ static bool Syscall_map_user_range_current(uintptr_t base, size_t size)
     return true;
 }
 
+static bool Syscall_zero_user_phys(uintptr_t user_dst, size_t size)
+{
+    if (size == 0)
+        return true;
+    if (!Syscall_user_range_in_bounds(user_dst, size))
+        return false;
+
+    size_t done = 0;
+    while (done < size)
+    {
+        uintptr_t cur = user_dst + done;
+        uintptr_t phys = 0;
+        if (!VMM_virt_to_phys(cur, &phys))
+            return false;
+
+        size_t page_rem = SYSCALL_PAGE_SIZE - (size_t) (cur & (SYSCALL_PAGE_SIZE - 1U));
+        size_t chunk = size - done;
+        if (chunk > page_rem)
+            chunk = page_rem;
+
+        memset((void*) P2V(phys), 0, chunk);
+        done += chunk;
+    }
+
+    return true;
+}
+
+static bool Syscall_copy_into_user_phys(uintptr_t user_dst, const void* src, size_t size)
+{
+    if (size == 0)
+        return true;
+    if (!src || !Syscall_user_range_in_bounds(user_dst, size))
+        return false;
+
+    size_t done = 0;
+    while (done < size)
+    {
+        uintptr_t cur = user_dst + done;
+        uintptr_t phys = 0;
+        if (!VMM_virt_to_phys(cur, &phys))
+            return false;
+
+        size_t page_rem = SYSCALL_PAGE_SIZE - (size_t) (cur & (SYSCALL_PAGE_SIZE - 1U));
+        size_t chunk = size - done;
+        if (chunk > page_rem)
+            chunk = page_rem;
+
+        memcpy((void*) P2V(phys), (const uint8_t*) src + done, chunk);
+        done += chunk;
+    }
+
+    return true;
+}
+
+typedef struct syscall_exec_segment
+{
+    uintptr_t start;
+    uintptr_t end;
+    bool writable;
+    bool executable;
+} syscall_exec_segment_t;
+
+typedef struct syscall_exec_module
+{
+    char path[SYSCALL_USER_CSTR_MAX];
+    char soname[SYSCALL_USER_CSTR_MAX];
+    uint8_t* image;
+    size_t image_size;
+    uintptr_t load_bias;
+    uintptr_t map_start;
+    uintptr_t map_end;
+    uintptr_t entry;
+    uintptr_t tls_vaddr;
+    size_t tls_filesz;
+    size_t tls_memsz;
+    size_t tls_align;
+    size_t tls_rounded_size;
+    const char* strtab;
+    size_t strsz;
+    const syscall_elf64_sym_t* symtab;
+    size_t sym_count;
+    const syscall_elf64_rela_t* rela;
+    size_t rela_count;
+    const syscall_elf64_rela_t* plt_rela;
+    size_t plt_rela_count;
+    uint32_t needed_offsets[SYSCALL_EXEC_MAX_NEEDED];
+    size_t needed_count;
+    syscall_exec_segment_t segments[SYSCALL_EXEC_MAX_SEGMENTS];
+    size_t segment_count;
+} syscall_exec_module_t;
+
+static bool Syscall_exec_read_file(const char* path, uint8_t** out_data, size_t* out_size)
+{
+    if (!path || !out_data || !out_size || !Syscall_state.fs_lock_ready)
+        return false;
+
+    *out_data = NULL;
+    *out_size = 0;
+
+    spin_lock(&Syscall_state.fs_lock);
+    ext4_fs_t* fs = ext4_get_active();
+    if (!fs)
+    {
+        spin_unlock(&Syscall_state.fs_lock);
+        return false;
+    }
+
+    bool ok = ext4_read_file(fs, path, out_data, out_size);
+    spin_unlock(&Syscall_state.fs_lock);
+    return ok;
+}
+
+static bool Syscall_exec_module_addr_range_valid(const syscall_exec_module_t* module,
+                                                 uintptr_t addr,
+                                                 size_t size)
+{
+    if (!module || size == 0)
+        return false;
+    if (addr < module->map_start)
+        return false;
+    uintptr_t end = addr + (uintptr_t) size;
+    if (end < addr || end > module->map_end)
+        return false;
+    return true;
+}
+
+static bool Syscall_exec_has_nul_terminator(const char* str, size_t max_len)
+{
+    if (!str)
+        return false;
+
+    for (size_t i = 0; i < max_len; i++)
+    {
+        if (str[i] == '\0')
+            return true;
+    }
+    return false;
+}
+
+static const char* Syscall_exec_dynstr_at(const syscall_exec_module_t* module, uint32_t offset)
+{
+    if (!module || !module->strtab || module->strsz == 0U)
+        return NULL;
+    if ((size_t) offset >= module->strsz)
+        return NULL;
+
+    const char* str = module->strtab + offset;
+    size_t max_len = module->strsz - (size_t) offset;
+    if (!Syscall_exec_has_nul_terminator(str, max_len))
+        return NULL;
+    return str;
+}
+
+static bool Syscall_exec_build_needed_path(const char* needed_name, char* out_path, size_t out_size)
+{
+    if (!needed_name || !out_path || out_size == 0)
+        return false;
+
+    if (needed_name[0] == '/')
+    {
+        size_t len = strlen(needed_name);
+        if (len + 1U > out_size)
+            return false;
+        memcpy(out_path, needed_name, len + 1U);
+        return true;
+    }
+
+    static const char lib_prefix[] = "/lib/";
+    size_t prefix_len = sizeof(lib_prefix) - 1U;
+    size_t name_len = strlen(needed_name);
+    if (prefix_len + name_len + 1U > out_size)
+        return false;
+
+    memcpy(out_path, lib_prefix, prefix_len);
+    memcpy(out_path + prefix_len, needed_name, name_len + 1U);
+    return true;
+}
+
+static bool Syscall_exec_vaddr_to_file_ptr(const uint8_t* elf_image,
+                                           size_t elf_size,
+                                           const syscall_elf64_ehdr_t* ehdr,
+                                           uint64_t vaddr,
+                                           size_t size,
+                                           const void** out_ptr)
+{
+    if (!elf_image || !ehdr || !out_ptr || size == 0U)
+        return false;
+
+    for (uint16_t i = 0; i < ehdr->e_phnum; i++)
+    {
+        const uint8_t* ph_ptr = elf_image + ehdr->e_phoff + ((uint64_t) i * ehdr->e_phentsize);
+        const syscall_elf64_phdr_t* phdr = (const syscall_elf64_phdr_t*) ph_ptr;
+        if (phdr->p_type != SYSCALL_ELF_PT_LOAD || phdr->p_filesz == 0U)
+            continue;
+
+        uint64_t seg_start = phdr->p_vaddr;
+        uint64_t seg_end = seg_start + phdr->p_filesz;
+        if (seg_end < seg_start)
+            return false;
+        if (vaddr < seg_start || vaddr >= seg_end)
+            continue;
+
+        uint64_t rel = vaddr - seg_start;
+        if (rel > UINT64_MAX - size)
+            return false;
+        uint64_t rel_end = rel + (uint64_t) size;
+        if (rel_end > phdr->p_filesz)
+            continue;
+        if (phdr->p_offset > elf_size)
+            return false;
+        if (rel_end > (uint64_t) elf_size - phdr->p_offset)
+            return false;
+
+        *out_ptr = elf_image + phdr->p_offset + (size_t) rel;
+        return true;
+    }
+
+    return false;
+}
+
+static bool Syscall_exec_record_segment(syscall_exec_module_t* module,
+                                        uintptr_t seg_start,
+                                        uintptr_t seg_end,
+                                        bool writable,
+                                        bool executable)
+{
+    if (!module || seg_end <= seg_start)
+        return false;
+    if (module->segment_count >= SYSCALL_EXEC_MAX_SEGMENTS)
+        return false;
+
+    syscall_exec_segment_t* seg = &module->segments[module->segment_count++];
+    seg->start = seg_start;
+    seg->end = seg_end;
+    seg->writable = writable;
+    seg->executable = executable;
+    return true;
+}
+
 static bool Syscall_load_elf_segment_current(const uint8_t* elf_image,
                                              size_t elf_size,
-                                             const syscall_elf64_phdr_t* phdr)
+                                             const syscall_elf64_phdr_t* phdr,
+                                             uintptr_t load_bias,
+                                             syscall_exec_module_t* module)
 {
-    if (!phdr || phdr->p_type != 1U)
+    if (!phdr || phdr->p_type != SYSCALL_ELF_PT_LOAD || !module)
         return false;
 
     if (phdr->p_memsz == 0)
@@ -1521,70 +2321,63 @@ static bool Syscall_load_elf_segment_current(const uint8_t* elf_image,
         return false;
     if (phdr->p_filesz > (uint64_t) elf_size - phdr->p_offset)
         return false;
-    if (!Syscall_is_canonical_low(phdr->p_vaddr) || phdr->p_vaddr < SYSCALL_USER_VADDR_MIN)
+
+    uintptr_t seg_base = load_bias + (uintptr_t) phdr->p_vaddr;
+    if (seg_base < load_bias)
+        return false;
+    if (!Syscall_is_canonical_low(seg_base) || seg_base < SYSCALL_USER_VADDR_MIN)
         return false;
 
-    uint64_t seg_end = phdr->p_vaddr + phdr->p_memsz;
-    if (seg_end < phdr->p_vaddr || !Syscall_is_canonical_low(seg_end - 1U))
+    uintptr_t seg_end = seg_base + (uintptr_t) phdr->p_memsz;
+    if (seg_end < seg_base || !Syscall_is_canonical_low(seg_end - 1U))
         return false;
 
-    if (!Syscall_map_user_range_current((uintptr_t) phdr->p_vaddr, (size_t) phdr->p_memsz))
+    uintptr_t page_start = Syscall_align_down_page(seg_base);
+    uintptr_t page_end = Syscall_align_up_page(seg_end);
+    if (page_end <= page_start)
         return false;
 
-    memset((void*) (uintptr_t) phdr->p_vaddr, 0, (size_t) phdr->p_memsz);
-    if (phdr->p_filesz != 0)
-    {
-        memcpy((void*) (uintptr_t) phdr->p_vaddr,
-               elf_image + phdr->p_offset,
-               (size_t) phdr->p_filesz);
-    }
-
-    uintptr_t start = (uintptr_t) phdr->p_vaddr & ~(uintptr_t) (SYSCALL_PAGE_SIZE - 1U);
-    uintptr_t end = Syscall_align_up_page((uintptr_t) phdr->p_vaddr + (uintptr_t) phdr->p_memsz);
     bool writable = (phdr->p_flags & SYSCALL_ELF_PF_W) != 0;
     bool executable = (phdr->p_flags & SYSCALL_ELF_PF_X) != 0;
     if (writable && executable)
         return false;
-    uintptr_t set_bits = writable ? WRITABLE : 0;
-    uintptr_t clear_bits = writable ? 0 : WRITABLE;
-    if (!executable)
-        set_bits |= NO_EXECUTE;
-    else
-        clear_bits |= NO_EXECUTE;
 
-    for (uintptr_t page = start; page < end; page += SYSCALL_PAGE_SIZE)
-    {
-        if (!VMM_update_page_flags(page, set_bits, clear_bits))
-            return false;
-    }
+    if (!Syscall_map_user_range_current(seg_base, (size_t) phdr->p_memsz))
+        return false;
+    if (!Syscall_zero_user_phys(seg_base, (size_t) phdr->p_memsz))
+        return false;
+    if (phdr->p_filesz != 0 &&
+        !Syscall_copy_into_user_phys(seg_base, elf_image + phdr->p_offset, (size_t) phdr->p_filesz))
+        return false;
 
-    return true;
+    return Syscall_exec_record_segment(module, page_start, page_end, writable, executable);
 }
 
-static bool Syscall_load_elf_current(const char* path, uintptr_t* out_entry, uintptr_t* out_rsp)
+static bool Syscall_exec_load_module_current(const char* path,
+                                             bool is_main,
+                                             uintptr_t* io_dyn_cursor,
+                                             syscall_exec_module_t* modules,
+                                             size_t* io_module_count)
 {
-    if (!path || !out_entry || !out_rsp)
+    if (!path || !io_dyn_cursor || !modules || !io_module_count)
         return false;
-
-    if (!Syscall_state.fs_lock_ready)
+    if (*io_module_count >= SYSCALL_EXEC_MAX_MODULES)
         return false;
-
-    spin_lock(&Syscall_state.fs_lock);
-    ext4_fs_t* fs = ext4_get_active();
-    if (!fs)
-    {
-        spin_unlock(&Syscall_state.fs_lock);
-        return false;
-    }
 
     uint8_t* elf_image = NULL;
     size_t elf_size = 0;
-    bool read_ok = ext4_read_file(fs, path, &elf_image, &elf_size);
-    spin_unlock(&Syscall_state.fs_lock);
-    if (!read_ok)
+    if (!Syscall_exec_read_file(path, &elf_image, &elf_size))
+    {
+        kdebug_printf("[USER] exec reject '%s': read failed\n", path);
         return false;
+    }
+
     if (!elf_image || elf_size < sizeof(syscall_elf64_ehdr_t) || elf_size > SYSCALL_ELF_MAX_SIZE)
     {
+        kdebug_printf("[USER] exec reject '%s': ELF size=%llu (max=%llu)\n",
+                      path,
+                      (unsigned long long) elf_size,
+                      (unsigned long long) SYSCALL_ELF_MAX_SIZE);
         if (elf_image)
             kfree(elf_image);
         return false;
@@ -1597,15 +2390,17 @@ static bool Syscall_load_elf_current(const char* path, uintptr_t* out_entry, uin
         ehdr->e_ident[3] != 'F' ||
         ehdr->e_ident[4] != 2U ||
         ehdr->e_ident[5] != 1U ||
-        ehdr->e_type != 2U ||
+        (ehdr->e_type != SYSCALL_ELF_TYPE_EXEC && ehdr->e_type != SYSCALL_ELF_TYPE_DYN) ||
         ehdr->e_machine != 0x3EU)
     {
+        kdebug_printf("[USER] exec reject '%s': invalid ELF header\n", path);
         kfree(elf_image);
         return false;
     }
 
-    if (!Syscall_is_canonical_low(ehdr->e_entry) || ehdr->e_entry < SYSCALL_USER_VADDR_MIN)
+    if (!is_main && ehdr->e_type != SYSCALL_ELF_TYPE_DYN)
     {
+        kdebug_printf("[USER] exec reject '%s': dependency must be ET_DYN\n", path);
         kfree(elf_image);
         return false;
     }
@@ -1614,6 +2409,7 @@ static bool Syscall_load_elf_current(const char* path, uintptr_t* out_entry, uin
         ehdr->e_phentsize < sizeof(syscall_elf64_phdr_t) ||
         ehdr->e_phoff > elf_size)
     {
+        kdebug_printf("[USER] exec reject '%s': invalid program header table\n", path);
         kfree(elf_image);
         return false;
     }
@@ -1621,43 +2417,965 @@ static bool Syscall_load_elf_current(const char* path, uintptr_t* out_entry, uin
     uint64_t ph_table_size = (uint64_t) ehdr->e_phnum * (uint64_t) ehdr->e_phentsize;
     if (ph_table_size > (uint64_t) elf_size - ehdr->e_phoff)
     {
+        kdebug_printf("[USER] exec reject '%s': program headers out of bounds\n", path);
         kfree(elf_image);
         return false;
     }
 
     bool has_load = false;
+    uintptr_t min_load_vaddr = UINTPTR_MAX;
+    uintptr_t max_load_vaddr = 0;
     for (uint16_t i = 0; i < ehdr->e_phnum; i++)
     {
         const uint8_t* ph_ptr = elf_image + ehdr->e_phoff + ((uint64_t) i * ehdr->e_phentsize);
         const syscall_elf64_phdr_t* phdr = (const syscall_elf64_phdr_t*) ph_ptr;
-        if (phdr->p_type != 1U)
+        if (phdr->p_type != SYSCALL_ELF_PT_LOAD)
             continue;
 
         has_load = true;
-        if (!Syscall_load_elf_segment_current(elf_image, elf_size, phdr))
+        if (phdr->p_memsz == 0)
+            continue;
+
+        uintptr_t seg_start = (uintptr_t) phdr->p_vaddr;
+        uintptr_t seg_end = seg_start + (uintptr_t) phdr->p_memsz;
+        if (seg_end < seg_start)
         {
+            kdebug_printf("[USER] exec reject '%s': PT_LOAD #%u overflow\n",
+                          path,
+                          (unsigned int) i);
+            kfree(elf_image);
+            return false;
+        }
+
+        uintptr_t seg_page_start = Syscall_align_down_page(seg_start);
+        uintptr_t seg_page_end = Syscall_align_up_page(seg_end);
+        if (seg_page_end <= seg_page_start)
+        {
+            kdebug_printf("[USER] exec reject '%s': PT_LOAD #%u page range invalid\n",
+                          path,
+                          (unsigned int) i);
+            kfree(elf_image);
+            return false;
+        }
+
+        if (seg_page_start < min_load_vaddr)
+            min_load_vaddr = seg_page_start;
+        if (seg_page_end > max_load_vaddr)
+            max_load_vaddr = seg_page_end;
+    }
+
+    if (!has_load || min_load_vaddr == UINTPTR_MAX || max_load_vaddr <= min_load_vaddr)
+    {
+        kdebug_printf("[USER] exec reject '%s': no PT_LOAD segments\n", path);
+        kfree(elf_image);
+        return false;
+    }
+
+    uintptr_t load_bias = 0;
+    uintptr_t elf_entry = 0;
+    if (ehdr->e_type == SYSCALL_ELF_TYPE_EXEC)
+    {
+        if (!Syscall_is_canonical_low(ehdr->e_entry) || ehdr->e_entry < SYSCALL_USER_VADDR_MIN)
+        {
+            kdebug_printf("[USER] exec reject '%s': entry out of user range (0x%llX)\n",
+                          path,
+                          (unsigned long long) ehdr->e_entry);
+            kfree(elf_image);
+            return false;
+        }
+        elf_entry = (uintptr_t) ehdr->e_entry;
+    }
+    else if (is_main)
+    {
+        uintptr_t dyn_base = Syscall_align_up_pow2(SYSCALL_ELF_DYN_BASE, SYSCALL_ELF_DYN_ALIGN);
+        if (dyn_base == 0 || min_load_vaddr > dyn_base)
+        {
+            kdebug_printf("[USER] exec reject '%s': invalid ET_DYN base\n", path);
+            kfree(elf_image);
+            return false;
+        }
+
+        load_bias = dyn_base - min_load_vaddr;
+        uintptr_t dyn_top = load_bias + max_load_vaddr;
+        if (dyn_top < load_bias || !Syscall_is_canonical_low(dyn_top - 1U))
+        {
+            kdebug_printf("[USER] exec reject '%s': ET_DYN mapped range invalid\n", path);
+            kfree(elf_image);
+            return false;
+        }
+
+        elf_entry = load_bias + (uintptr_t) ehdr->e_entry;
+        if (elf_entry < load_bias || !Syscall_is_canonical_low(elf_entry) || elf_entry < SYSCALL_USER_VADDR_MIN)
+        {
+            kdebug_printf("[USER] exec reject '%s': ET_DYN entry invalid (0x%llX)\n",
+                          path,
+                          (unsigned long long) elf_entry);
             kfree(elf_image);
             return false;
         }
     }
-
-    if (!has_load)
+    else
     {
+        uintptr_t cursor = *io_dyn_cursor;
+        if (cursor < SYSCALL_ELF_DSO_BASE)
+            cursor = SYSCALL_ELF_DSO_BASE;
+
+        uintptr_t base = Syscall_align_up_pow2(cursor, SYSCALL_ELF_DSO_ALIGN);
+        if (base == 0 || min_load_vaddr > base)
+        {
+            kdebug_printf("[USER] exec reject '%s': dependency base allocation failed\n", path);
+            kfree(elf_image);
+            return false;
+        }
+
+        load_bias = base - min_load_vaddr;
+        uintptr_t map_top = load_bias + max_load_vaddr;
+        if (map_top < load_bias || map_top > SYSCALL_ELF_DSO_LIMIT || !Syscall_is_canonical_low(map_top - 1U))
+        {
+            kdebug_printf("[USER] exec reject '%s': dependency mapped range invalid\n", path);
+            kfree(elf_image);
+            return false;
+        }
+
+        uintptr_t next_cursor = Syscall_align_up_pow2(map_top, SYSCALL_ELF_DSO_ALIGN);
+        if (next_cursor == 0 || next_cursor > SYSCALL_ELF_DSO_LIMIT)
+        {
+            kdebug_printf("[USER] exec reject '%s': dependency cursor overflow\n", path);
+            kfree(elf_image);
+            return false;
+        }
+        *io_dyn_cursor = next_cursor;
+
+        elf_entry = load_bias + (uintptr_t) ehdr->e_entry;
+    }
+
+    syscall_exec_module_t* module = &modules[*io_module_count];
+    memset(module, 0, sizeof(*module));
+    size_t path_len = strlen(path);
+    if (path_len >= sizeof(module->path))
+        path_len = sizeof(module->path) - 1U;
+    memcpy(module->path, path, path_len);
+    module->path[path_len] = '\0';
+    module->load_bias = load_bias;
+    module->map_start = load_bias + min_load_vaddr;
+    module->map_end = load_bias + max_load_vaddr;
+    module->entry = elf_entry;
+
+    for (uint16_t i = 0; i < ehdr->e_phnum; i++)
+    {
+        const uint8_t* ph_ptr = elf_image + ehdr->e_phoff + ((uint64_t) i * ehdr->e_phentsize);
+        const syscall_elf64_phdr_t* phdr = (const syscall_elf64_phdr_t*) ph_ptr;
+        if (phdr->p_type != SYSCALL_ELF_PT_LOAD)
+            continue;
+
+        if (!Syscall_load_elf_segment_current(elf_image, elf_size, phdr, load_bias, module))
+        {
+            kdebug_printf("[USER] exec reject '%s': failed to load PT_LOAD segment #%u\n",
+                          path,
+                          (unsigned int) i);
+            kfree(elf_image);
+            return false;
+        }
+    }
+    bool has_dynamic = false;
+    uintptr_t strtab_addr = 0;
+    uintptr_t symtab_addr = 0;
+    uintptr_t hash_addr = 0;
+    uintptr_t rela_addr = 0;
+    size_t rela_size = 0;
+    size_t rela_ent = sizeof(syscall_elf64_rela_t);
+    uintptr_t jmprel_addr = 0;
+    size_t plt_rela_size = 0;
+    uintptr_t plt_rel_type = SYSCALL_ELF_DT_RELA;
+    size_t sym_ent = sizeof(syscall_elf64_sym_t);
+    uint32_t soname_offset = UINT32_MAX;
+    bool dynamic_ptr_overflow = false;
+
+    for (uint16_t i = 0; i < ehdr->e_phnum; i++)
+    {
+        const uint8_t* ph_ptr = elf_image + ehdr->e_phoff + ((uint64_t) i * ehdr->e_phentsize);
+        const syscall_elf64_phdr_t* phdr = (const syscall_elf64_phdr_t*) ph_ptr;
+        if (phdr->p_type == SYSCALL_ELF_PT_DYNAMIC)
+        {
+            if (phdr->p_filesz == 0U ||
+                phdr->p_filesz > phdr->p_memsz ||
+                (phdr->p_filesz % sizeof(syscall_elf64_dyn_t)) != 0U ||
+                phdr->p_offset > elf_size ||
+                phdr->p_filesz > (uint64_t) elf_size - phdr->p_offset)
+            {
+                kdebug_printf("[USER] exec reject '%s': invalid PT_DYNAMIC size\n", path);
+                kfree(elf_image);
+                return false;
+            }
+
+            const uint8_t* dyn_bytes = elf_image + phdr->p_offset;
+            size_t dyn_count = (size_t) (phdr->p_filesz / sizeof(syscall_elf64_dyn_t));
+            has_dynamic = true;
+            for (size_t d = 0; d < dyn_count; d++)
+            {
+                syscall_elf64_dyn_t dyn_entry;
+                memcpy(&dyn_entry, dyn_bytes + (d * sizeof(syscall_elf64_dyn_t)), sizeof(dyn_entry));
+
+                if (dyn_entry.d_tag == SYSCALL_ELF_DT_NULL)
+                    break;
+
+                switch (dyn_entry.d_tag)
+                {
+                    case SYSCALL_ELF_DT_NEEDED:
+                        if (module->needed_count >= SYSCALL_EXEC_MAX_NEEDED ||
+                            dyn_entry.d_un.d_val > UINT32_MAX)
+                        {
+                            kdebug_printf("[USER] exec reject '%s': too many DT_NEEDED entries\n", path);
+                            kfree(elf_image);
+                            return false;
+                        }
+                        module->needed_offsets[module->needed_count++] = (uint32_t) dyn_entry.d_un.d_val;
+                        break;
+                    case SYSCALL_ELF_DT_HASH:
+                        if ((uintptr_t) dyn_entry.d_un.d_ptr > UINTPTR_MAX - load_bias)
+                        {
+                            dynamic_ptr_overflow = true;
+                            break;
+                        }
+                        hash_addr = load_bias + (uintptr_t) dyn_entry.d_un.d_ptr;
+                        break;
+                    case SYSCALL_ELF_DT_STRTAB:
+                        if ((uintptr_t) dyn_entry.d_un.d_ptr > UINTPTR_MAX - load_bias)
+                        {
+                            dynamic_ptr_overflow = true;
+                            break;
+                        }
+                        strtab_addr = load_bias + (uintptr_t) dyn_entry.d_un.d_ptr;
+                        break;
+                    case SYSCALL_ELF_DT_STRSZ:
+                        module->strsz = (size_t) dyn_entry.d_un.d_val;
+                        break;
+                    case SYSCALL_ELF_DT_SYMTAB:
+                        if ((uintptr_t) dyn_entry.d_un.d_ptr > UINTPTR_MAX - load_bias)
+                        {
+                            dynamic_ptr_overflow = true;
+                            break;
+                        }
+                        symtab_addr = load_bias + (uintptr_t) dyn_entry.d_un.d_ptr;
+                        break;
+                    case SYSCALL_ELF_DT_SYMENT:
+                        sym_ent = (size_t) dyn_entry.d_un.d_val;
+                        break;
+                    case SYSCALL_ELF_DT_RELA:
+                        if ((uintptr_t) dyn_entry.d_un.d_ptr > UINTPTR_MAX - load_bias)
+                        {
+                            dynamic_ptr_overflow = true;
+                            break;
+                        }
+                        rela_addr = load_bias + (uintptr_t) dyn_entry.d_un.d_ptr;
+                        break;
+                    case SYSCALL_ELF_DT_RELASZ:
+                        rela_size = (size_t) dyn_entry.d_un.d_val;
+                        break;
+                    case SYSCALL_ELF_DT_RELAENT:
+                        rela_ent = (size_t) dyn_entry.d_un.d_val;
+                        break;
+                    case SYSCALL_ELF_DT_JMPREL:
+                        if ((uintptr_t) dyn_entry.d_un.d_ptr > UINTPTR_MAX - load_bias)
+                        {
+                            dynamic_ptr_overflow = true;
+                            break;
+                        }
+                        jmprel_addr = load_bias + (uintptr_t) dyn_entry.d_un.d_ptr;
+                        break;
+                    case SYSCALL_ELF_DT_PLTRELSZ:
+                        plt_rela_size = (size_t) dyn_entry.d_un.d_val;
+                        break;
+                    case SYSCALL_ELF_DT_PLTREL:
+                        plt_rel_type = (uintptr_t) dyn_entry.d_un.d_val;
+                        break;
+                    case SYSCALL_ELF_DT_SONAME:
+                        if (dyn_entry.d_un.d_val <= UINT32_MAX)
+                            soname_offset = (uint32_t) dyn_entry.d_un.d_val;
+                        break;
+                    default:
+                        break;
+                }
+
+                if (dynamic_ptr_overflow)
+                    break;
+            }
+            if (dynamic_ptr_overflow)
+            {
+                kdebug_printf("[USER] exec reject '%s': dynamic pointer overflow\n", path);
+                kfree(elf_image);
+                return false;
+            }
+        }
+        else if (phdr->p_type == SYSCALL_ELF_PT_TLS)
+        {
+            module->tls_vaddr = (uintptr_t) phdr->p_vaddr;
+            module->tls_filesz = (size_t) phdr->p_filesz;
+            module->tls_memsz = (size_t) phdr->p_memsz;
+            module->tls_align = (size_t) phdr->p_align;
+            if (module->tls_memsz != 0U)
+            {
+                uintptr_t tls_align = (uintptr_t) phdr->p_align;
+                if (tls_align < 16U || (tls_align & (tls_align - 1U)) != 0U)
+                    tls_align = 16U;
+
+                uintptr_t rounded_tls = Syscall_align_up_pow2((uintptr_t) module->tls_memsz, tls_align);
+                if (rounded_tls == 0)
+                {
+                    kdebug_printf("[USER] exec reject '%s': TLS size overflow\n", path);
+                    kfree(elf_image);
+                    return false;
+                }
+                module->tls_rounded_size = (size_t) rounded_tls;
+            }
+        }
+    }
+
+    if (has_dynamic)
+    {
+        if (!strtab_addr || !symtab_addr || !hash_addr || module->strsz == 0U)
+        {
+            kdebug_printf("[USER] exec reject '%s': missing dynamic tables\n", path);
+            kfree(elf_image);
+            return false;
+        }
+        if (sym_ent != sizeof(syscall_elf64_sym_t))
+        {
+            kdebug_printf("[USER] exec reject '%s': unsupported symbol entry size\n", path);
+            kfree(elf_image);
+            return false;
+        }
+        if (rela_ent != sizeof(syscall_elf64_rela_t))
+        {
+            kdebug_printf("[USER] exec reject '%s': unsupported relocation entry size\n", path);
+            kfree(elf_image);
+            return false;
+        }
+        if (plt_rel_type != SYSCALL_ELF_DT_RELA)
+        {
+            kdebug_printf("[USER] exec reject '%s': unsupported PLT relocation format\n", path);
+            kfree(elf_image);
+            return false;
+        }
+
+        if (hash_addr < load_bias || strtab_addr < load_bias || symtab_addr < load_bias)
+        {
+            kdebug_printf("[USER] exec reject '%s': dynamic pointer underflow\n", path);
+            kfree(elf_image);
+            return false;
+        }
+
+        const uint32_t* hash = NULL;
+        if (!Syscall_exec_vaddr_to_file_ptr(elf_image,
+                                            elf_size,
+                                            ehdr,
+                                            (uint64_t) (hash_addr - load_bias),
+                                            sizeof(uint32_t) * 2U,
+                                            (const void**) &hash))
+        {
+            kdebug_printf("[USER] exec reject '%s': invalid DT_HASH\n", path);
+            kfree(elf_image);
+            return false;
+        }
+        uint32_t bucket_count = hash[0];
+        uint32_t chain_count = hash[1];
+        size_t hash_bytes = (size_t) (2U + bucket_count + chain_count) * sizeof(uint32_t);
+        if (chain_count == 0U ||
+            !Syscall_exec_vaddr_to_file_ptr(elf_image,
+                                            elf_size,
+                                            ehdr,
+                                            (uint64_t) (hash_addr - load_bias),
+                                            hash_bytes,
+                                            (const void**) &hash))
+        {
+            kdebug_printf("[USER] exec reject '%s': invalid DT_HASH bounds\n", path);
+            kfree(elf_image);
+            return false;
+        }
+
+        const char* strtab_file = NULL;
+        if (!Syscall_exec_vaddr_to_file_ptr(elf_image,
+                                            elf_size,
+                                            ehdr,
+                                            (uint64_t) (strtab_addr - load_bias),
+                                            module->strsz,
+                                            (const void**) &strtab_file))
+        {
+            kdebug_printf("[USER] exec reject '%s': invalid DT_STRTAB bounds\n", path);
+            kfree(elf_image);
+            return false;
+        }
+
+        size_t sym_bytes = (size_t) chain_count * sizeof(syscall_elf64_sym_t);
+        const syscall_elf64_sym_t* symtab_file = NULL;
+        if (!Syscall_exec_vaddr_to_file_ptr(elf_image,
+                                            elf_size,
+                                            ehdr,
+                                            (uint64_t) (symtab_addr - load_bias),
+                                            sym_bytes,
+                                            (const void**) &symtab_file))
+        {
+            kdebug_printf("[USER] exec reject '%s': invalid DT_SYMTAB bounds\n", path);
+            kfree(elf_image);
+            return false;
+        }
+
+        module->strtab = strtab_file;
+        module->symtab = symtab_file;
+        module->sym_count = (size_t) chain_count;
+
+        if (rela_size != 0U)
+        {
+            if ((rela_size % sizeof(syscall_elf64_rela_t)) != 0U ||
+                rela_addr < load_bias ||
+                !Syscall_exec_vaddr_to_file_ptr(elf_image,
+                                                elf_size,
+                                                ehdr,
+                                                (uint64_t) (rela_addr - load_bias),
+                                                rela_size,
+                                                (const void**) &module->rela))
+            {
+                kdebug_printf("[USER] exec reject '%s': invalid DT_RELA bounds\n", path);
+                kfree(elf_image);
+                return false;
+            }
+            module->rela_count = rela_size / sizeof(syscall_elf64_rela_t);
+        }
+
+        if (plt_rela_size != 0U)
+        {
+            if ((plt_rela_size % sizeof(syscall_elf64_rela_t)) != 0U ||
+                jmprel_addr < load_bias ||
+                !Syscall_exec_vaddr_to_file_ptr(elf_image,
+                                                elf_size,
+                                                ehdr,
+                                                (uint64_t) (jmprel_addr - load_bias),
+                                                plt_rela_size,
+                                                (const void**) &module->plt_rela))
+            {
+                kdebug_printf("[USER] exec reject '%s': invalid DT_JMPREL bounds\n", path);
+                kfree(elf_image);
+                return false;
+            }
+            module->plt_rela_count = plt_rela_size / sizeof(syscall_elf64_rela_t);
+        }
+
+        if (soname_offset != UINT32_MAX)
+        {
+            const char* soname = Syscall_exec_dynstr_at(module, soname_offset);
+            if (!soname)
+            {
+                kdebug_printf("[USER] exec reject '%s': invalid DT_SONAME\n", path);
+                kfree(elf_image);
+                return false;
+            }
+            size_t soname_len = strlen(soname);
+            if (soname_len >= sizeof(module->soname))
+                soname_len = sizeof(module->soname) - 1U;
+            memcpy(module->soname, soname, soname_len);
+            module->soname[soname_len] = '\0';
+        }
+    }
+    else if (!is_main && ehdr->e_type == SYSCALL_ELF_TYPE_DYN)
+    {
+        kdebug_printf("[USER] exec reject '%s': missing PT_DYNAMIC\n", path);
         kfree(elf_image);
         return false;
     }
+
+    module->image = elf_image;
+    module->image_size = elf_size;
+    (*io_module_count)++;
+    return true;
+}
+
+static void Syscall_exec_release_modules(syscall_exec_module_t* modules, size_t module_count)
+{
+    if (!modules)
+        return;
+
+    for (size_t i = 0; i < module_count; i++)
+    {
+        if (modules[i].image)
+        {
+            kfree(modules[i].image);
+            modules[i].image = NULL;
+            modules[i].image_size = 0U;
+        }
+    }
+}
+
+static bool Syscall_exec_lookup_symbol_in_module(const syscall_exec_module_t* module,
+                                                 const char* symbol,
+                                                 uintptr_t* out_addr)
+{
+    if (!module || !symbol || !out_addr || !module->symtab || !module->strtab)
+        return false;
+
+    bool weak_match = false;
+    uintptr_t weak_addr = 0;
+    for (size_t i = 1; i < module->sym_count; i++)
+    {
+        const syscall_elf64_sym_t* sym = &module->symtab[i];
+        if (sym->st_shndx == SYSCALL_ELF_SHN_UNDEF || sym->st_name == 0U)
+            continue;
+        if ((size_t) sym->st_name >= module->strsz)
+            continue;
+
+        uint8_t bind = SYSCALL_ELF64_ST_BIND(sym->st_info);
+        if (bind != SYSCALL_ELF_STB_GLOBAL && bind != SYSCALL_ELF_STB_WEAK)
+            continue;
+
+        const char* name = module->strtab + sym->st_name;
+        if (!Syscall_exec_has_nul_terminator(name, module->strsz - (size_t) sym->st_name))
+            continue;
+        if (strcmp(name, symbol) != 0)
+            continue;
+
+        uintptr_t addr = module->load_bias + (uintptr_t) sym->st_value;
+        if (bind == SYSCALL_ELF_STB_GLOBAL)
+        {
+            *out_addr = addr;
+            return true;
+        }
+
+        weak_match = true;
+        weak_addr = addr;
+    }
+
+    if (weak_match)
+    {
+        *out_addr = weak_addr;
+        return true;
+    }
+    return false;
+}
+
+static bool Syscall_exec_lookup_symbol_global(const syscall_exec_module_t* modules,
+                                              size_t module_count,
+                                              const char* symbol,
+                                              uintptr_t* out_addr,
+                                              const syscall_exec_module_t** out_owner)
+{
+    if (!modules || module_count == 0 || !symbol || !out_addr)
+        return false;
+
+    for (size_t i = 0; i < module_count; i++)
+    {
+        uintptr_t addr = 0;
+        if (!Syscall_exec_lookup_symbol_in_module(&modules[i], symbol, &addr))
+            continue;
+        *out_addr = addr;
+        if (out_owner)
+            *out_owner = &modules[i];
+        return true;
+    }
+
+    return false;
+}
+
+static bool Syscall_exec_apply_relocation_list(const syscall_exec_module_t* module,
+                                               const syscall_exec_module_t* modules,
+                                               size_t module_count,
+                                               const syscall_elf64_rela_t* relocs,
+                                               size_t reloc_count)
+{
+    if (!module || !modules || module_count == 0 || !relocs || reloc_count == 0)
+        return true;
+
+    for (size_t i = 0; i < reloc_count; i++)
+    {
+        const syscall_elf64_rela_t* rela = &relocs[i];
+        uint32_t type = SYSCALL_ELF64_R_TYPE(rela->r_info);
+        uint32_t sym_index = SYSCALL_ELF64_R_SYM(rela->r_info);
+
+        uintptr_t reloc_addr = module->load_bias + (uintptr_t) rela->r_offset;
+        if (!Syscall_exec_module_addr_range_valid(module, reloc_addr, sizeof(uint64_t)))
+        {
+            kdebug_printf("[USER] exec reject '%s': relocation address out of range\n", module->path);
+            return false;
+        }
+
+        if (type == SYSCALL_ELF_R_X86_64_NONE)
+            continue;
+
+        uint64_t value = 0;
+        if (type == SYSCALL_ELF_R_X86_64_RELATIVE)
+        {
+            value = (uint64_t) (module->load_bias + (uintptr_t) rela->r_addend);
+            if (!Syscall_copy_into_user_phys(reloc_addr, &value, sizeof(value)))
+                return false;
+            continue;
+        }
+
+        if (!module->symtab || sym_index >= module->sym_count)
+        {
+            kdebug_printf("[USER] exec reject '%s': invalid relocation symbol index\n", module->path);
+            return false;
+        }
+
+        const syscall_elf64_sym_t* sym = &module->symtab[sym_index];
+        uintptr_t sym_addr = 0;
+        const syscall_exec_module_t* sym_owner = module;
+        bool resolved = false;
+        const char* unresolved_name = NULL;
+        bool relocation_uses_local_tls_base = (sym_index == 0U &&
+                                               (type == SYSCALL_ELF_R_X86_64_DTPOFF64 ||
+                                                type == SYSCALL_ELF_R_X86_64_TPOFF64));
+
+        if (relocation_uses_local_tls_base)
+        {
+            if (module->tls_memsz == 0U)
+            {
+                kdebug_printf("[USER] exec reject '%s': TLS relocation without TLS segment\n", module->path);
+                return false;
+            }
+
+            sym_owner = module;
+            sym_addr = module->load_bias + module->tls_vaddr;
+            resolved = true;
+        }
+
+        if (!resolved && sym->st_shndx != SYSCALL_ELF_SHN_UNDEF)
+        {
+            sym_addr = module->load_bias + (uintptr_t) sym->st_value;
+            resolved = true;
+        }
+        else if (!resolved)
+        {
+            if (!module->strtab || (size_t) sym->st_name >= module->strsz)
+            {
+                kdebug_printf("[USER] exec reject '%s': invalid relocation symbol name\n", module->path);
+                return false;
+            }
+
+            const char* sym_name = module->strtab + sym->st_name;
+            if (!Syscall_exec_has_nul_terminator(sym_name, module->strsz - (size_t) sym->st_name))
+            {
+                kdebug_printf("[USER] exec reject '%s': unterminated relocation symbol name\n", module->path);
+                return false;
+            }
+            unresolved_name = sym_name;
+
+            if (module->tls_memsz != 0U)
+            {
+                uintptr_t tls_base = module->load_bias + module->tls_vaddr;
+                uintptr_t tls_files_end = tls_base + module->tls_filesz;
+                uintptr_t tls_block_end = tls_base + module->tls_memsz;
+                uintptr_t tls_align_value = module->tls_align;
+                if (tls_align_value < 16U || (tls_align_value & (tls_align_value - 1U)) != 0U)
+                    tls_align_value = 16U;
+
+                if (strcmp(sym_name, "__theos_tls_tdata_start") == 0)
+                {
+                    sym_addr = tls_base;
+                    sym_owner = module;
+                    resolved = true;
+                }
+                else if (strcmp(sym_name, "__theos_tls_tdata_end") == 0)
+                {
+                    sym_addr = tls_files_end;
+                    sym_owner = module;
+                    resolved = true;
+                }
+                else if (strcmp(sym_name, "__theos_tls_tbss_end") == 0)
+                {
+                    sym_addr = tls_block_end;
+                    sym_owner = module;
+                    resolved = true;
+                }
+                else if (strcmp(sym_name, "__theos_tls_align") == 0)
+                {
+                    sym_addr = tls_align_value;
+                    sym_owner = module;
+                    resolved = true;
+                }
+            }
+
+            if (resolved)
+                goto relocation_symbol_resolved;
+
+            resolved = Syscall_exec_lookup_symbol_global(modules,
+                                                         module_count,
+                                                         sym_name,
+                                                         &sym_addr,
+                                                         &sym_owner);
+            if (!resolved)
+            {
+                uint8_t bind = SYSCALL_ELF64_ST_BIND(sym->st_info);
+                if (bind == SYSCALL_ELF_STB_WEAK)
+                {
+                    sym_addr = 0;
+                    sym_owner = NULL;
+                    resolved = true;
+                }
+            }
+        }
+relocation_symbol_resolved:
+
+        if (!resolved)
+        {
+            if (unresolved_name)
+            {
+                kdebug_printf("[USER] exec reject '%s': unresolved symbol '%s' in relocation\n",
+                              module->path,
+                              unresolved_name);
+            }
+            else
+            {
+                kdebug_printf("[USER] exec reject '%s': unresolved relocation symbol index=%u\n",
+                              module->path,
+                              (unsigned int) sym_index);
+            }
+            return false;
+        }
+
+        switch (type)
+        {
+            case SYSCALL_ELF_R_X86_64_64:
+            case SYSCALL_ELF_R_X86_64_GLOB_DAT:
+            case SYSCALL_ELF_R_X86_64_JUMP_SLOT:
+                value = (uint64_t) (sym_addr + (uintptr_t) rela->r_addend);
+                break;
+
+            case SYSCALL_ELF_R_X86_64_COPY:
+            {
+                size_t copy_size = (size_t) sym->st_size;
+                uintptr_t source_addr = sym_addr + (uintptr_t) rela->r_addend;
+                if (copy_size == 0U)
+                    break;
+
+                if (!Syscall_exec_module_addr_range_valid(module, reloc_addr, copy_size))
+                {
+                    kdebug_printf("[USER] exec reject '%s': COPY relocation destination out of range\n",
+                                  module->path);
+                    return false;
+                }
+
+                bool source_is_zero = (sym_owner == NULL || sym_addr == 0U);
+                if (!source_is_zero &&
+                    (!sym_owner || !Syscall_exec_module_addr_range_valid(sym_owner, source_addr, copy_size)))
+                {
+                    kdebug_printf("[USER] exec reject '%s': COPY relocation source out of range\n",
+                                  module->path);
+                    return false;
+                }
+
+                uint8_t bounce[256];
+                size_t copied = 0U;
+                while (copied < copy_size)
+                {
+                    size_t chunk = copy_size - copied;
+                    if (chunk > sizeof(bounce))
+                        chunk = sizeof(bounce);
+
+                    if (source_is_zero)
+                    {
+                        memset(bounce, 0, chunk);
+                    }
+                    else if (!Syscall_copy_from_user(bounce, (const void*) (source_addr + copied), chunk))
+                    {
+                        return false;
+                    }
+
+                    if (!Syscall_copy_into_user_phys(reloc_addr + copied, bounce, chunk))
+                        return false;
+
+                    copied += chunk;
+                }
+                continue;
+            }
+
+            case SYSCALL_ELF_R_X86_64_DTPMOD64:
+                value = 1U;
+                break;
+
+            case SYSCALL_ELF_R_X86_64_DTPOFF64:
+            {
+                if (!sym_owner || sym_owner->tls_memsz == 0U)
+                {
+                    kdebug_printf("[USER] exec reject '%s': DTPOFF64 without TLS owner\n", module->path);
+                    return false;
+                }
+                int64_t dtpoff = (int64_t) (sym_addr + (uintptr_t) rela->r_addend) -
+                                 (int64_t) (sym_owner->load_bias + sym_owner->tls_vaddr);
+                value = (uint64_t) dtpoff;
+                break;
+            }
+
+            case SYSCALL_ELF_R_X86_64_TPOFF64:
+            {
+                if (!sym_owner || sym_owner->tls_memsz == 0U || sym_owner->tls_rounded_size == 0U)
+                {
+                    kdebug_printf("[USER] exec reject '%s': TPOFF64 without TLS owner\n", module->path);
+                    return false;
+                }
+                int64_t tpoff = (int64_t) (sym_addr + (uintptr_t) rela->r_addend) -
+                                (int64_t) (sym_owner->load_bias +
+                                           sym_owner->tls_vaddr +
+                                           sym_owner->tls_rounded_size);
+                value = (uint64_t) tpoff;
+                break;
+            }
+
+            default:
+                kdebug_printf("[USER] exec reject '%s': unsupported relocation type=%u\n",
+                              module->path,
+                              (unsigned int) type);
+                return false;
+        }
+
+        if (!Syscall_copy_into_user_phys(reloc_addr, &value, sizeof(value)))
+            return false;
+    }
+
+    return true;
+}
+
+static bool Syscall_exec_apply_module_relocations(const syscall_exec_module_t* module,
+                                                  const syscall_exec_module_t* modules,
+                                                  size_t module_count)
+{
+    if (!module)
+        return false;
+
+    if (!Syscall_exec_apply_relocation_list(module, modules, module_count, module->rela, module->rela_count))
+        return false;
+    if (!Syscall_exec_apply_relocation_list(module, modules, module_count, module->plt_rela, module->plt_rela_count))
+        return false;
+    return true;
+}
+
+static bool Syscall_exec_apply_module_protections(const syscall_exec_module_t* module)
+{
+    if (!module)
+        return false;
+
+    for (size_t i = 0; i < module->segment_count; i++)
+    {
+        const syscall_exec_segment_t* seg = &module->segments[i];
+        if (seg->writable && seg->executable)
+            return false;
+
+        uintptr_t set_bits = seg->writable ? WRITABLE : 0;
+        uintptr_t clear_bits = seg->writable ? 0 : WRITABLE;
+        if (!seg->executable)
+            set_bits |= NO_EXECUTE;
+        else
+            clear_bits |= NO_EXECUTE;
+
+        for (uintptr_t page = seg->start; page < seg->end; page += SYSCALL_PAGE_SIZE)
+        {
+            if (!VMM_update_page_flags(page, set_bits, clear_bits))
+                return false;
+        }
+    }
+    return true;
+}
+
+static bool Syscall_load_elf_current(const char* path, uintptr_t* out_entry, uintptr_t* out_rsp)
+{
+    if (!path || !out_entry || !out_rsp)
+        return false;
+
+    if (!Syscall_state.fs_lock_ready)
+    {
+        kdebug_printf("[USER] exec reject '%s': no active ext4 filesystem\n", path);
+        return false;
+    }
+
+    size_t modules_bytes = sizeof(syscall_exec_module_t) * SYSCALL_EXEC_MAX_MODULES;
+    syscall_exec_module_t* modules = (syscall_exec_module_t*) kmalloc(modules_bytes);
+    if (!modules)
+    {
+        kdebug_printf("[USER] exec reject '%s': out of memory for module state\n", path);
+        return false;
+    }
+    memset(modules, 0, modules_bytes);
+    size_t module_count = 0;
+    uintptr_t dyn_cursor = SYSCALL_ELF_DSO_BASE;
+
+    if (!Syscall_exec_load_module_current(path, true, &dyn_cursor, modules, &module_count))
+        goto fail;
+    kdebug_puts("[USER] exec loader: main loaded\n");
+
+    for (size_t i = 0; i < module_count; i++)
+    {
+        syscall_exec_module_t* module = &modules[i];
+        for (size_t n = 0; n < module->needed_count; n++)
+        {
+            const char* needed_name = Syscall_exec_dynstr_at(module, module->needed_offsets[n]);
+            if (!needed_name)
+            {
+                kdebug_printf("[USER] exec reject '%s': invalid DT_NEEDED string\n", module->path);
+                goto fail;
+            }
+
+            char needed_path[SYSCALL_USER_CSTR_MAX];
+            if (!Syscall_exec_build_needed_path(needed_name, needed_path, sizeof(needed_path)))
+            {
+                kdebug_printf("[USER] exec reject '%s': DT_NEEDED path overflow\n", module->path);
+                goto fail;
+            }
+
+            bool already_loaded = false;
+            for (size_t m = 0; m < module_count; m++)
+            {
+                if (strcmp(modules[m].path, needed_path) == 0 ||
+                    (modules[m].soname[0] != '\0' && strcmp(modules[m].soname, needed_name) == 0))
+                {
+                    already_loaded = true;
+                    break;
+                }
+            }
+            if (already_loaded)
+                continue;
+
+            if (!Syscall_exec_load_module_current(needed_path, false, &dyn_cursor, modules, &module_count))
+            {
+                kdebug_printf("[USER] exec reject '%s': failed to load dependency '%s'\n",
+                              module->path,
+                              needed_name);
+                goto fail;
+            }
+        }
+    }
+    kdebug_puts("[USER] exec loader: dependencies loaded\n");
+
+    for (size_t i = 0; i < module_count; i++)
+    {
+        if (!Syscall_exec_apply_module_relocations(&modules[i], modules, module_count))
+            goto fail;
+    }
+    kdebug_puts("[USER] exec loader: relocations applied\n");
+
+    for (size_t i = 0; i < module_count; i++)
+    {
+        if (!Syscall_exec_apply_module_protections(&modules[i]))
+            goto fail;
+    }
+    kdebug_puts("[USER] exec loader: protections applied\n");
 
     uintptr_t stack_bottom = SYSCALL_ELF_STACK_TOP - SYSCALL_ELF_STACK_SIZE;
     if (!Syscall_map_user_range_current(stack_bottom, SYSCALL_ELF_STACK_SIZE))
     {
-        kfree(elf_image);
-        return false;
+        kdebug_printf("[USER] exec reject '%s': failed to map user stack (%llu bytes)\n",
+                      path,
+                      (unsigned long long) SYSCALL_ELF_STACK_SIZE);
+        goto fail;
     }
 
-    *out_entry = (uintptr_t) ehdr->e_entry;
+    *out_entry = modules[0].entry;
     *out_rsp = SYSCALL_ELF_STACK_TOP & ~(uintptr_t) 0xFULL;
-    kfree(elf_image);
+    kdebug_puts("[USER] exec loader: stack mapped\n");
+    Syscall_exec_release_modules(modules, module_count);
+    kfree(modules);
     return true;
+
+fail:
+    Syscall_exec_release_modules(modules, module_count);
+    kfree(modules);
+    return false;
 }
 
 static bool Syscall_execve_build_address_space(const char* path,
@@ -1687,6 +3405,31 @@ static bool Syscall_execve_build_address_space(const char* path,
     return true;
 }
 
+bool Syscall_prepare_initial_user_process(const char* path,
+                                          uintptr_t* out_cr3_phys,
+                                          uintptr_t* out_entry,
+                                          uintptr_t* out_rsp)
+{
+    if (!path || !out_cr3_phys || !out_entry || !out_rsp)
+        return false;
+
+    uintptr_t new_cr3 = 0;
+    uintptr_t new_entry = 0;
+    uintptr_t new_rsp = 0;
+    if (!Syscall_execve_build_address_space(path, &new_cr3, &new_entry, &new_rsp))
+        return false;
+
+    if (!Syscall_exec_install_initial_stack(new_cr3, &new_rsp, path, NULL, 0, NULL, 0))
+    {
+        Syscall_free_address_space(new_cr3);
+        return false;
+    }
+    *out_cr3_phys = new_cr3;
+    *out_entry = new_entry;
+    *out_rsp = new_rsp;
+    return true;
+}
+
 static void Syscall_fd_cleanup_owner(uint32_t owner_pid)
 {
     if (!Syscall_state.fd_lock_ready || owner_pid == 0)
@@ -1698,11 +3441,48 @@ static void Syscall_fd_cleanup_owner(uint32_t owner_pid)
         size_t flush_size = 0;
         const uint8_t* flush_data = NULL;
         char flush_path[SYSCALL_USER_CSTR_MAX];
+        uint32_t entry_type = SYSCALL_FD_TYPE_NONE;
+        uint32_t drm_file_id = 0;
+        uint32_t dmabuf_id = 0;
 
         spin_lock(&Syscall_state.fd_lock);
         syscall_file_desc_t* entry = &Syscall_state.fds[i];
         if (!entry->used || entry->owner_pid != owner_pid)
         {
+            spin_unlock(&Syscall_state.fd_lock);
+            continue;
+        }
+
+        entry_type = entry->type;
+        if (entry_type == SYSCALL_FD_TYPE_DRM_CARD)
+        {
+            drm_file_id = entry->drm_file_id;
+            memset(entry, 0, sizeof(*entry));
+            spin_unlock(&Syscall_state.fd_lock);
+            DRM_close_file(drm_file_id);
+            continue;
+        }
+
+        if (entry_type == SYSCALL_FD_TYPE_DMABUF)
+        {
+            dmabuf_id = entry->drm_dmabuf_id;
+            memset(entry, 0, sizeof(*entry));
+            spin_unlock(&Syscall_state.fd_lock);
+            DRM_dmabuf_unref_fd(dmabuf_id);
+            continue;
+        }
+
+        if (entry_type == SYSCALL_FD_TYPE_AUDIO_DSP)
+        {
+            memset(entry, 0, sizeof(*entry));
+            spin_unlock(&Syscall_state.fd_lock);
+            HDA_dsp_close(owner_pid);
+            continue;
+        }
+
+        if (entry_type != SYSCALL_FD_TYPE_REGULAR)
+        {
+            memset(entry, 0, sizeof(*entry));
             spin_unlock(&Syscall_state.fd_lock);
             continue;
         }
@@ -2226,6 +4006,7 @@ void Syscall_init(void)
     MSR_set(IA32_FMASK, SYSCALL_FMASK_TF_BIT | SYSCALL_FMASK_DF_BIT);
 
     enable_syscall_ext();
+    DRM_init();
 }
 
 void Syscall_on_timer_tick(uint32_t cpu_index)
@@ -2356,12 +4137,6 @@ uint64_t Syscall_interrupt_handler(uint64_t syscall_num, syscall_frame_t* frame,
     uint64_t count = __atomic_add_fetch(&Syscall_state.count_per_cpu[cpu_index], 1, __ATOMIC_RELAXED);
     if (cpu_local)
         __atomic_store_n(&cpu_local->syscall_count, count, __ATOMIC_RELAXED);
-
-    if ((count % 1024ULL) == 0)
-        kdebug_printf("[SYSCALL] cpu=%u apic=%u count=%llu\n",
-                      cpu_index,
-                      apic_id,
-                      (unsigned long long) count);
 
     switch (syscall_num)
     {
@@ -2807,6 +4582,9 @@ uint64_t Syscall_interrupt_handler(uint64_t syscall_num, syscall_frame_t* frame,
             uintptr_t requested = (uintptr_t) frame->rdi;
             size_t len = (size_t) frame->rsi;
             uint64_t prot = frame->rdx;
+            uint64_t map_flags = frame->r10;
+            int64_t map_fd = (int64_t) frame->r8;
+            uint64_t map_offset = frame->r9;
             const uint64_t prot_mask = SYS_PROT_READ | SYS_PROT_WRITE | SYS_PROT_EXEC;
             if (len == 0 || (prot & SYS_PROT_READ) == 0 || (prot & ~prot_mask) != 0)
                 return (uint64_t) -1;
@@ -2816,6 +4594,35 @@ uint64_t Syscall_interrupt_handler(uint64_t syscall_num, syscall_frame_t* frame,
             size_t page_count = (len + (SYSCALL_PAGE_SIZE - 1U)) / SYSCALL_PAGE_SIZE;
             if (page_count == 0 || page_count > SYSCALL_MAP_MAX_PAGES)
                 return (uint64_t) -1;
+
+            bool legacy_map = (map_flags == 0 && map_fd == 0 && map_offset == 0);
+            if (legacy_map)
+            {
+                map_flags = SYS_MAP_PRIVATE | SYS_MAP_ANONYMOUS;
+                map_fd = -1;
+            }
+
+            const uint64_t supported_map_flags = SYS_MAP_PRIVATE | SYS_MAP_SHARED | SYS_MAP_ANONYMOUS;
+            if ((map_flags & ~supported_map_flags) != 0)
+                return (uint64_t) -1;
+
+            bool is_private = (map_flags & SYS_MAP_PRIVATE) != 0;
+            bool is_shared = (map_flags & SYS_MAP_SHARED) != 0;
+            bool is_anon = (map_flags & SYS_MAP_ANONYMOUS) != 0;
+            if (is_private == is_shared)
+                return (uint64_t) -1;
+            if (is_anon)
+            {
+                if (map_fd != -1 || map_offset != 0)
+                    return (uint64_t) -1;
+            }
+            else
+            {
+                if (map_fd < 0)
+                    return (uint64_t) -1;
+                if ((map_offset & (SYSCALL_PAGE_SIZE - 1U)) != 0)
+                    return (uint64_t) -1;
+            }
 
             if (!Syscall_state.vm_lock_ready)
                 return (uint64_t) -1;
@@ -2844,44 +4651,236 @@ uint64_t Syscall_interrupt_handler(uint64_t syscall_num, syscall_frame_t* frame,
             bool executable = (prot & SYS_PROT_EXEC) != 0;
             if (writable && executable)
                 goto map_out;
-            size_t mapped_pages = 0;
-            for (size_t i = 0; i < page_count; i++)
+            uintptr_t set_bits = 0;
+            uintptr_t clear_bits = 0;
+            if (!writable)
+                clear_bits |= WRITABLE;
+            if (!executable)
+                set_bits |= NO_EXECUTE;
+            else
+                clear_bits |= NO_EXECUTE;
+
+            if (is_anon)
             {
-                uintptr_t virt = base + (i * SYSCALL_PAGE_SIZE);
-                uintptr_t phys = (uintptr_t) PMM_alloc_page();
-                if (phys == 0)
-                    break;
-
-                VMM_map_user_page(virt, phys);
-                mapped_pages++;
-                memset((void*) virt, 0, SYSCALL_PAGE_SIZE);
-
-                uintptr_t set_bits = 0;
-                uintptr_t clear_bits = 0;
-                if (!writable)
-                    clear_bits |= WRITABLE;
-                if (!executable)
-                    set_bits |= NO_EXECUTE;
-                else
-                    clear_bits |= NO_EXECUTE;
-
-                if ((set_bits | clear_bits) != 0 &&
-                    !VMM_update_page_flags(virt, set_bits, clear_bits))
-                    break;
-            }
-
-            if (mapped_pages != page_count)
-            {
-                for (size_t i = 0; i < mapped_pages; i++)
+                size_t mapped_pages = 0;
+                for (size_t i = 0; i < page_count; i++)
                 {
                     uintptr_t virt = base + (i * SYSCALL_PAGE_SIZE);
-                    uintptr_t phys = 0;
-                    if (VMM_unmap_page(virt, &phys) && phys != 0)
-                        PMM_dealloc_page((void*) phys);
-                }
-                goto map_out;
-            }
+                    uintptr_t phys = (uintptr_t) PMM_alloc_page();
+                    if (phys == 0)
+                        break;
 
+                    VMM_map_user_page(virt, phys);
+                    mapped_pages++;
+                    memset((void*) virt, 0, SYSCALL_PAGE_SIZE);
+
+                    if ((set_bits | clear_bits) != 0 &&
+                        !VMM_update_page_flags(virt, set_bits, clear_bits))
+                        break;
+                }
+
+                if (mapped_pages != page_count)
+                {
+                    for (size_t i = 0; i < mapped_pages; i++)
+                    {
+                        uintptr_t virt = base + (i * SYSCALL_PAGE_SIZE);
+                        uintptr_t phys = 0;
+                        if (VMM_unmap_page(virt, &phys) && phys != 0)
+                            PMM_dealloc_page((void*) phys);
+                    }
+                    goto map_out;
+                }
+            }
+            else
+            {
+                uint32_t owner_pid = Syscall_proc_current_pid(cpu_index, frame);
+                if (owner_pid == 0 || (uint64_t) map_fd >= SYSCALL_MAX_OPEN_FILES)
+                    goto map_out;
+
+                uint32_t entry_type = SYSCALL_FD_TYPE_NONE;
+                uint32_t dmabuf_id = 0;
+                const uint8_t* regular_data = NULL;
+                size_t regular_size = 0;
+
+                if (!Syscall_state.fd_lock_ready)
+                    goto map_out;
+
+                spin_lock(&Syscall_state.fd_lock);
+                syscall_file_desc_t* map_entry = &Syscall_state.fds[(uint32_t) map_fd];
+                if (!map_entry->used || map_entry->owner_pid != owner_pid || map_entry->io_busy)
+                {
+                    spin_unlock(&Syscall_state.fd_lock);
+                    goto map_out;
+                }
+
+                entry_type = map_entry->type;
+                if (entry_type == SYSCALL_FD_TYPE_DMABUF)
+                {
+                    dmabuf_id = map_entry->drm_dmabuf_id;
+                    spin_unlock(&Syscall_state.fd_lock);
+                }
+                else if (entry_type == SYSCALL_FD_TYPE_REGULAR)
+                {
+                    if (!is_private)
+                    {
+                        spin_unlock(&Syscall_state.fd_lock);
+                        goto map_out;
+                    }
+                    if (!map_entry->can_read || !map_entry->data)
+                    {
+                        spin_unlock(&Syscall_state.fd_lock);
+                        goto map_out;
+                    }
+
+                    regular_data = map_entry->data;
+                    regular_size = map_entry->size;
+                    map_entry->io_busy = true;
+                    spin_unlock(&Syscall_state.fd_lock);
+                }
+                else
+                {
+                    spin_unlock(&Syscall_state.fd_lock);
+                    goto map_out;
+                }
+
+                if (entry_type == SYSCALL_FD_TYPE_DMABUF)
+                {
+                    if (!is_shared || dmabuf_id == 0)
+                        goto map_out;
+
+                    uint64_t dmabuf_size = 0;
+                    uint32_t dmabuf_pages = 0;
+                    if (!DRM_dmabuf_get_layout(dmabuf_id, &dmabuf_size, &dmabuf_pages))
+                        goto map_out;
+                    uint64_t request_len = (uint64_t) len;
+                    if (request_len > (uint64_t) -1 - map_offset)
+                        goto map_out;
+                    uint64_t request_end = map_offset + request_len;
+                    if (request_end > dmabuf_size)
+                        goto map_out;
+
+                    if ((uint64_t) map_size > (uint64_t) -1 - map_offset)
+                        goto map_out;
+                    uint64_t map_end = map_offset + (uint64_t) map_size;
+                    uint64_t dmabuf_mappable_end = (uint64_t) dmabuf_pages * (uint64_t) SYSCALL_PAGE_SIZE;
+                    if (map_end > dmabuf_mappable_end)
+                        goto map_out;
+
+                    size_t mapped_pages = 0;
+                    uint32_t start_page = (uint32_t) (map_offset / SYSCALL_PAGE_SIZE);
+                    for (size_t i = 0; i < page_count; i++)
+                    {
+                        uint32_t page_index = start_page + (uint32_t) i;
+                        if (page_index >= dmabuf_pages)
+                            break;
+
+                        uintptr_t phys = 0;
+                        if (!DRM_dmabuf_get_page_phys(dmabuf_id, page_index, &phys) || phys == 0)
+                            break;
+
+                        uintptr_t virt = base + (i * SYSCALL_PAGE_SIZE);
+                        VMM_map_page_flags(virt, phys, USER_MODE);
+                        mapped_pages++;
+
+                        uint64_t* pte = Syscall_get_user_pte_ptr(Syscall_read_cr3_phys(), virt);
+                        if (!pte)
+                            break;
+                        *pte |= SYSCALL_PTE_DMABUF;
+
+                        if ((set_bits | clear_bits) != 0 &&
+                            !VMM_update_page_flags(virt, set_bits, clear_bits))
+                            break;
+                    }
+
+                    if (mapped_pages != page_count)
+                    {
+                        for (size_t i = 0; i < mapped_pages; i++)
+                        {
+                            uintptr_t virt = base + (i * SYSCALL_PAGE_SIZE);
+                            (void) VMM_unmap_page(virt, NULL);
+                        }
+                        goto map_out;
+                    }
+
+                    if (!DRM_dmabuf_ref_map_pages(dmabuf_id, (uint32_t) page_count))
+                    {
+                        for (size_t i = 0; i < mapped_pages; i++)
+                        {
+                            uintptr_t virt = base + (i * SYSCALL_PAGE_SIZE);
+                            (void) VMM_unmap_page(virt, NULL);
+                        }
+                        goto map_out;
+                    }
+                }
+                else
+                {
+                    bool clear_io_busy = true;
+                    uint64_t request_len = (uint64_t) len;
+                    if (request_len > (uint64_t) -1 - map_offset)
+                        goto map_regular_out;
+
+                    uint64_t request_end = map_offset + request_len;
+                    if (request_end > (uint64_t) regular_size)
+                        goto map_regular_out;
+
+                    size_t mapped_pages = 0;
+                    for (size_t i = 0; i < page_count; i++)
+                    {
+                        uintptr_t virt = base + (i * SYSCALL_PAGE_SIZE);
+                        uintptr_t phys = (uintptr_t) PMM_alloc_page();
+                        if (phys == 0)
+                            break;
+
+                        VMM_map_user_page(virt, phys);
+                        mapped_pages++;
+                        memset((void*) virt, 0, SYSCALL_PAGE_SIZE);
+
+                        uint64_t page_off = map_offset + (uint64_t) (i * SYSCALL_PAGE_SIZE);
+                        if (page_off < (uint64_t) regular_size)
+                        {
+                            uint64_t remain64 = (uint64_t) regular_size - page_off;
+                            size_t copy_size = (remain64 > SYSCALL_PAGE_SIZE) ? SYSCALL_PAGE_SIZE : (size_t) remain64;
+                            memcpy((void*) virt, regular_data + (size_t) page_off, copy_size);
+                        }
+
+                        if ((set_bits | clear_bits) != 0 &&
+                            !VMM_update_page_flags(virt, set_bits, clear_bits))
+                            break;
+                    }
+
+                    if (mapped_pages != page_count)
+                    {
+                        for (size_t i = 0; i < mapped_pages; i++)
+                        {
+                            uintptr_t virt = base + (i * SYSCALL_PAGE_SIZE);
+                            uintptr_t phys = 0;
+                            if (VMM_unmap_page(virt, &phys) && phys != 0)
+                                PMM_dealloc_page((void*) phys);
+                        }
+                        goto map_regular_out;
+                    }
+
+                    clear_io_busy = false;
+                    ret = (uint64_t) base;
+
+map_regular_out:
+                    if (Syscall_state.fd_lock_ready)
+                    {
+                        spin_lock(&Syscall_state.fd_lock);
+                        map_entry = &Syscall_state.fds[(uint32_t) map_fd];
+                        if (map_entry->used &&
+                            map_entry->owner_pid == owner_pid &&
+                            map_entry->type == SYSCALL_FD_TYPE_REGULAR)
+                        {
+                            map_entry->io_busy = false;
+                        }
+                        spin_unlock(&Syscall_state.fd_lock);
+                    }
+                    if (clear_io_busy)
+                        goto map_out;
+                    goto map_out;
+                }
+            }
             ret = (uint64_t) base;
 
 map_out:
@@ -2922,14 +4921,21 @@ map_out:
                 uintptr_t virt = base + (i * SYSCALL_PAGE_SIZE);
                 uintptr_t phys = 0;
                 bool was_cow = false;
+                bool was_dmabuf = false;
                 uint64_t* pte = Syscall_get_user_pte_ptr(Syscall_read_cr3_phys(), virt);
                 if (pte && ((*pte & SYSCALL_PTE_COW) != 0))
                     was_cow = true;
+                if (pte && ((*pte & SYSCALL_PTE_DMABUF) != 0))
+                    was_dmabuf = true;
                 if (!VMM_unmap_page(virt, &phys))
                     goto unmap_out;
                 if (phys != 0)
                 {
-                    if (was_cow)
+                    if (was_dmabuf)
+                    {
+                        (void) DRM_dmabuf_unref_map_pages_by_phys(phys, 1U);
+                    }
+                    else if (was_cow)
                     {
                         bool ref_zero = false;
                         if (Syscall_cow_ref_sub(phys, &ref_zero) && ref_zero)
@@ -3026,6 +5032,9 @@ mprotect_out:
 
         case SYS_LSEEK:
             return Syscall_handle_lseek(cpu_index, frame);
+
+        case SYS_IOCTL:
+            return Syscall_handle_ioctl(cpu_index, frame);
 
         case SYS_KBD_GET_SCANCODE:
             return (uint64_t) Keyboard_get_scancode();

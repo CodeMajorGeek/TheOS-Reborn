@@ -1,5 +1,6 @@
 #include <FileSystem/ext4.h>
 
+#include <Debug/KDebug.h>
 #include <Memory/KMem.h>
 
 #include <string.h>
@@ -839,7 +840,12 @@ bool ext4_read_file(ext4_fs_t* fs, const char* name, uint8_t** out_buf, size_t* 
     size_t size = inode.i_size_lo;
     uint8_t* buf = (uint8_t*) kmalloc(size + 1);
     if (!buf)
+    {
+        kdebug_printf("[EXT4] read_file alloc failed path=%s size=%llu\n",
+                      name,
+                      (unsigned long long) size);
         return false;
+    }
 
     size_t read = 0;
     uint32_t block_index = 0;

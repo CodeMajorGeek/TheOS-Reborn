@@ -178,8 +178,7 @@ static bool monitor_poll_escape(void)
 
 static void monitor_clear_screen(void)
 {
-    static const char clear_seq[] = "\x1b[2J\x1b[H";
-    (void) write(STDOUT_FILENO, clear_seq, sizeof(clear_seq) - 1U);
+    (void) clear_screen();
 }
 
 static void monitor_format_uptime(char* out, size_t out_size, uint64_t ticks, uint32_t tick_hz)

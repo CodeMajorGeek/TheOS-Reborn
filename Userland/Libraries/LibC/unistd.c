@@ -1,5 +1,6 @@
 #include <errno.h>
 #include <fcntl.h>
+#include <libc_fd.h>
 #include <limits.h>
 #include <sched.h>
 #include <signal.h>
@@ -127,7 +128,7 @@ static int unistd_brk_ensure_initialized(void)
     return 0;
 }
 
-static int unistd_fd_alloc_slot(int kernel_fd)
+int libc_fd_adopt_kernel(int kernel_fd)
 {
     int fd = -1;
 
@@ -147,7 +148,7 @@ static int unistd_fd_alloc_slot(int kernel_fd)
     return fd;
 }
 
-static int unistd_fd_get_kernel(int fd)
+int libc_fd_get_kernel(int fd)
 {
     int kernel_fd = -1;
 
@@ -296,7 +297,7 @@ ssize_t read(int fd, void* buf, size_t count)
         return -1;
     }
 
-    int kernel_fd = unistd_fd_get_kernel(fd);
+    int kernel_fd = libc_fd_get_kernel(fd);
     if (kernel_fd < 0)
     {
         errno = EBADF;
@@ -337,7 +338,7 @@ ssize_t write(int fd, const void* buf, size_t count)
         return -1;
     }
 
-    int kernel_fd = unistd_fd_get_kernel(fd);
+    int kernel_fd = libc_fd_get_kernel(fd);
     if (kernel_fd < 0)
     {
         errno = EBADF;
@@ -407,7 +408,7 @@ int open(const char* path, int flags, ...)
         return -1;
     }
 
-    int fd = unistd_fd_alloc_slot(kernel_fd);
+    int fd = libc_fd_adopt_kernel(kernel_fd);
     if (fd < 0)
     {
         (void) sys_close(kernel_fd);
@@ -448,7 +449,7 @@ off_t lseek(int fd, off_t offset, int whence)
         return (off_t) -1;
     }
 
-    int kernel_fd = unistd_fd_get_kernel(fd);
+    int kernel_fd = libc_fd_get_kernel(fd);
     if (kernel_fd < 0)
     {
         errno = EBADF;
@@ -468,6 +469,33 @@ off_t lseek(int fd, off_t offset, int whence)
 int isatty(int fd)
 {
     return (fd == STDIN_FILENO || fd == STDOUT_FILENO || fd == STDERR_FILENO) ? 1 : 0;
+}
+
+int clear_screen(void)
+{
+    static const char clear_seq[] = "\x1b[2J\x1b[H";
+    size_t written = 0U;
+
+    if (isatty(STDOUT_FILENO) != 1)
+    {
+        errno = ENOTTY;
+        return -1;
+    }
+
+    while (written < (sizeof(clear_seq) - 1U))
+    {
+        ssize_t rc = write(STDOUT_FILENO, clear_seq + written, (sizeof(clear_seq) - 1U) - written);
+        if (rc < 0)
+            return -1;
+        if (rc == 0)
+        {
+            errno = EIO;
+            return -1;
+        }
+        written += (size_t) rc;
+    }
+
+    return 0;
 }
 
 int brk(void* addr)
@@ -807,6 +835,71 @@ int stat(const char* path, struct stat* out_stat)
     return 0;
 }
 
+int fstat(int fd, struct stat* out_stat)
+{
+    if (!out_stat)
+    {
+        errno = EINVAL;
+        return -1;
+    }
+
+    memset(out_stat, 0, sizeof(*out_stat));
+    out_stat->st_dev = (dev_t) 1;
+    out_stat->st_uid = (uid_t) 0;
+    out_stat->st_gid = (gid_t) 0;
+    out_stat->st_rdev = (dev_t) 0;
+    out_stat->st_blksize = LIBC_STAT_BLKSIZE;
+    out_stat->st_atime = (time_t) 0;
+    out_stat->st_mtime = (time_t) 0;
+    out_stat->st_ctime = (time_t) 0;
+
+    if (fd == STDIN_FILENO || fd == STDOUT_FILENO || fd == STDERR_FILENO)
+    {
+        out_stat->st_ino = (ino_t) (fd + 1);
+        out_stat->st_mode = S_IFCHR | S_IRUSR | S_IWUSR | S_IRGRP | S_IWGRP | S_IROTH | S_IWOTH;
+        out_stat->st_nlink = 1;
+        out_stat->st_size = 0;
+        out_stat->st_blocks = 0;
+        return 0;
+    }
+
+    int kernel_fd = libc_fd_get_kernel(fd);
+    if (kernel_fd < 0)
+    {
+        errno = EBADF;
+        return -1;
+    }
+
+    int64_t current = sys_lseek(kernel_fd, 0, SEEK_CUR);
+    if (current < 0)
+    {
+        errno = EINVAL;
+        return -1;
+    }
+
+    int64_t end = sys_lseek(kernel_fd, 0, SEEK_END);
+    if (end < 0)
+    {
+        errno = EINVAL;
+        return -1;
+    }
+
+    if (sys_lseek(kernel_fd, current, SEEK_SET) < 0)
+    {
+        errno = EINVAL;
+        return -1;
+    }
+
+    out_stat->st_ino = (ino_t) (kernel_fd + 1);
+    out_stat->st_mode = S_IFREG | S_IRUSR | S_IWUSR | S_IRGRP | S_IROTH;
+    out_stat->st_nlink = 1;
+    out_stat->st_size = (off_t) ((end > 0) ? end : 0);
+    out_stat->st_blocks = (blkcnt_t) ((out_stat->st_size > 0)
+                                          ? ((out_stat->st_size + LIBC_STAT_BLKSIZE - 1) / LIBC_STAT_BLKSIZE)
+                                          : 0);
+    return 0;
+}
+
 int mkdir(const char* path, mode_t mode)
 {
     (void) mode;
@@ -847,19 +940,19 @@ void* mmap(void* addr, size_t len, int prot, int flags, int fd, off_t offset)
         errno = EINVAL;
         return MAP_FAILED;
     }
-    if ((flags & MAP_ANONYMOUS) == 0)
-    {
-        errno = ENOTSUP;
-        return MAP_FAILED;
-    }
-
-    if (fd != -1 || offset != 0)
-    {
-        errno = ENOTSUP;
-        return MAP_FAILED;
-    }
+    bool is_anonymous = (flags & MAP_ANONYMOUS) != 0;
 
     if (addr && (((uintptr_t) addr & (LIBC_BRK_PAGE_SIZE - 1U)) != 0U))
+    {
+        errno = EINVAL;
+        return MAP_FAILED;
+    }
+    if (offset < 0)
+    {
+        errno = EINVAL;
+        return MAP_FAILED;
+    }
+    if (((uint64_t) offset & (LIBC_BRK_PAGE_SIZE - 1U)) != 0U)
     {
         errno = EINVAL;
         return MAP_FAILED;
@@ -879,10 +972,40 @@ void* mmap(void* addr, size_t len, int prot, int flags, int fd, off_t offset)
     if ((prot & PROT_EXEC) != 0)
         sys_prot |= SYS_PROT_EXEC;
 
-    void* rc = sys_map(addr, len, sys_prot);
+    int kernel_fd = -1;
+    if (is_anonymous)
+    {
+        if (fd != -1 || offset != 0)
+        {
+            errno = EINVAL;
+            return MAP_FAILED;
+        }
+    }
+    else
+    {
+        if (fd < 0)
+        {
+            errno = EBADF;
+            return MAP_FAILED;
+        }
+
+        kernel_fd = libc_fd_get_kernel(fd);
+        if (kernel_fd < 0)
+        {
+            errno = EBADF;
+            return MAP_FAILED;
+        }
+    }
+
+    void* rc = sys_map_ex(addr,
+                          len,
+                          sys_prot,
+                          (uint64_t) flags,
+                          kernel_fd,
+                          (uint64_t) offset);
     if (!rc)
     {
-        errno = ENOMEM;
+        errno = is_anonymous ? ENOMEM : EINVAL;
         return MAP_FAILED;
     }
 

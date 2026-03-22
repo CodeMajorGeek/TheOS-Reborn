@@ -10,9 +10,13 @@
 #include <stdint.h>
 #include <stdio.h>
 #include <sys/mman.h>
+#include <sys/ioctl.h>
 #include <syscall.h>
 #include <sys/wait.h>
 #include <unistd.h>
+#include <drm/drm_mode.h>
+#include <dlfcn.h>
+#include <linux/soundcard.h>
 
 #define SYS_UNDEFINED_TEST 9999L
 #define KERNEL_TEST_ADDR   0xFFFFFFFF80100000ULL
@@ -39,6 +43,9 @@
 // pthread API is expected to be true shared-address-space threading.
 #define TEST_PTHREAD_SHIM
 #define TEST_TLS_DYNAMIC
+#define TEST_DRM_KMS
+#define TEST_AUDIO_DSP
+#define TEST_LIBDL
 // #define TEST_READ_KERNEL
 // #define TEST_WRITE_KERNEL
 
@@ -46,6 +53,10 @@
 #define HEAP_STRESS_ITERS      6000U
 #define HEAP_STRESS_MAX_ALLOC  4096U
 #define HEAP_STRESS_CHECK_SPAN 64U
+
+#define THETEST_DRM_DUMB_MAX_BYTES    (32U * 1024U * 1024U)
+#define THETEST_AUDIO_TONE_FREQ_HZ    880U
+#define THETEST_AUDIO_TONE_DURATION_MS 200U
 
 static inline uint64_t thetest_rdtsc(void)
 {
@@ -1057,11 +1068,755 @@ static void thetest_tls_dynamic_probe(void)
                created);
 }
 
+static uint32_t thetest_align_up_u32(uint32_t value, uint32_t align)
+{
+    if (align == 0U)
+        return value;
+
+    uint32_t rem = value % align;
+    if (rem == 0U)
+        return value;
+    return value + (align - rem);
+}
+
+static uint64_t thetest_drm_dumb_size_bytes(uint32_t width, uint32_t height)
+{
+    if (width == 0U || height == 0U)
+        return 0ULL;
+
+    uint64_t pitch = (uint64_t) thetest_align_up_u32(width * 4U, 64U);
+    return pitch * (uint64_t) height;
+}
+
+static bool thetest_drm_mode_fits_dumb(const drm_mode_modeinfo_t* mode)
+{
+    if (!mode || mode->hdisplay == 0U || mode->vdisplay == 0U)
+        return false;
+
+    return thetest_drm_dumb_size_bytes(mode->hdisplay, mode->vdisplay) <= THETEST_DRM_DUMB_MAX_BYTES;
+}
+
+static bool thetest_drm_pick_mode(const drm_mode_get_resources_t* resources,
+                                  const drm_mode_get_crtc_t* crtc,
+                                  const drm_mode_modeinfo_t* connector_modes,
+                                  uint32_t connector_mode_count,
+                                  drm_mode_modeinfo_t* out_mode)
+{
+    if (!resources || !out_mode)
+        return false;
+
+    if (crtc && crtc->mode_valid != 0U && thetest_drm_mode_fits_dumb(&crtc->mode))
+    {
+        *out_mode = crtc->mode;
+        return true;
+    }
+
+    uint64_t best_score = 0ULL;
+    bool found = false;
+    for (uint32_t i = 0; i < connector_mode_count; i++)
+    {
+        const drm_mode_modeinfo_t* mode = &connector_modes[i];
+        if (!thetest_drm_mode_fits_dumb(mode))
+            continue;
+
+        uint64_t score = ((uint64_t) mode->hdisplay * (uint64_t) mode->vdisplay) * 1000ULL +
+                         (uint64_t) mode->vrefresh;
+        if (!found || score > best_score)
+        {
+            *out_mode = *mode;
+            best_score = score;
+            found = true;
+        }
+    }
+
+    if (found)
+        return true;
+
+    uint32_t width = resources->max_width ? resources->max_width : 1280U;
+    uint32_t height = resources->max_height ? resources->max_height : 800U;
+    while (width >= 16U && height >= 16U)
+    {
+        drm_mode_modeinfo_t candidate;
+        memset(&candidate, 0, sizeof(candidate));
+        candidate.hdisplay = (uint16_t) width;
+        candidate.vdisplay = (uint16_t) height;
+        candidate.vrefresh = 60U;
+        if (thetest_drm_mode_fits_dumb(&candidate))
+        {
+            *out_mode = candidate;
+            return true;
+        }
+        width /= 2U;
+        height /= 2U;
+    }
+
+    return false;
+}
+
+static void thetest_drm_fill_gradient(uint8_t* bytes, uint32_t width, uint32_t height, uint32_t pitch)
+{
+    if (!bytes || width == 0U || height == 0U || pitch < width * 4U)
+        return;
+
+    for (uint32_t y = 0; y < height; y++)
+    {
+        for (uint32_t x = 0; x < width; x++)
+        {
+            uint8_t r = (uint8_t) ((x * 255U) / width);
+            uint8_t g = (uint8_t) ((y * 255U) / height);
+            uint8_t b = (uint8_t) (((x ^ y) * 255U) / (width > height ? width : height));
+            size_t off = (size_t) y * pitch + ((size_t) x * 4U);
+            bytes[off + 0U] = b;
+            bytes[off + 1U] = g;
+            bytes[off + 2U] = r;
+            bytes[off + 3U] = 0x00U;
+        }
+    }
+}
+
+static bool thetest_write_full(int fd, const void* data, size_t size, size_t* out_written)
+{
+    if (out_written)
+        *out_written = 0U;
+    if (fd < 0 || !data)
+        return false;
+
+    size_t written = 0U;
+    while (written < size)
+    {
+        int rc = (int) write(fd, (const uint8_t*) data + written, size - written);
+        if (rc <= 0)
+            break;
+        written += (size_t) rc;
+    }
+
+    if (out_written)
+        *out_written = written;
+    return written == size;
+}
+
+static bool thetest_audio_emit_square_tone(int fd,
+                                           uint32_t sample_rate,
+                                           uint32_t channels,
+                                           uint32_t format,
+                                           size_t* out_bytes_written)
+{
+    if (out_bytes_written)
+        *out_bytes_written = 0U;
+    if (fd < 0 || sample_rate == 0U || (channels != 1U && channels != 2U))
+        return false;
+
+    size_t frame_count = ((size_t) sample_rate * THETEST_AUDIO_TONE_DURATION_MS) / 1000U;
+    if (frame_count < 64U)
+        frame_count = 64U;
+
+    uint32_t phase = 0U;
+    uint32_t step = (uint32_t) ((((uint64_t) THETEST_AUDIO_TONE_FREQ_HZ) << 32) / sample_rate);
+
+    if (format == AFMT_S16_LE)
+    {
+        size_t sample_count = frame_count * channels;
+        int16_t* pcm = (int16_t*) malloc(sample_count * sizeof(int16_t));
+        if (!pcm)
+            return false;
+
+        for (size_t i = 0; i < frame_count; i++)
+        {
+            phase += step;
+            int16_t sample = (phase & 0x80000000U) ? 10000 : -10000;
+            for (uint32_t ch = 0U; ch < channels; ch++)
+                pcm[i * channels + ch] = sample;
+        }
+
+        bool ok = thetest_write_full(fd, pcm, sample_count * sizeof(int16_t), out_bytes_written);
+        free(pcm);
+        return ok;
+    }
+
+    if (format == AFMT_U8)
+    {
+        size_t sample_count = frame_count * channels;
+        uint8_t* pcm = (uint8_t*) malloc(sample_count);
+        if (!pcm)
+            return false;
+
+        for (size_t i = 0; i < frame_count; i++)
+        {
+            phase += step;
+            uint8_t sample = (phase & 0x80000000U) ? 224U : 32U;
+            for (uint32_t ch = 0U; ch < channels; ch++)
+                pcm[i * channels + ch] = sample;
+        }
+
+        bool ok = thetest_write_full(fd, pcm, sample_count, out_bytes_written);
+        free(pcm);
+        return ok;
+    }
+
+    return false;
+}
+
+static void thetest_audio_dsp_probe(void)
+{
+    const char* paths[] = { "/dev/dsp", "/dev/audio" };
+    int dsp_fd = -1;
+    const char* opened_path = NULL;
+    for (size_t i = 0; i < sizeof(paths) / sizeof(paths[0]); i++)
+    {
+        dsp_fd = open(paths[i], O_WRONLY);
+        if (dsp_fd >= 0)
+        {
+            opened_path = paths[i];
+            break;
+        }
+    }
+
+    if (dsp_fd < 0)
+    {
+        printf("[TheTest] audio open failed (/dev/dsp,/dev/audio) errno=%d\n", errno);
+        return;
+    }
+
+    bool ok = true;
+
+    int32_t formats = 0;
+    if (ioctl(dsp_fd, SNDCTL_DSP_GETFMTS, &formats) < 0)
+    {
+        printf("[TheTest] audio GETFMTS failed errno=%d\n", errno);
+        ok = false;
+    }
+
+    int32_t fragment = (8 << 16) | 10;
+    if (ioctl(dsp_fd, SNDCTL_DSP_SETFRAGMENT, &fragment) < 0)
+    {
+        printf("[TheTest] audio SETFRAGMENT failed errno=%d\n", errno);
+        ok = false;
+    }
+
+    int32_t speed = 11025;
+    if (ioctl(dsp_fd, SNDCTL_DSP_SPEED, &speed) < 0 || speed <= 0)
+    {
+        printf("[TheTest] audio SPEED failed errno=%d speed=%d\n", errno, speed);
+        ok = false;
+    }
+
+    int32_t stereo = 1;
+    if (ioctl(dsp_fd, SNDCTL_DSP_STEREO, &stereo) < 0)
+    {
+        printf("[TheTest] audio STEREO(1) failed errno=%d\n", errno);
+        stereo = 0;
+        if (ioctl(dsp_fd, SNDCTL_DSP_STEREO, &stereo) < 0)
+        {
+            printf("[TheTest] audio STEREO(0) fallback failed errno=%d\n", errno);
+            ok = false;
+        }
+    }
+
+    int32_t format = (formats & (int32_t) AFMT_S16_LE) ? (int32_t) AFMT_S16_LE : (int32_t) AFMT_U8;
+    if ((formats & ((int32_t) AFMT_S16_LE | (int32_t) AFMT_U8)) == 0)
+    {
+        printf("[TheTest] audio unsupported formats mask=0x%x\n", (unsigned int) formats);
+        ok = false;
+    }
+    else if (ioctl(dsp_fd, SNDCTL_DSP_SETFMT, &format) < 0)
+    {
+        printf("[TheTest] audio SETFMT failed errno=%d\n", errno);
+        ok = false;
+    }
+
+    size_t bytes_written = 0U;
+    uint32_t channels = (stereo != 0) ? 2U : 1U;
+    if (!thetest_audio_emit_square_tone(dsp_fd,
+                                        (uint32_t) ((speed > 0) ? speed : 11025),
+                                        channels,
+                                        (uint32_t) format,
+                                        &bytes_written))
+    {
+        printf("[TheTest] audio write tone failed fmt=0x%x speed=%d ch=%u errno=%d\n",
+               (unsigned int) format,
+               speed,
+               (unsigned int) channels,
+               errno);
+        ok = false;
+    }
+
+    if (ioctl(dsp_fd, SNDCTL_DSP_SYNC, &format) < 0)
+    {
+        printf("[TheTest] audio SYNC failed errno=%d\n", errno);
+        ok = false;
+    }
+    if (ioctl(dsp_fd, SNDCTL_DSP_RESET, &format) < 0)
+    {
+        printf("[TheTest] audio RESET failed errno=%d\n", errno);
+        ok = false;
+    }
+
+    (void) close(dsp_fd);
+
+    if (ok)
+    {
+        printf("[TheTest] audio OSS probe: OK (path=%s rate=%d ch=%u fmt=0x%x bytes=%llu fragment=0x%x)\n",
+               opened_path ? opened_path : "?",
+               speed,
+               (unsigned int) channels,
+               (unsigned int) format,
+               (unsigned long long) bytes_written,
+               (unsigned int) fragment);
+    }
+    else
+    {
+        printf("[TheTest] audio OSS probe: FAILED (path=%s)\n",
+               opened_path ? opened_path : "?");
+    }
+}
+
+static void thetest_drm_kms_probe(void)
+{
+    int card_fd = open(DRM_NODE_PATH, O_RDWR);
+    if (card_fd < 0)
+    {
+        printf("[TheTest] DRM open failed path=%s errno=%d\n", DRM_NODE_PATH, errno);
+        return;
+    }
+
+    bool ok = true;
+    bool committed = false;
+
+    drm_mode_get_resources_t resources;
+    memset(&resources, 0, sizeof(resources));
+    uint32_t connector_id = 0U;
+    uint32_t crtc_id = 0U;
+    uint32_t plane_id = 0U;
+    resources.count_connectors = 1U;
+    resources.count_crtcs = 1U;
+    resources.count_planes = 1U;
+    resources.connector_id_ptr = (uint64_t) (uintptr_t) &connector_id;
+    resources.crtc_id_ptr = (uint64_t) (uintptr_t) &crtc_id;
+    resources.plane_id_ptr = (uint64_t) (uintptr_t) &plane_id;
+    if (ioctl(card_fd, DRM_IOCTL_MODE_GET_RESOURCES, &resources) < 0)
+    {
+        printf("[TheTest] DRM get resources failed errno=%d\n", errno);
+        (void) close(card_fd);
+        return;
+    }
+
+    drm_mode_get_crtc_t crtc;
+    memset(&crtc, 0, sizeof(crtc));
+    crtc.crtc_id = crtc_id;
+    if (ioctl(card_fd, DRM_IOCTL_MODE_GET_CRTC, &crtc) < 0)
+    {
+        printf("[TheTest] DRM get crtc failed errno=%d\n", errno);
+        ok = false;
+    }
+
+    uint32_t plane_format = 0U;
+    drm_mode_get_plane_t plane;
+    memset(&plane, 0, sizeof(plane));
+    plane.plane_id = plane_id;
+    plane.count_format_types = 1U;
+    plane.format_type_ptr = (uint64_t) (uintptr_t) &plane_format;
+    if (ioctl(card_fd, DRM_IOCTL_MODE_GET_PLANE, &plane) < 0)
+    {
+        printf("[TheTest] DRM get plane failed errno=%d\n", errno);
+        ok = false;
+    }
+    else if (plane_format != DRM_FORMAT_XRGB8888)
+    {
+        printf("[TheTest] DRM unexpected primary format=0x%x (expected=0x%x)\n",
+               (unsigned int) plane_format,
+               (unsigned int) DRM_FORMAT_XRGB8888);
+        ok = false;
+    }
+
+    drm_mode_get_connector_t connector;
+    memset(&connector, 0, sizeof(connector));
+    connector.connector_id = connector_id;
+    if (ioctl(card_fd, DRM_IOCTL_MODE_GET_CONNECTOR, &connector) < 0)
+    {
+        printf("[TheTest] DRM get connector failed errno=%d\n", errno);
+        (void) close(card_fd);
+        return;
+    }
+
+    uint32_t connector_mode_count = connector.count_modes;
+    drm_mode_modeinfo_t* connector_modes = NULL;
+    if (connector_mode_count > 0U)
+    {
+        connector_modes = (drm_mode_modeinfo_t*) calloc(connector_mode_count, sizeof(*connector_modes));
+        if (!connector_modes)
+        {
+            printf("[TheTest] DRM connector mode allocation failed count=%u\n",
+                   (unsigned int) connector_mode_count);
+            ok = false;
+        }
+        else
+        {
+            memset(&connector, 0, sizeof(connector));
+            connector.connector_id = connector_id;
+            connector.count_modes = connector_mode_count;
+            connector.modes_ptr = (uint64_t) (uintptr_t) connector_modes;
+            if (ioctl(card_fd, DRM_IOCTL_MODE_GET_CONNECTOR, &connector) < 0)
+            {
+                printf("[TheTest] DRM get connector modes failed errno=%d\n", errno);
+                ok = false;
+            }
+            else
+            {
+                connector_mode_count = connector.count_modes;
+            }
+        }
+    }
+
+    drm_mode_modeinfo_t mode;
+    memset(&mode, 0, sizeof(mode));
+    if (!thetest_drm_pick_mode(&resources, &crtc, connector_modes, connector_mode_count, &mode))
+    {
+        printf("[TheTest] DRM no usable mode for dumb buffer (max=%ux%u)\n",
+               (unsigned int) resources.max_width,
+               (unsigned int) resources.max_height);
+        ok = false;
+    }
+
+    if (connector_modes)
+        free(connector_modes);
+    connector_modes = NULL;
+
+    drm_mode_create_dumb_t dumb;
+    memset(&dumb, 0, sizeof(dumb));
+    dumb.width = mode.hdisplay;
+    dumb.height = mode.vdisplay;
+    dumb.bpp = 32U;
+    if (ok && ioctl(card_fd, DRM_IOCTL_MODE_CREATE_DUMB, &dumb) < 0)
+    {
+        printf("[TheTest] DRM create dumb failed errno=%d mode=%ux%u bytes=%llu\n",
+               errno,
+               (unsigned int) mode.hdisplay,
+               (unsigned int) mode.vdisplay,
+               (unsigned long long) thetest_drm_dumb_size_bytes(mode.hdisplay, mode.vdisplay));
+        ok = false;
+    }
+
+    int prime_fd = -1;
+    uint32_t imported_handle = 0U;
+    void* map = MAP_FAILED;
+    drm_mode_create_blob_t blob;
+    memset(&blob, 0, sizeof(blob));
+
+    if (ok)
+    {
+        drm_prime_handle_t export_req;
+        memset(&export_req, 0, sizeof(export_req));
+        export_req.handle = dumb.handle;
+        export_req.flags = DRM_CLOEXEC | DRM_RDWR;
+        if (ioctl(card_fd, DRM_IOCTL_PRIME_HANDLE_TO_FD, &export_req) < 0)
+        {
+            printf("[TheTest] DRM handle->fd failed errno=%d\n", errno);
+            ok = false;
+        }
+        else
+        {
+            prime_fd = export_req.fd;
+        }
+    }
+
+    if (ok)
+    {
+        drm_prime_handle_t import_req;
+        memset(&import_req, 0, sizeof(import_req));
+        import_req.fd = prime_fd;
+        import_req.flags = DRM_RDWR;
+        if (ioctl(card_fd, DRM_IOCTL_PRIME_FD_TO_HANDLE, &import_req) < 0)
+        {
+            printf("[TheTest] DRM fd->handle failed errno=%d\n", errno);
+            ok = false;
+        }
+        else
+        {
+            imported_handle = import_req.handle;
+            if (imported_handle == 0U)
+            {
+                printf("[TheTest] DRM fd->handle returned zero handle\n");
+                ok = false;
+            }
+        }
+    }
+
+    if (ok)
+    {
+        map = mmap(NULL, (size_t) dumb.size, PROT_READ | PROT_WRITE, MAP_SHARED, prime_fd, 0);
+        if (map == MAP_FAILED)
+        {
+            printf("[TheTest] DRM mmap failed errno=%d size=%llu\n",
+                   errno,
+                   (unsigned long long) dumb.size);
+            ok = false;
+        }
+        else
+        {
+            thetest_drm_fill_gradient((uint8_t*) map, dumb.width, dumb.height, dumb.pitch);
+        }
+    }
+
+    if (ok)
+    {
+        blob.data = (uint64_t) (uintptr_t) &mode;
+        blob.length = sizeof(mode);
+        if (ioctl(card_fd, DRM_IOCTL_MODE_CREATE_BLOB, &blob) < 0)
+        {
+            printf("[TheTest] DRM create mode blob failed errno=%d\n", errno);
+            ok = false;
+        }
+    }
+
+    if (ok)
+    {
+        drm_mode_atomic_req_t atomic_test;
+        memset(&atomic_test, 0, sizeof(atomic_test));
+        atomic_test.flags = DRM_MODE_ATOMIC_TEST_ONLY;
+        atomic_test.connector_id = connector_id;
+        atomic_test.crtc_id = crtc_id;
+        atomic_test.plane_id = plane_id;
+        atomic_test.fb_handle = imported_handle;
+        atomic_test.mode_blob_id = blob.blob_id;
+        atomic_test.active = 1U;
+        atomic_test.src_w = (uint32_t) mode.hdisplay << 16;
+        atomic_test.src_h = (uint32_t) mode.vdisplay << 16;
+        atomic_test.crtc_w = mode.hdisplay;
+        atomic_test.crtc_h = mode.vdisplay;
+        if (ioctl(card_fd, DRM_IOCTL_MODE_ATOMIC, &atomic_test) < 0)
+        {
+            printf("[TheTest] DRM atomic test-only failed errno=%d\n", errno);
+            ok = false;
+        }
+    }
+
+    if (ok)
+    {
+        drm_mode_atomic_req_t atomic_commit;
+        memset(&atomic_commit, 0, sizeof(atomic_commit));
+        atomic_commit.flags = 0U;
+        atomic_commit.connector_id = connector_id;
+        atomic_commit.crtc_id = crtc_id;
+        atomic_commit.plane_id = plane_id;
+        atomic_commit.fb_handle = imported_handle;
+        atomic_commit.mode_blob_id = blob.blob_id;
+        atomic_commit.active = 1U;
+        atomic_commit.src_w = (uint32_t) mode.hdisplay << 16;
+        atomic_commit.src_h = (uint32_t) mode.vdisplay << 16;
+        atomic_commit.crtc_w = mode.hdisplay;
+        atomic_commit.crtc_h = mode.vdisplay;
+        if (ioctl(card_fd, DRM_IOCTL_MODE_ATOMIC, &atomic_commit) < 0)
+        {
+            printf("[TheTest] DRM atomic commit failed errno=%d\n", errno);
+            ok = false;
+        }
+        else
+        {
+            committed = true;
+        }
+    }
+
+    if (committed)
+    {
+        drm_mode_atomic_req_t atomic_disable;
+        memset(&atomic_disable, 0, sizeof(atomic_disable));
+        atomic_disable.connector_id = connector_id;
+        atomic_disable.crtc_id = crtc_id;
+        atomic_disable.plane_id = plane_id;
+        atomic_disable.active = 0U;
+        if (ioctl(card_fd, DRM_IOCTL_MODE_ATOMIC, &atomic_disable) < 0)
+        {
+            printf("[TheTest] DRM atomic disable failed errno=%d\n", errno);
+            ok = false;
+        }
+    }
+
+    if (blob.blob_id != 0U)
+    {
+        drm_mode_destroy_blob_t destroy_blob = { .blob_id = blob.blob_id };
+        (void) ioctl(card_fd, DRM_IOCTL_MODE_DESTROY_BLOB, &destroy_blob);
+    }
+    if (map != MAP_FAILED)
+        (void) munmap(map, (size_t) dumb.size);
+    if (prime_fd >= 0)
+        (void) close(prime_fd);
+    if (dumb.handle != 0U)
+    {
+        drm_mode_destroy_dumb_t destroy_dumb = { .handle = dumb.handle };
+        (void) ioctl(card_fd, DRM_IOCTL_MODE_DESTROY_DUMB, &destroy_dumb);
+    }
+    (void) close(card_fd);
+
+    if (ok)
+    {
+        printf("[TheTest] DRM/KMS probe: OK (mode=%ux%u pitch=%u size=%llu)\n",
+               (unsigned int) mode.hdisplay,
+               (unsigned int) mode.vdisplay,
+               (unsigned int) dumb.pitch,
+               (unsigned long long) dumb.size);
+    }
+    else
+    {
+        printf("[TheTest] DRM/KMS probe: FAILED\n");
+    }
+}
+
+static void thetest_libdl_probe(void)
+{
+    bool ok = true;
+    const char* module_path = "/lib/libthetestdyn.so";
+
+    void* handle_global = dlopen(module_path, RTLD_NOW | RTLD_GLOBAL);
+    if (!handle_global)
+    {
+        char* err = dlerror();
+        printf("[TheTest] libdl dlopen(global) failed: %s\n", err ? err : "unknown");
+        return;
+    }
+
+    void* handle_local = dlopen(module_path, RTLD_NOW | RTLD_LOCAL);
+    if (!handle_local)
+    {
+        char* err = dlerror();
+        printf("[TheTest] libdl dlopen(local) failed: %s\n", err ? err : "unknown");
+        (void) dlclose(handle_global);
+        return;
+    }
+
+    typedef uint64_t (*magic_fn_t)(uint64_t);
+    typedef size_t (*len_hint_fn_t)(const char*);
+    typedef int (*sum3_fn_t)(int, int, int);
+    magic_fn_t magic_fn = (magic_fn_t) dlsym(handle_global, "thetestdyn_magic");
+    len_hint_fn_t len_hint_fn = (len_hint_fn_t) dlsym(handle_local, "thetestdyn_len_hint");
+    sum3_fn_t sum3_fn = (sum3_fn_t) dlsym(handle_local, "thetestdyn_sum3");
+    magic_fn_t global_magic_fn = (magic_fn_t) dlsym(NULL, "thetestdyn_magic");
+    if (!magic_fn || !len_hint_fn || !sum3_fn || !global_magic_fn)
+    {
+        char* err = dlerror();
+        printf("[TheTest] libdl dlsym failed: %s\n", err ? err : "unknown");
+        ok = false;
+    }
+    else
+    {
+        uint64_t probe = 0x0102030405060708ULL;
+        uint64_t magic_local = magic_fn(probe);
+        uint64_t magic_global = global_magic_fn(probe);
+        size_t len = len_hint_fn("theos-libdl");
+        int sum = sum3_fn(2, 3, 5);
+        printf("[TheTest] libdl symbol check: magic=0x%llx len=%llu sum=%d\n",
+               (unsigned long long) magic_local,
+               (unsigned long long) len,
+               sum);
+        if (magic_local != magic_global || len != 11U || sum != 17)
+            ok = false;
+    }
+
+    (void) dlsym(handle_global, "__theos_missing_symbol__");
+    char* missing_err = dlerror();
+    if (missing_err == NULL)
+    {
+        printf("[TheTest] libdl missing-symbol lookup did not report an error\n");
+        ok = false;
+    }
+
+    void* missing_lib = dlopen("/lib/does-not-exist.so", RTLD_NOW);
+    if (missing_lib != NULL)
+    {
+        printf("[TheTest] libdl missing library unexpectedly loaded\n");
+        ok = false;
+        (void) dlclose(missing_lib);
+    }
+    else
+    {
+        char* err = dlerror();
+        if (!err)
+        {
+            printf("[TheTest] libdl missing library did not report an error\n");
+            ok = false;
+        }
+    }
+
+    for (uint32_t i = 0; i < 16U; i++)
+    {
+        void* h = dlopen(module_path, RTLD_NOW | RTLD_LOCAL);
+        if (!h)
+        {
+            char* err = dlerror();
+            printf("[TheTest] libdl churn dlopen failed iter=%u: %s\n",
+                   (unsigned int) i,
+                   err ? err : "unknown");
+            ok = false;
+            break;
+        }
+
+        void* sym = dlsym(h, "thetestdyn_magic");
+        if (!sym)
+        {
+            char* err = dlerror();
+            printf("[TheTest] libdl churn dlsym failed iter=%u: %s\n",
+                   (unsigned int) i,
+                   err ? err : "unknown");
+            ok = false;
+            (void) dlclose(h);
+            break;
+        }
+
+        if (dlclose(h) < 0)
+        {
+            char* err = dlerror();
+            printf("[TheTest] libdl churn dlclose failed iter=%u: %s\n",
+                   (unsigned int) i,
+                   err ? err : "unknown");
+            ok = false;
+            break;
+        }
+    }
+
+    if (dlclose(handle_local) < 0)
+    {
+        char* err = dlerror();
+        printf("[TheTest] libdl first dlclose failed: %s\n", err ? err : "unknown");
+        ok = false;
+    }
+    if (dlclose(handle_global) < 0)
+    {
+        char* err = dlerror();
+        printf("[TheTest] libdl second dlclose failed: %s\n", err ? err : "unknown");
+        ok = false;
+    }
+
+    if (dlclose(handle_global) == 0)
+    {
+        printf("[TheTest] libdl invalid-handle dlclose unexpectedly succeeded\n");
+        ok = false;
+    }
+    else
+    {
+        char* err = dlerror();
+        if (!err)
+        {
+            printf("[TheTest] libdl invalid-handle dlclose did not set an error\n");
+            ok = false;
+        }
+    }
+
+    if (ok)
+        printf("[TheTest] libdl probe: OK\n");
+    else
+        printf("[TheTest] libdl probe: FAILED\n");
+}
+
 int main(int argc, char** argv, char** envp)
 {
     (void) argc;
     (void) argv;
     (void) envp;
+
+#ifdef TEST_DRM_KMS
+    if (clear_screen() < 0)
+        printf("[TheTest] clear_screen failed errno=%d\n", errno);
+    thetest_drm_kms_probe();
+#endif
 
 #ifdef TEST_UNDEFINED_SYSCALL
     long rc = syscall(SYS_UNDEFINED_TEST, 0, 0, 0, 0, 0, 0);
@@ -1125,6 +1880,14 @@ int main(int argc, char** argv, char** envp)
 
 #ifdef TEST_TLS_DYNAMIC
     thetest_tls_dynamic_probe();
+#endif
+
+#ifdef TEST_AUDIO_DSP
+    thetest_audio_dsp_probe();
+#endif
+
+#ifdef TEST_LIBDL
+    thetest_libdl_probe();
 #endif
 
     volatile uint64_t* kernel_ptr = (volatile uint64_t*) (uintptr_t) KERNEL_TEST_ADDR;

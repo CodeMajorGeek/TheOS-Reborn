@@ -12,10 +12,13 @@ static uint64_t* Syscall_get_user_pte_ptr(uintptr_t cr3_phys, uintptr_t virt);
 static bool Syscall_resolve_cow_fault(uint32_t cpu_index, uintptr_t fault_addr, uint64_t err_code);
 static bool Syscall_proc_owner_has_other_live_locked(uint32_t owner_pid, int32_t exclude_slot);
 static uint32_t Syscall_proc_current_pid(uint32_t cpu_index, const syscall_frame_t* frame);
+static bool Syscall_is_audio_dsp_path(const char* path);
+static uint64_t Syscall_handle_audio_ioctl(unsigned long request, void* user_arg);
 static uint64_t Syscall_handle_open(uint32_t cpu_index, const syscall_frame_t* frame);
 static uint64_t Syscall_handle_close(uint32_t cpu_index, const syscall_frame_t* frame);
 static uint64_t Syscall_handle_read(uint32_t cpu_index, const syscall_frame_t* frame);
 static uint64_t Syscall_handle_write(uint32_t cpu_index, const syscall_frame_t* frame);
 static uint64_t Syscall_handle_lseek(uint32_t cpu_index, const syscall_frame_t* frame);
+static uint64_t Syscall_handle_ioctl(uint32_t cpu_index, const syscall_frame_t* frame);
 
 #endif

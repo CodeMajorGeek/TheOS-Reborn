@@ -106,13 +106,18 @@ int sys_yield(void)
     return (int) syscall(SYS_YIELD, 0, 0, 0, 0, 0, 0);
 }
 
-void* sys_map(void* addr, size_t len, uint64_t prot)
+void* sys_map_ex(void* addr, size_t len, uint64_t prot, uint64_t flags, int fd, uint64_t offset)
 {
-    long ret = syscall(SYS_MAP, (long) addr, (long) len, (long) prot, 0, 0, 0);
+    long ret = syscall(SYS_MAP, (long) addr, (long) len, (long) prot, (long) flags, (long) fd, (long) offset);
     if (ret < 0)
         return NULL;
 
     return (void*) (uintptr_t) ret;
+}
+
+void* sys_map(void* addr, size_t len, uint64_t prot)
+{
+    return sys_map_ex(addr, len, prot, SYS_MAP_PRIVATE | SYS_MAP_ANONYMOUS, -1, 0);
 }
 
 int sys_unmap(void* addr, size_t len)
@@ -148,6 +153,11 @@ int sys_write(int fd, const void* buf, size_t len)
 int64_t sys_lseek(int fd, int64_t offset, int whence)
 {
     return (int64_t) syscall(SYS_LSEEK, (long) fd, (long) offset, (long) whence, 0, 0, 0);
+}
+
+int sys_ioctl(int fd, unsigned long request, void* arg)
+{
+    return (int) syscall(SYS_IOCTL, (long) fd, (long) request, (long) arg, 0, 0, 0);
 }
 
 int sys_kbd_get_scancode(void)

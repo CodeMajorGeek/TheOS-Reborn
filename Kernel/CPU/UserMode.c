@@ -1,4 +1,5 @@
 #include <CPU/UserMode.h>
+#include <CPU/Syscall.h>
 
 #include <Debug/KDebug.h>
 #include <FileSystem/ext4.h>
@@ -285,140 +286,22 @@ bool UserMode_run_elf(const char* file_name)
     if (!file_name || file_name[0] == '\0')
         return false;
 
-    ext4_fs_t* fs = ext4_get_active();
-    if (!fs)
-    {
-        kdebug_puts("[USER] no active ext4 filesystem\n");
-        return false;
-    }
-
-    uint8_t* elf_image = NULL;
-    size_t elf_size = 0;
-    if (!ext4_read_file(fs, file_name, &elf_image, &elf_size))
-    {
-        kdebug_printf("[USER] ELF '%s' not found on ext4\n", file_name);
-        return false;
-    }
-
-    if (!elf_image || elf_size < sizeof(elf64_ehdr_t) || elf_size > USERMODE_ELF_MAX_SIZE)
-    {
-        kfree(elf_image);
-        kdebug_printf("[USER] ELF '%s' invalid size=%llu\n",
-                      file_name,
-                      (unsigned long long) elf_size);
-        return false;
-    }
-
-    const elf64_ehdr_t* ehdr = (const elf64_ehdr_t*) elf_image;
-    if (ehdr->e_ident[0] != ELF_MAGIC0 ||
-        ehdr->e_ident[1] != ELF_MAGIC1 ||
-        ehdr->e_ident[2] != ELF_MAGIC2 ||
-        ehdr->e_ident[3] != ELF_MAGIC3 ||
-        ehdr->e_ident[4] != ELF_CLASS_64 ||
-        ehdr->e_ident[5] != ELF_DATA_LITTLE ||
-        ehdr->e_type != ELF_TYPE_EXEC ||
-        ehdr->e_machine != ELF_MACHINE_X86_64)
-    {
-        kfree(elf_image);
-        kdebug_printf("[USER] ELF '%s' header validation failed\n", file_name);
-        return false;
-    }
-
-    if (!UserMode_is_canonical_low(ehdr->e_entry) || ehdr->e_entry < USERMODE_MIN_VADDR)
-    {
-        kfree(elf_image);
-        kdebug_printf("[USER] ELF '%s' entry out of user range: 0x%llX\n",
-                      file_name,
-                      (unsigned long long) ehdr->e_entry);
-        return false;
-    }
-
-    if (ehdr->e_phnum == 0 || ehdr->e_phnum > USERMODE_ELF_MAX_PHDRS ||
-        ehdr->e_phentsize < sizeof(elf64_phdr_t) ||
-        ehdr->e_phoff > elf_size)
-    {
-        kfree(elf_image);
-        kdebug_printf("[USER] ELF '%s' program header table invalid\n", file_name);
-        return false;
-    }
-
-    uint64_t ph_table_size = (uint64_t) ehdr->e_phnum * (uint64_t) ehdr->e_phentsize;
-    if (ph_table_size > (uint64_t) elf_size - ehdr->e_phoff)
-    {
-        kfree(elf_image);
-        kdebug_printf("[USER] ELF '%s' program headers out of bounds\n", file_name);
-        return false;
-    }
-
-    uintptr_t previous_cr3 = UserMode_read_cr3_phys();
     uintptr_t user_cr3 = 0;
-    if (!UserMode_create_isolated_address_space(&user_cr3))
+    uintptr_t user_entry = 0;
+    uintptr_t user_rsp = 0;
+    if (!Syscall_prepare_initial_user_process(file_name, &user_cr3, &user_entry, &user_rsp))
     {
-        kfree(elf_image);
-        kdebug_printf("[USER] ELF '%s' failed to create isolated address space\n", file_name);
-        return false;
-    }
-
-    UserMode_write_cr3_phys(user_cr3);
-
-    bool has_load_segment = false;
-    for (uint16_t i = 0; i < ehdr->e_phnum; i++)
-    {
-        const uint8_t* ph_ptr = elf_image + ehdr->e_phoff + ((uint64_t) i * ehdr->e_phentsize);
-        const elf64_phdr_t* phdr = (const elf64_phdr_t*) ph_ptr;
-
-        if (phdr->p_type != ELF_PT_LOAD)
-            continue;
-
-        has_load_segment = true;
-        if (!UserMode_load_segment(elf_image, elf_size, phdr))
-        {
-            UserMode_write_cr3_phys(previous_cr3);
-            UserMode_free_address_space(user_cr3);
-            kfree(elf_image);
-            kdebug_printf("[USER] ELF '%s' failed to load segment index=%u\n",
-                          file_name,
-                          i);
-            return false;
-        }
-    }
-
-    if (!has_load_segment)
-    {
-        UserMode_write_cr3_phys(previous_cr3);
-        UserMode_free_address_space(user_cr3);
-        kfree(elf_image);
-        kdebug_printf("[USER] ELF '%s' has no PT_LOAD segment\n", file_name);
-        return false;
-    }
-
-    uintptr_t stack_bottom = USERMODE_STACK_TOP - USERMODE_STACK_SIZE;
-    if (!UserMode_map_user_range(stack_bottom, USERMODE_STACK_SIZE))
-    {
-        UserMode_write_cr3_phys(previous_cr3);
-        UserMode_free_address_space(user_cr3);
-        kfree(elf_image);
-        kdebug_printf("[USER] ELF '%s' failed to map user stack\n", file_name);
-        return false;
-    }
-
-    uintptr_t user_rsp = UserMode_align_down(USERMODE_STACK_TOP, 16U);
-    if (!UserMode_build_initial_stack(&user_rsp, file_name))
-    {
-        UserMode_write_cr3_phys(previous_cr3);
-        UserMode_free_address_space(user_cr3);
-        kfree(elf_image);
-        kdebug_printf("[USER] ELF '%s' failed to build argc/argv/envp stack\n", file_name);
+        kdebug_printf("[USER] launch setup failed for '%s'\n", file_name);
         return false;
     }
 
     kdebug_printf("[USER] launching '%s' entry=0x%llX stack=0x%llX cr3=0x%llX\n",
                   file_name,
-                  (unsigned long long) ehdr->e_entry,
+                  (unsigned long long) user_entry,
                   (unsigned long long) user_rsp,
                   (unsigned long long) user_cr3);
 
-    kfree(elf_image);
-    switch_to_usermode((uintptr_t) ehdr->e_entry, user_rsp);
+    UserMode_write_cr3_phys(user_cr3);
+    switch_to_usermode(user_entry, user_rsp);
     __builtin_unreachable();
 }

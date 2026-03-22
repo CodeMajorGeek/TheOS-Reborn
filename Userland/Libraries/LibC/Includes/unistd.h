@@ -25,6 +25,7 @@ int isatty(int fd);
 int access(const char* path, int mode);
 int brk(void* addr);
 void* sbrk(intptr_t increment);
+int clear_screen(void);
 
 pid_t fork(void);
 int execve(const char* path, char* const argv[], char* const envp[]);

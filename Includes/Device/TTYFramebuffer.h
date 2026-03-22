@@ -62,4 +62,6 @@ typedef struct TTYFB_runtime_state
     uint32_t cursor_blink_ticks;
 } TTYFB_runtime_state_t;
 
+bool TTYFB_get_runtime_state(TTYFB_runtime_state_t* out_state);
+
 #endif

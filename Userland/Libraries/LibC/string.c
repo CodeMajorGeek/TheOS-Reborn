@@ -105,6 +105,40 @@ char* strcpy(char* __restrict dest, const char* __restrict src)
     return dest;
 }
 
+char* strncpy(char* __restrict dest, const char* __restrict src, size_t length)
+{
+    size_t i = 0;
+
+    while (i < length && src[i] != '\0')
+    {
+        dest[i] = src[i];
+        i++;
+    }
+
+    while (i < length)
+    {
+        dest[i] = '\0';
+        i++;
+    }
+
+    return dest;
+}
+
+char* strcat(char* __restrict dest, const char* __restrict src)
+{
+    size_t dst_len = strlen(dest);
+    size_t i = 0;
+
+    while (src[i] != '\0')
+    {
+        dest[dst_len + i] = src[i];
+        i++;
+    }
+
+    dest[dst_len + i] = '\0';
+    return dest;
+}
+
 int strncmp(const char* first, const char* second, size_t length)
 {
     for (size_t i = 0; i < length; i++)

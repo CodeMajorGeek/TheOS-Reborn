@@ -32,6 +32,17 @@ static const char* shell_known_binaries[] =
     "MicroPython"
 };
 
+typedef struct shell_command_alias
+{
+    const char* alias;
+    const char* target;
+} shell_command_alias_t;
+
+static const shell_command_alias_t shell_command_aliases[] =
+{
+    { "doom", "embeddedDOOM" }
+};
+
 static const char* shell_builtin_commands[] =
 {
     "pwd",
@@ -315,6 +326,30 @@ static bool shell_build_known_alias_path(const char* command, char* out, size_t 
     return false;
 }
 
+static bool shell_build_custom_alias_path(const char* command, char* out, size_t out_size)
+{
+    if (!command || !out || out_size < 8U)
+        return false;
+
+    char command_key[SHELL_PATH_MAX];
+    if (!shell_command_key(command, command_key, sizeof(command_key)))
+        return false;
+
+    for (size_t i = 0; i < sizeof(shell_command_aliases) / sizeof(shell_command_aliases[0]); i++)
+    {
+        char alias_key[SHELL_PATH_MAX];
+        if (!shell_command_key(shell_command_aliases[i].alias, alias_key, sizeof(alias_key)))
+            continue;
+        if (strcmp(command_key, alias_key) != 0)
+            continue;
+
+        int len = snprintf(out, out_size, "/bin/%s", shell_command_aliases[i].target);
+        return len > 0 && (size_t) len < out_size;
+    }
+
+    return false;
+}
+
 static bool shell_resolve_exec_command(const char* cwd, const char* command, char* out, size_t out_size)
 {
     if (!cwd || !command || !out || out_size == 0U || command[0] == '\0')
@@ -326,6 +361,17 @@ static bool shell_resolve_exec_command(const char* cwd, const char* command, cha
     int direct_len = snprintf(out, out_size, "/bin/%s", command);
     if (direct_len > 0 && (size_t) direct_len < out_size && shell_path_exists(out))
         return true;
+
+    char custom_alias_path[SHELL_PATH_MAX];
+    if (shell_build_custom_alias_path(command, custom_alias_path, sizeof(custom_alias_path)) &&
+        shell_path_exists(custom_alias_path))
+    {
+        size_t len = strlen(custom_alias_path);
+        if (len + 1U > out_size)
+            return false;
+        memcpy(out, custom_alias_path, len + 1U);
+        return true;
+    }
 
     char known_alias_path[SHELL_PATH_MAX];
     if (shell_build_known_alias_path(command, known_alias_path, sizeof(known_alias_path)) &&
@@ -730,6 +776,12 @@ static size_t shell_collect_command_matches(const char* prefix,
         {
             ADD_MATCH_UNIQUE(alias_names[i]);
         }
+    }
+
+    for (size_t i = 0; i < sizeof(shell_command_aliases) / sizeof(shell_command_aliases[0]); i++)
+    {
+        if (shell_starts_with_nocase(shell_command_aliases[i].alias, prefix))
+            ADD_MATCH_UNIQUE(shell_command_aliases[i].alias);
     }
 
     #undef ADD_MATCH_UNIQUE
@@ -1315,8 +1367,7 @@ static void shell_cmd_echo(const char* cwd, char* arg)
 
 static void shell_cmd_clear(void)
 {
-    static const char clear_seq[] = "\x1b[2J\x1b[H";
-    (void) write(STDOUT_FILENO, clear_seq, sizeof(clear_seq) - 1U);
+    (void) clear_screen();
 }
 
 static void shell_print_help(void)
@@ -1331,6 +1382,7 @@ static void shell_print_help(void)
     printf("  echo <text> | <path>\n");
     printf("  clear\n");
     printf("  <binary> (ex: TheTest ou test)\n");
+    printf("  <alias> (ex: doom -> /bin/embeddedDOOM)\n");
     printf("  <path/to/binary> (ex: /bin/TheTest)\n");
     printf("  help\n");
     printf("  exit\n");

@@ -17,7 +17,9 @@ option(THEOS_ENABLE_KVM "Enable KVM acceleration for the run target." ON)
 option(THEOS_RUN_SERIAL_CONSOLE "Enable QEMU serial console wiring for run target." ON)
 option(THEOS_RUN_GDB_STUB "Enable QEMU GDB stub (-s) for run target." OFF)
 option(THEOS_RUN_TELNET_MONITOR "Enable QEMU telnet monitor on :45454 for run target." OFF)
-option(THEOS_AUTO_PULL_SUBMODULES "Automatically update required submodules (EasyArgs) during configure." ON)
+option(THEOS_AUTO_PULL_SUBMODULES "Automatically initialize required submodules during configure." ON)
+option(THEOS_AUTO_PULL_SUBMODULES_REMOTE "Update selected submodules to their remote tracking branches during configure (non-reproducible)." OFF)
+option(THEOS_APPLY_EMBEDDEDDOOM_PATCHSET "Apply TheOS embeddedDOOM patchset during configure." ON)
 
 set(CMAKE_C_STANDARD 11)
 set(CMAKE_C_STANDARD_REQUIRED OFF)
@@ -36,15 +38,16 @@ set(CMAKE_LINKER ${TOOLCHAIN_PREFIX}ld)
 set(CMAKE_ASM_COMPILER ${TOOLCHAIN_PREFIX}gcc)
 set(CMAKE_AR ${TOOLCHAIN_PREFIX}ar)
 
-set(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} -msoft-float -O -fno-stack-protector -ffreestanding -nostdlib -nostdinc -static")
+set(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} -msoft-float -O -fno-stack-protector -ffreestanding -nostdlib -nostdinc")
 
 if(THEOS_AUTO_PULL_SUBMODULES)
 	find_package(Git QUIET)
 	if(GIT_FOUND AND EXISTS "${CMAKE_SOURCE_DIR}/.git")
 		set(THEOS_REQUIRED_SUBMODULES
 			Userland/Libraries/EasyArgs
+			Userland/Apps/embeddedDOOM
 		)
-		message(STATUS "Auto-updating submodules: ${THEOS_REQUIRED_SUBMODULES}")
+		message(STATUS "Initializing submodules: ${THEOS_REQUIRED_SUBMODULES}")
 		execute_process(
 			COMMAND ${GIT_EXECUTABLE} submodule update --init ${THEOS_REQUIRED_SUBMODULES}
 			WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}
@@ -54,13 +57,31 @@ if(THEOS_AUTO_PULL_SUBMODULES)
 			message(FATAL_ERROR "Failed to initialize required submodules: ${THEOS_REQUIRED_SUBMODULES}")
 		endif()
 
-		execute_process(
-			COMMAND ${GIT_EXECUTABLE} submodule update --remote --checkout ${THEOS_REQUIRED_SUBMODULES}
-			WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}
-			RESULT_VARIABLE THEOS_SUBMODULE_PULL_RC
-		)
-		if(NOT THEOS_SUBMODULE_PULL_RC EQUAL 0)
-			message(WARNING "Automatic submodule pull failed; continuing with current checked-out revisions.")
+		if(THEOS_AUTO_PULL_SUBMODULES_REMOTE)
+			set(THEOS_TRACKED_REMOTE_SUBMODULES
+				Userland/Libraries/EasyArgs
+			)
+			message(STATUS "Updating tracked submodules to remote heads: ${THEOS_TRACKED_REMOTE_SUBMODULES}")
+			execute_process(
+				COMMAND ${GIT_EXECUTABLE} submodule update --remote --checkout ${THEOS_TRACKED_REMOTE_SUBMODULES}
+				WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}
+				RESULT_VARIABLE THEOS_SUBMODULE_PULL_RC
+			)
+			if(NOT THEOS_SUBMODULE_PULL_RC EQUAL 0)
+				message(WARNING "Automatic tracked submodule pull failed; continuing with current checked-out revisions.")
+			endif()
+		endif()
+
+		if(THEOS_APPLY_EMBEDDEDDOOM_PATCHSET)
+			message(STATUS "Applying embeddedDOOM TheOS patchset")
+			execute_process(
+				COMMAND /bin/bash ${CMAKE_SOURCE_DIR}/Meta/apply-embeddeddoom-patches.sh
+				WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}
+				RESULT_VARIABLE THEOS_EMBEDDEDDOOM_PATCHSET_RC
+			)
+			if(NOT THEOS_EMBEDDEDDOOM_PATCHSET_RC EQUAL 0)
+				message(FATAL_ERROR "Failed to apply embeddedDOOM patchset from Meta/patches/embeddedDOOM")
+			endif()
 		endif()
 	else()
 		message(STATUS "Skipping auto submodule pull (git unavailable or source tree is not a git checkout).")
@@ -152,9 +173,15 @@ add_dependencies(iso TheTest)
 add_dependencies(iso ThePowerManager)
 add_dependencies(iso TheSystemMonitor)
 add_dependencies(iso TheMicroPythonApp)
+add_dependencies(iso embeddedDOOM)
+add_dependencies(iso UserLibCShared)
+add_dependencies(iso TheTestDynShared)
 add_dependencies(create-disk TheApp)
 add_dependencies(create-disk TheShell)
 add_dependencies(create-disk TheTest)
 add_dependencies(create-disk ThePowerManager)
 add_dependencies(create-disk TheSystemMonitor)
 add_dependencies(create-disk TheMicroPythonApp)
+add_dependencies(create-disk embeddedDOOM)
+add_dependencies(create-disk UserLibCShared)
+add_dependencies(create-disk TheTestDynShared)

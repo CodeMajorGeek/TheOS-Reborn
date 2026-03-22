@@ -406,6 +406,7 @@ void LimineHelper_read_boot_info(void)
             LimineHelper_state.boot_framebuffer.blue_field_position = selected_fb->blue_mask_shift;
             LimineHelper_state.boot_framebuffer.blue_mask_size = selected_fb->blue_mask_size;
             LimineHelper_state.boot_framebuffer_available = true;
+
             kdebug_printf("[BOOT] Limine framebuffer selected fb[%llu]%s raw=0x%llX phys=0x%llX %ux%u pitch=%u bpp=%u\n",
                           (unsigned long long) selected_index,
                           primary_fb ? " PRIMARY" : "",

@@ -1,0 +1,1463 @@
+diff --git a/src/d_main.c b/src/d_main.c
+index 0c2e636..6908f16 100644
+--- a/src/d_main.c
++++ b/src/d_main.c
+@@ -920,10 +920,9 @@ void D_DoomMain (void)
+ 	    G_InitNew (startskill, startepisode, startmap);
+ 	else
+ 	    D_StartTitle ();                // start up intro loop
+-
+     }
+ 
+-#ifdef GENERATE_BAKED
++#if defined(GENERATE_BAKED) && !defined(THEOS_RUNTIME)
+ 	int i;
+ 	extern int numtextures;
+ 	printf( "NRT: %d\n", numtextures );
+diff --git a/src/g_game.c b/src/g_game.c
+index 652b31b..2a0abda 100644
+--- a/src/g_game.c
++++ b/src/g_game.c
+@@ -1574,6 +1574,7 @@ void G_BeginRecording (void)
+ //
+ 
+ char*	defdemoname; 
++static boolean	demo_version_mismatch_reported = false;
+  
+ void G_DeferedPlayDemo (char* name) 
+ { 
+@@ -1590,8 +1591,14 @@ void G_DoPlayDemo (void)
+     demobuffer = demo_p = W_CacheLumpName (defdemoname, PU_STATIC); 
+     if ( *demo_p++ != VERSION)
+     {
+-      fprintf( stderr, "Demo is from a different game version!\n");
++      if (!demo_version_mismatch_reported)
++      {
++	fprintf( stderr, "Demo '%s' is from a different game version, skipping demos.\n", defdemoname);
++	demo_version_mismatch_reported = true;
++      }
++      demoplayback = false;
+       gameaction = ga_nothing;
++      D_AdvanceDemo ();
+       return;
+     }
+     
+diff --git a/src/i_sound.c b/src/i_sound.c
+index 9c7bc48..798ec2f 100644
+--- a/src/i_sound.c
++++ b/src/i_sound.c
+@@ -102,12 +102,15 @@ static int flag = 0;
+ 
+ #define SAMPLERATE		11025	// Hz
+ #define SAMPLESIZE		2   	// 16bit
++#define AUDIO_FRAGMENT_SHIFT      8
++#define AUDIO_FRAGMENT_COUNT      4
++#define SFX_MENU_VOLUME_MAX       15
+ 
+ // The actual lengths of all sound effects.
+ int 		lengths[NUMSFX];
+ 
+ // The actual output device.
+-int	audio_fd;
++int	audio_fd = -1;
+ 
+ // The global mixing buffer.
+ // Basically, samples from all active internal channels
+@@ -160,7 +163,7 @@ int*		channelrightvol_lookup[NUM_CHANNELS];
+ //
+ // Safe ioctl, convenience.
+ //
+-void
++int
+ myioctl
+ ( int	fd,
+   int	command,
+@@ -173,8 +176,9 @@ myioctl
+     {
+ 	fprintf(stderr, "ioctl(dsp,%d,arg) failed\n", command);
+ 	fprintf(stderr, "errno=%d\n", errno);
+-	exit(-1);
++	return -1;
+     }
++    return 0;
+ }
+ 
+ 
+@@ -253,6 +257,45 @@ getsfx
+     return (void *) (paddedsfx + 8);
+ }
+ 
++static int I_ScaleSfxVolumeToMixer(int volume)
++{
++  int scaled;
++
++  if (volume <= 0)
++    return 0;
++
++  /* Original game logic uses menu volume 0..15, while the mixer table is 0..127. */
++  scaled = (volume * 127 + (SFX_MENU_VOLUME_MAX / 2)) / SFX_MENU_VOLUME_MAX;
++  if (scaled > 127)
++    scaled = 127;
++  return scaled;
++}
++
++static int I_CompressAndClamp16(int sample)
++{
++  const int knee = 24576;
++  const int maxv = 32767;
++  const int minv = -32768;
++
++  if (sample > knee)
++  {
++    sample = knee + ((sample - knee) >> 2);
++    if (sample > maxv)
++      sample = maxv;
++    return sample;
++  }
++
++  if (sample < -knee)
++  {
++    sample = -knee + ((sample + knee) >> 2);
++    if (sample < minv)
++      sample = minv;
++    return sample;
++  }
++
++  return sample;
++}
++
+ 
+ 
+ 
+@@ -369,6 +412,9 @@ addsfx
+     
+     if (leftvol < 0 || leftvol > 127)
+ 	I_Error("leftvol out of bounds");
++
++    leftvol = I_ScaleSfxVolumeToMixer(leftvol);
++    rightvol = I_ScaleSfxVolumeToMixer(rightvol);
+     
+     // Get the proper lookup table piece
+     //  for this volume level???
+@@ -415,7 +461,14 @@ void I_SetChannels()
+   // This table provides step widths for pitch parameters.
+   // I fail to see that this is currently used.
+   for (i=-128 ; i<128 ; i++)
+-    steptablemid[i] = (int)(pow(2.0, (i/64.0))*65536.0);
++  {
++    // Avoid libm dependency (pow) in TheOS userland build.
++    // Keep a monotonic pitch curve around unity (65536) using a lightweight linear approximation.
++    int approx = 65536 + (i * 1024);
++    if (approx < 4096)
++      approx = 4096;
++    steptablemid[i] = approx;
++  }
+   
+   
+   // Generates volume lookup tables
+@@ -437,13 +490,576 @@ void I_SetSfxVolume(int volume)
+   snd_SfxVolume = volume;
+ }
+ 
+-// MUSIC API - dummy. Some code from DOS version.
++enum
++{
++  MUS_TICKS_PER_SECOND = 140,
++  MUS_MAX_CHANNELS = 16,
++  MUS_MAX_VOICES = 24,
++  MUS_DEFAULT_CHANNEL_VOLUME = 127,
++  MUS_DEFAULT_EXPRESSION = 127,
++  MUS_DEFAULT_PAN = 64,
++  MUS_DEFAULT_NOTE_VOLUME = 100,
++  MUS_CONTROLLER_PROGRAM = 0,
++  MUS_CONTROLLER_VOLUME = 3,
++  MUS_CONTROLLER_PAN = 4,
++  MUS_CONTROLLER_EXPRESSION = 5,
++  MUS_CONTROLLER_ALL_SOUNDS_OFF = 10,
++  MUS_CONTROLLER_ALL_NOTES_OFF = 11,
++  MUS_EVENT_SCORE_END = 6,
++  MUS_MIX_SCALE_DENOM = 65548256
++};
++
++struct mus_channel_state
++{
++  unsigned char volume;
++  unsigned char expression;
++  unsigned char pan;
++  signed char bend;
++  unsigned char last_note_volume;
++};
++
++struct mus_voice_state
++{
++  int active;
++  unsigned char channel;
++  unsigned char note;
++  unsigned char note_volume;
++  unsigned int phase;
++  unsigned int base_step;
++  unsigned int step;
++};
++
++struct mus_runtime_state
++{
++  int registered_handle;
++  const unsigned char* song_data;
++  const unsigned char* score;
++  const unsigned char* cursor;
++  const unsigned char* score_end;
++  int looping;
++  int playing;
++  int paused;
++  unsigned int samples_until_next_event;
++  unsigned int voice_alloc_index;
++  struct mus_channel_state channels[MUS_MAX_CHANNELS];
++  struct mus_voice_state voices[MUS_MAX_VOICES];
++};
++
++static struct mus_runtime_state I_music_state;
++static int I_music_log_once = 0;
++
++/* Precomputed 32-bit phase increments at 11025 Hz for MIDI notes 0..127. */
++static const unsigned int I_music_note_steps[128] = {
++  3185015U, 3374406U, 3575058U, 3787642U, 4012867U, 4251485U, 4504291U, 4772130U,
++  5055896U, 5356535U, 5675051U, 6012507U, 6370030U, 6748811U, 7150117U, 7575285U,
++  8025735U, 8502970U, 9008582U, 9544261U, 10111792U, 10713070U, 11350103U, 12025015U,
++  12740059U, 13497623U, 14300233U, 15150569U, 16051469U, 17005939U, 18017165U, 19088521U,
++  20223584U, 21426141U, 22700205U, 24050030U, 25480119U, 26995246U, 28600467U, 30301139U,
++  32102938U, 34011878U, 36034330U, 38177043U, 40447168U, 42852281U, 45400411U, 48100060U,
++  50960238U, 53990491U, 57200933U, 60602278U, 64205876U, 68023757U, 72068660U, 76354085U,
++  80894335U, 85704563U, 90800821U, 96200119U, 101920476U, 107980983U, 114401866U, 121204555U,
++  128411753U, 136047513U, 144137319U, 152708170U, 161788671U, 171409126U, 181601643U, 192400238U,
++  203840952U, 215961966U, 228803732U, 242409110U, 256823506U, 272095026U, 288274639U, 305416341U,
++  323577341U, 342818251U, 363203285U, 384800477U, 407681904U, 431923931U, 457607465U, 484818220U,
++  513647012U, 544190053U, 576549277U, 610832681U, 647154683U, 685636503U, 726406571U, 769600953U,
++  815363807U, 863847862U, 915214929U, 969636441U, 1027294024U, 1088380105U, 1153098554U, 1221665363U,
++  1294309365U, 1371273005U, 1452813141U, 1539201906U, 1630727614U, 1727695724U, 1830429858U, 1939272882U,
++  2054588048U, 2176760211U, 2306197109U, 2443330725U, 2588618730U, 2742546010U, 2905626283U, 3078403812U,
++  3261455229U, 3455391449U, 3660859716U, 3878545763U, 4109176096U, 4294967295U, 4294967295U, 4294967295U
++};
++
++static unsigned short I_MusicReadLE16(const unsigned char* ptr)
++{
++  return (unsigned short) ((unsigned short) ptr[0] |
++                           ((unsigned short) ptr[1] << 8));
++}
++
++static void I_MusicResetVoices(void)
++{
++  int i;
++  for (i = 0; i < MUS_MAX_VOICES; i++)
++  {
++    I_music_state.voices[i].active = 0;
++    I_music_state.voices[i].phase = 0U;
++    I_music_state.voices[i].base_step = 0U;
++    I_music_state.voices[i].step = 0U;
++  }
++}
++
++static void I_MusicResetChannels(void)
++{
++  int i;
++  for (i = 0; i < MUS_MAX_CHANNELS; i++)
++  {
++    I_music_state.channels[i].volume = MUS_DEFAULT_CHANNEL_VOLUME;
++    I_music_state.channels[i].expression = MUS_DEFAULT_EXPRESSION;
++    I_music_state.channels[i].pan = MUS_DEFAULT_PAN;
++    I_music_state.channels[i].bend = 0;
++    I_music_state.channels[i].last_note_volume = MUS_DEFAULT_NOTE_VOLUME;
++  }
++}
++
++static void I_MusicStopPlayback(void)
++{
++  I_music_state.playing = 0;
++  I_music_state.paused = 0;
++  I_music_state.samples_until_next_event = 0U;
++  I_MusicResetVoices();
++}
++
++static unsigned int I_MusicApplyPitchToStep(unsigned int base_step, signed char bend)
++{
++  int adjusted = (int) base_step;
++  adjusted += (adjusted * (int) bend) / 1024;
++  if (adjusted < 1)
++    adjusted = 1;
++  return (unsigned int) adjusted;
++}
++
++static void I_MusicRefreshChannelPitch(unsigned char channel)
++{
++  int i;
++  signed char bend;
++  if (channel >= MUS_MAX_CHANNELS)
++    return;
++
++  bend = I_music_state.channels[channel].bend;
++  for (i = 0; i < MUS_MAX_VOICES; i++)
++  {
++    if (I_music_state.voices[i].active &&
++        I_music_state.voices[i].channel == channel)
++    {
++      I_music_state.voices[i].step =
++        I_MusicApplyPitchToStep(I_music_state.voices[i].base_step, bend);
++    }
++  }
++}
++
++static void I_MusicNoteOff(unsigned char channel, unsigned char note)
++{
++  int i;
++  for (i = 0; i < MUS_MAX_VOICES; i++)
++  {
++    if (I_music_state.voices[i].active &&
++        I_music_state.voices[i].channel == channel &&
++        I_music_state.voices[i].note == note)
++    {
++      I_music_state.voices[i].active = 0;
++    }
++  }
++}
++
++static void I_MusicAllNotesOff(unsigned char channel)
++{
++  int i;
++  for (i = 0; i < MUS_MAX_VOICES; i++)
++  {
++    if (I_music_state.voices[i].active &&
++        I_music_state.voices[i].channel == channel)
++    {
++      I_music_state.voices[i].active = 0;
++    }
++  }
++}
++
++static int I_MusicAllocateVoice(void)
++{
++  int i;
++  int idx;
++
++  for (i = 0; i < MUS_MAX_VOICES; i++)
++  {
++    idx = (int) ((I_music_state.voice_alloc_index + (unsigned int) i) % MUS_MAX_VOICES);
++    if (!I_music_state.voices[idx].active)
++    {
++      I_music_state.voice_alloc_index = (unsigned int) ((idx + 1) % MUS_MAX_VOICES);
++      return idx;
++    }
++  }
++
++  idx = (int) (I_music_state.voice_alloc_index % MUS_MAX_VOICES);
++  I_music_state.voice_alloc_index = (unsigned int) ((idx + 1) % MUS_MAX_VOICES);
++  return idx;
++}
++
++static void I_MusicNoteOn(unsigned char channel, unsigned char note, unsigned char note_volume)
++{
++  int idx;
++  unsigned int base_step;
++  struct mus_voice_state* voice;
++
++  if (channel >= MUS_MAX_CHANNELS || note >= 128U)
++    return;
++
++  I_MusicNoteOff(channel, note);
++  idx = I_MusicAllocateVoice();
++  voice = &I_music_state.voices[idx];
++
++  base_step = I_music_note_steps[note];
++  voice->active = 1;
++  voice->channel = channel;
++  voice->note = note;
++  voice->note_volume = (unsigned char) (note_volume & 0x7FU);
++  voice->phase = 0U;
++  voice->base_step = base_step;
++  voice->step = I_MusicApplyPitchToStep(base_step, I_music_state.channels[channel].bend);
++}
++
++static unsigned int I_MusicTicksToSamples(unsigned int ticks)
++{
++  unsigned long long samples;
++
++  if (ticks == 0U)
++    return 0U;
++
++  samples = ((unsigned long long) ticks * (unsigned long long) SAMPLERATE +
++             (unsigned long long) (MUS_TICKS_PER_SECOND - 1)) /
++            (unsigned long long) MUS_TICKS_PER_SECOND;
++  if (samples == 0ULL)
++    samples = 1ULL;
++  if (samples > 0xFFFFFFFFULL)
++    samples = 0xFFFFFFFFULL;
++  return (unsigned int) samples;
++}
++
++static int I_MusicReadByte(unsigned char* out_value)
++{
++  if (!out_value || !I_music_state.cursor || !I_music_state.score_end)
++    return 0;
++  if (I_music_state.cursor >= I_music_state.score_end)
++    return 0;
++
++  *out_value = *I_music_state.cursor++;
++  return 1;
++}
++
++static unsigned int I_MusicReadDelayTicks(void)
++{
++  unsigned int ticks = 0U;
++  unsigned char value = 0U;
++  int loops = 0;
++
++  do
++  {
++    if (!I_MusicReadByte(&value))
++    {
++      I_MusicStopPlayback();
++      return 0U;
++    }
++    ticks = (ticks << 7) | (unsigned int) (value & 0x7FU);
++    loops++;
++  } while ((value & 0x80U) != 0U && loops < 5);
++
++  return ticks;
++}
++
++static void I_MusicApplyController(unsigned char channel, unsigned char controller, unsigned char value)
++{
++  if (channel >= MUS_MAX_CHANNELS)
++    return;
++
++  switch (controller)
++  {
++    case MUS_CONTROLLER_PROGRAM:
++      break;
++
++    case MUS_CONTROLLER_VOLUME:
++      I_music_state.channels[channel].volume = (unsigned char) (value & 0x7FU);
++      break;
++
++    case MUS_CONTROLLER_PAN:
++      I_music_state.channels[channel].pan = (unsigned char) (value & 0x7FU);
++      break;
++
++    case MUS_CONTROLLER_EXPRESSION:
++      I_music_state.channels[channel].expression = (unsigned char) (value & 0x7FU);
++      break;
++
++    case MUS_CONTROLLER_ALL_SOUNDS_OFF:
++    case MUS_CONTROLLER_ALL_NOTES_OFF:
++      I_MusicAllNotesOff(channel);
++      break;
++
++    default:
++      break;
++  }
++}
++
++static void I_MusicHandleSongEnd(void)
++{
++  if (!I_music_state.looping || !I_music_state.score)
++  {
++    I_MusicStopPlayback();
++    return;
++  }
++
++  I_music_state.cursor = I_music_state.score;
++  I_music_state.samples_until_next_event = 0U;
++  I_MusicResetChannels();
++  I_MusicResetVoices();
++}
++
++static void I_MusicConsumeEvents(void)
++{
++  int safety = 0;
++
++  while (I_music_state.playing &&
++         !I_music_state.paused &&
++         I_music_state.samples_until_next_event == 0U)
++  {
++    unsigned char descriptor = 0U;
++    unsigned char event_type = 0U;
++    unsigned char channel = 0U;
++    unsigned char is_last = 0U;
++    unsigned char value = 0U;
++
++    if (++safety > 16384)
++    {
++      I_MusicStopPlayback();
++      return;
++    }
++
++    if (!I_MusicReadByte(&descriptor))
++    {
++      I_MusicHandleSongEnd();
++      return;
++    }
++
++    event_type = (unsigned char) ((descriptor >> 4) & 0x07U);
++    channel = (unsigned char) (descriptor & 0x0FU);
++    is_last = (unsigned char) ((descriptor & 0x80U) != 0U);
++
++    switch (event_type)
++    {
++      case 0:
++      {
++        if (!I_MusicReadByte(&value))
++        {
++          I_MusicStopPlayback();
++          return;
++        }
++        I_MusicNoteOff(channel, (unsigned char) (value & 0x7FU));
++        break;
++      }
++
++      case 1:
++      {
++        unsigned char note = 0U;
++        unsigned char note_volume = MUS_DEFAULT_NOTE_VOLUME;
++
++        if (!I_MusicReadByte(&value))
++        {
++          I_MusicStopPlayback();
++          return;
++        }
++        note = (unsigned char) (value & 0x7FU);
++        note_volume = I_music_state.channels[channel].last_note_volume;
++        if ((value & 0x80U) != 0U)
++        {
++          if (!I_MusicReadByte(&note_volume))
++          {
++            I_MusicStopPlayback();
++            return;
++          }
++          note_volume = (unsigned char) (note_volume & 0x7FU);
++          I_music_state.channels[channel].last_note_volume = note_volume;
++        }
++        I_MusicNoteOn(channel, note, note_volume);
++        break;
++      }
++
++      case 2:
++      {
++        if (!I_MusicReadByte(&value))
++        {
++          I_MusicStopPlayback();
++          return;
++        }
++        I_music_state.channels[channel].bend = (signed char) ((int) value - 128);
++        I_MusicRefreshChannelPitch(channel);
++        break;
++      }
++
++      case 3:
++      {
++        if (!I_MusicReadByte(&value))
++        {
++          I_MusicStopPlayback();
++          return;
++        }
++        if (value == MUS_CONTROLLER_ALL_SOUNDS_OFF ||
++            value == MUS_CONTROLLER_ALL_NOTES_OFF)
++        {
++          I_MusicAllNotesOff(channel);
++        }
++        break;
++      }
++
++      case 4:
++      {
++        unsigned char controller = 0U;
++        unsigned char ctrl_value = 0U;
++
++        if (!I_MusicReadByte(&controller) || !I_MusicReadByte(&ctrl_value))
++        {
++          I_MusicStopPlayback();
++          return;
++        }
++        I_MusicApplyController(channel, controller, ctrl_value);
++        break;
++      }
++
++      case 5:
++        /* MUS event type 5 is reserved; ignore gracefully. */
++        break;
++
++      case MUS_EVENT_SCORE_END:
++        I_MusicHandleSongEnd();
++        break;
++
++      default:
++        I_MusicStopPlayback();
++        return;
++    }
++
++    if (!I_music_state.playing)
++      return;
++
++    if (is_last)
++    {
++      unsigned int delay_ticks = I_MusicReadDelayTicks();
++      if (!I_music_state.playing)
++        return;
++      I_music_state.samples_until_next_event = I_MusicTicksToSamples(delay_ticks);
++    }
++  }
++}
++
++static void I_MusicRenderSample(int* out_left, int* out_right)
++{
++  int i;
++  int left = 0;
++  int right = 0;
++
++  if (!out_left || !out_right)
++    return;
++
++  if (!I_music_state.playing ||
++      I_music_state.paused ||
++      snd_MusicVolume <= 0)
++  {
++    *out_left = 0;
++    *out_right = 0;
++    return;
++  }
++
++  if (I_music_state.samples_until_next_event == 0U)
++    I_MusicConsumeEvents();
++
++  if (!I_music_state.playing ||
++      I_music_state.paused ||
++      snd_MusicVolume <= 0)
++  {
++    *out_left = 0;
++    *out_right = 0;
++    return;
++  }
++
++  for (i = 0; i < MUS_MAX_VOICES; i++)
++  {
++    struct mus_voice_state* voice;
++    struct mus_channel_state* channel;
++    unsigned int wave_phase;
++    int tri;
++    long long scaled;
++    int sample;
++    int pan;
++
++    voice = &I_music_state.voices[i];
++    if (!voice->active)
++      continue;
++
++    channel = &I_music_state.channels[voice->channel];
++    voice->phase += voice->step;
++    wave_phase = (voice->phase >> 16) & 0xFFFFU;
++    if (wave_phase < 32768U)
++      tri = (int) wave_phase - 16384;
++    else
++      tri = 49152 - (int) wave_phase;
++
++    scaled = (long long) tri *
++             (long long) voice->note_volume *
++             (long long) channel->volume *
++             (long long) channel->expression *
++             (long long) snd_MusicVolume;
++    sample = (int) (scaled / (long long) MUS_MIX_SCALE_DENOM);
++
++    pan = (int) channel->pan;
++    left += (sample * (127 - pan)) / 127;
++    right += (sample * pan) / 127;
++  }
++
++  if (I_music_state.samples_until_next_event > 0U)
++    I_music_state.samples_until_next_event--;
++
++  *out_left = left;
++  *out_right = right;
++}
++
++static int I_MusicLoadSongData(const void* data)
++{
++  const unsigned char* song;
++  unsigned short score_len;
++  unsigned short score_start;
++
++  if (!data)
++  {
++    if (!I_music_log_once)
++    {
++      I_music_log_once = 1;
++      fprintf(stderr, "I_Music: register failed (null song data)\n");
++    }
++    return 0;
++  }
++
++  song = (const unsigned char*) data;
++  if (song[0] != 'M' || song[1] != 'U' || song[2] != 'S' || song[3] != 0x1A)
++  {
++    if (!I_music_log_once)
++    {
++      I_music_log_once = 1;
++      fprintf(stderr, "I_Music: unsupported lump format (%02X %02X %02X %02X)\n",
++              (unsigned) song[0], (unsigned) song[1], (unsigned) song[2], (unsigned) song[3]);
++    }
++    return 0;
++  }
++
++  score_len = I_MusicReadLE16(song + 4);
++  score_start = I_MusicReadLE16(song + 6);
++  if (score_len == 0U)
++    return 0;
++  if ((unsigned int) score_start + (unsigned int) score_len < (unsigned int) score_start)
++    return 0;
++
++  I_music_state.song_data = song;
++  I_music_state.score = song + score_start;
++  I_music_state.score_end = I_music_state.score + score_len;
++  I_music_state.cursor = I_music_state.score;
++  I_music_state.samples_until_next_event = 0U;
++  I_music_state.voice_alloc_index = 0U;
++  I_MusicResetChannels();
++  I_MusicResetVoices();
++  fprintf(stderr, "I_Music: MUS song loaded (score=%u bytes)\n", (unsigned) score_len);
++  return 1;
++}
++
+ void I_SetMusicVolume(int volume)
+ {
+-  // Internal state variable.
++  if (volume < 0)
++    volume = 0;
++  else if (volume > 15)
++    volume = 15;
+   snd_MusicVolume = volume;
+-  // Now set volume on output device.
+-  // Whatever( snd_MusciVolume );
+ }
+ 
+ 
+@@ -562,6 +1178,8 @@ void I_UpdateSound( void )
+ 
+   // Mixing channel index.
+   int				chan;
++  int                           music_left;
++  int                           music_right;
+     
+     // Left and right channel
+     //  are in global mixbuffer, alternating.
+@@ -610,6 +1228,14 @@ void I_UpdateSound( void )
+ 		    channels[ chan ] = 0;
+ 	    }
+ 	}
++
++        // Mix software music on top of SFX stream.
++        I_MusicRenderSample(&music_left, &music_right);
++        dl += music_left;
++        dr += music_right;
++
++        dl = I_CompressAndClamp16(dl);
++        dr = I_CompressAndClamp16(dr);
+ 	
+ 	// Clamp to range. Left hardware channel.
+ 	// Has been char instead of short.
+@@ -669,7 +1295,8 @@ void
+ I_SubmitSound(void)
+ {
+   // Write it to DSP device.
+-  write(audio_fd, mixbuffer, SAMPLECOUNT*BUFMUL);
++  if (audio_fd >= 0)
++    write(audio_fd, mixbuffer, SAMPLECOUNT*BUFMUL);
+ }
+ 
+ 
+@@ -725,7 +1352,9 @@ void I_ShutdownSound(void)
+ #endif
+   
+   // Cleaning up -releasing the DSP device.
+-  close ( audio_fd );
++  if (audio_fd >= 0)
++    close ( audio_fd );
++  audio_fd = -1;
+ #endif
+ 
+   // Done.
+@@ -740,6 +1369,7 @@ void I_ShutdownSound(void)
+ void
+ I_InitSound()
+ { 
++  I_InitMusic();
+ #ifdef SNDSERV
+   char buffer[256];
+   
+@@ -772,27 +1402,28 @@ I_InitSound()
+   
+   audio_fd = open("/dev/dsp", O_WRONLY);
+   if (audio_fd<0)
++  {
+     fprintf(stderr, "Could not open /dev/dsp\n");
++    return;
++  }
+   
+-                     
+-/*  i = 11 | (2<<16);                                           
+-  myioctl(audio_fd, SNDCTL_DSP_SETFRAGMENT, &i);
+-  myioctl(audio_fd, SNDCTL_DSP_RESET, 0);
++  i = AUDIO_FRAGMENT_SHIFT | (AUDIO_FRAGMENT_COUNT << 16);
++  (void) myioctl(audio_fd, SNDCTL_DSP_SETFRAGMENT, &i);
++  (void) myioctl(audio_fd, SNDCTL_DSP_RESET, &i);
+   
+   i=SAMPLERATE;
+   
+-  myioctl(audio_fd, SNDCTL_DSP_SPEED, &i);
++  (void) myioctl(audio_fd, SNDCTL_DSP_SPEED, &i);
+   
+   i=1;
+-  myioctl(audio_fd, SNDCTL_DSP_STEREO, &i);
++  (void) myioctl(audio_fd, SNDCTL_DSP_STEREO, &i);
+   
+-  myioctl(audio_fd, SNDCTL_DSP_GETFMTS, &i);
++  (void) myioctl(audio_fd, SNDCTL_DSP_GETFMTS, &i);
+   
+-  if (i&=AFMT_S16_LE)    
+-    myioctl(audio_fd, SNDCTL_DSP_SETFMT, &i);
++  if (i&=AFMT_S16_LE)
++    (void) myioctl(audio_fd, SNDCTL_DSP_SETFMT, &i);
+   else
+     fprintf(stderr, "Could not play signed 16 data\n");
+-*/
+   fprintf(stderr, " configured audio device\n" );
+ 
+     
+@@ -832,67 +1463,130 @@ I_InitSound()
+ 
+ //
+ // MUSIC API.
+-// Still no music done.
+-// Remains. Dummies.
++// Software MUS playback mixed with SFX.
+ //
+-void I_InitMusic(void)		{ }
+-void I_ShutdownMusic(void)	{ }
++void I_InitMusic(void)
++{
++  I_music_state.registered_handle = 0;
++  I_music_state.song_data = 0;
++  I_music_state.score = 0;
++  I_music_state.cursor = 0;
++  I_music_state.score_end = 0;
++  I_music_state.looping = 0;
++  I_music_state.playing = 0;
++  I_music_state.paused = 0;
++  I_music_state.samples_until_next_event = 0U;
++  I_music_state.voice_alloc_index = 0U;
++  I_MusicResetChannels();
++  I_MusicResetVoices();
++}
+ 
+-static int	looping=0;
+-static int	musicdies=-1;
++void I_ShutdownMusic(void)
++{
++  I_MusicStopPlayback();
++  I_music_state.song_data = 0;
++  I_music_state.score = 0;
++  I_music_state.cursor = 0;
++  I_music_state.score_end = 0;
++  I_music_state.registered_handle = 0;
++}
+ 
+ void I_PlaySong(int handle, int looping)
+ {
+-  // UNUSED.
+-  handle = looping = 0;
+-  musicdies = gametic + TICRATE*30;
++  if (handle <= 0 || handle != I_music_state.registered_handle)
++  {
++    if (!I_music_log_once)
++    {
++      I_music_log_once = 1;
++      fprintf(stderr, "I_Music: play ignored (invalid handle=%d)\n", handle);
++    }
++    return;
++  }
++  if (!I_music_state.song_data || !I_music_state.score || !I_music_state.score_end)
++  {
++    if (!I_music_log_once)
++    {
++      I_music_log_once = 1;
++      fprintf(stderr, "I_Music: play ignored (song not loaded)\n");
++    }
++    return;
++  }
++
++  I_music_state.looping = (looping != 0);
++  I_music_state.playing = 1;
++  I_music_state.paused = 0;
++  I_music_state.cursor = I_music_state.score;
++  I_music_state.samples_until_next_event = 0U;
++  I_music_state.voice_alloc_index = 0U;
++  I_MusicResetChannels();
++  I_MusicResetVoices();
++  fprintf(stderr, "I_Music: playback start (loop=%d)\n", (looping != 0));
+ }
+ 
+ void I_PauseSong (int handle)
+ {
+-  // UNUSED.
+-  handle = 0;
++  if (handle <= 0 || handle != I_music_state.registered_handle)
++    return;
++  if (I_music_state.playing)
++    I_music_state.paused = 1;
+ }
+ 
+ void I_ResumeSong (int handle)
+ {
+-  // UNUSED.
+-  handle = 0;
++  if (handle <= 0 || handle != I_music_state.registered_handle)
++    return;
++  if (I_music_state.playing)
++    I_music_state.paused = 0;
+ }
+ 
+ void I_StopSong(int handle)
+ {
+-  // UNUSED.
+-  handle = 0;
+-  
+-  looping = 0;
+-  musicdies = 0;
++  if (handle > 0 && handle != I_music_state.registered_handle)
++    return;
++
++  I_MusicStopPlayback();
++  I_music_state.looping = 0;
+ }
+ 
+ void I_UnRegisterSong(int handle)
+ {
+-  // UNUSED.
+-  handle = 0;
++  if (handle <= 0 || handle != I_music_state.registered_handle)
++    return;
++
++  I_MusicStopPlayback();
++  I_music_state.song_data = 0;
++  I_music_state.score = 0;
++  I_music_state.cursor = 0;
++  I_music_state.score_end = 0;
++  I_music_state.registered_handle = 0;
+ }
+ 
+ int I_RegisterSong(void* data)
+ {
+-  // UNUSED.
+-  data = NULL;
+-  
+-  return 1;
++  static int next_music_handle = 1;
++
++  if (!I_MusicLoadSongData(data))
++    return 0;
++
++  if (next_music_handle <= 0)
++    next_music_handle = 1;
++
++  I_music_state.registered_handle = next_music_handle++;
++  I_music_state.playing = 0;
++  I_music_state.paused = 0;
++  I_music_state.looping = 0;
++  return I_music_state.registered_handle;
+ }
+ 
+ // Is the song playing?
+ int I_QrySongPlaying(int handle)
+ {
+-  // UNUSED.
+-  handle = 0;
+-  return looping || musicdies > gametic;
++  if (handle <= 0 || handle != I_music_state.registered_handle)
++    return 0;
++  return I_music_state.playing;
+ }
+ 
+-
+-
++#ifdef SNDINTR
+ //
+ // Experimental stuff.
+ // A Linux timer interrupt, for asynchronous
+@@ -927,7 +1621,8 @@ void I_HandleSoundTimer( int ignore )
+   {
+     // See I_SubmitSound().
+     // Write it to DSP device.
+-    write(audio_fd, mixbuffer, SAMPLECOUNT*BUFMUL);
++    if (audio_fd >= 0)
++      write(audio_fd, mixbuffer, SAMPLECOUNT*BUFMUL);
+ 
+     // Reset flag counter.
+     flag = 0;
+@@ -988,3 +1683,4 @@ void I_SoundDelTimer()
+ }
+ 
+ #endif
++#endif
+diff --git a/src/i_system.c b/src/i_system.c
+index 4fcf7bd..7128bec 100644
+--- a/src/i_system.c
++++ b/src/i_system.c
+@@ -72,17 +72,63 @@ ticcmd_t*	I_BaseTiccmd(void)
+     return &emptycmd;
+ }
+ 
++#if defined(THEOS_RUNTIME)
++static unsigned char* DOOMHeap = NULL;
++static int DOOMHeapSize = 0;
++
++static int I_EnsureZoneHeap(void)
++{
++    int mib;
++
++    if (DOOMHeap && DOOMHeapSize > 0)
++        return DOOMHeapSize;
++
++    // Prefer larger contiguous blocks first; fall back gradually.
++    for (mib = 128; mib >= 16; mib -= 8)
++    {
++        size_t bytes = (size_t) mib * 1024U * 1024U;
++        unsigned char* heap = (unsigned char*) malloc(bytes);
++        if (!heap)
++            continue;
++
++        DOOMHeap = heap;
++        DOOMHeapSize = (int) bytes;
++        memset(DOOMHeap, 0, bytes);
++        fprintf(stderr, "[DOOM] zone heap=%d MiB\n", mib);
++        return DOOMHeapSize;
++    }
++
++    return 0;
++}
++#else
+ unsigned char DOOMHeap[FIXED_HEAP];
++#endif
+ 
+ int  I_GetHeapSize (void)
+ {
++#if defined(THEOS_RUNTIME)
++    return I_EnsureZoneHeap();
++#else
+     return FIXED_HEAP;
++#endif
+ }
+ 
+ byte* I_ZoneBase (int*	size)
+ {
++#if defined(THEOS_RUNTIME)
++    int heap_size = I_EnsureZoneHeap();
++    if (heap_size <= 0 || !DOOMHeap)
++    {
++        *size = 0;
++        return NULL;
++    }
++
++    *size = heap_size;
++    return (byte*) DOOMHeap;
++#else
+     *size = FIXED_HEAP; //mb_used*1024*1024;
+     return (byte *) DOOMHeap;
++#endif
+ }
+ 
+ 
+@@ -126,6 +172,14 @@ void I_Quit (void)
+     I_ShutdownMusic();
+     M_SaveDefaults ();
+     I_ShutdownGraphics();
++#if defined(THEOS_RUNTIME)
++    if (DOOMHeap)
++    {
++        free(DOOMHeap);
++        DOOMHeap = NULL;
++        DOOMHeapSize = 0;
++    }
++#endif
+     exit(0);
+ }
+ 
+@@ -183,6 +237,14 @@ void I_Error (char *error, ...)
+ 
+     D_QuitNetGame ();
+     I_ShutdownGraphics();
++#if defined(THEOS_RUNTIME)
++    if (DOOMHeap)
++    {
++        free(DOOMHeap);
++        DOOMHeap = NULL;
++        DOOMHeapSize = 0;
++    }
++#endif
+     
+     exit(-1);
+ }
+diff --git a/src/m_swap.c b/src/m_swap.c
+index d889720..5691bed 100644
+--- a/src/m_swap.c
++++ b/src/m_swap.c
+@@ -42,16 +42,17 @@ unsigned short SwapSHORT(unsigned short x)
+ }
+ 
+ // Swapping 32bit.
+-unsigned long SwapLONG( unsigned long x)
++int32_t SwapLONG(int32_t x)
+ {
++    uint32_t ux = (uint32_t) x;
+     return
+-	(x>>24)
+-	| ((x>>8) & 0xff00)
+-	| ((x<<8) & 0xff0000)
+-	| (x<<24);
++	(int32_t) (
++		(ux >> 24)
++		| ((ux >> 8) & 0x0000ff00U)
++		| ((ux << 8) & 0x00ff0000U)
++		| (ux << 24));
+ }
+ 
+ 
+ #endif
+ 
+-
+diff --git a/src/m_swap.h b/src/m_swap.h
+index 86f6e0a..d131409 100644
+--- a/src/m_swap.h
++++ b/src/m_swap.h
+@@ -23,6 +23,8 @@
+ #ifndef __M_SWAP__
+ #define __M_SWAP__
+ 
++#include <stdint.h>
++
+ 
+ #ifdef __GNUG__
+ #pragma interface
+@@ -33,12 +35,12 @@
+ // WAD files are stored little endian.
+ #ifdef __BIG_ENDIAN__
+ short	SwapSHORT(short);
+-long	SwapLONG(long);
++int32_t	SwapLONG(int32_t);
+ #define SHORT(x)	((short)SwapSHORT((unsigned short) (x)))
+-#define LONG(x)         ((long)SwapLONG((unsigned long) (x)))
++#define LONG(x)         ((int32_t)SwapLONG((int32_t)(x)))
+ #else
+ #define SHORT(x)	(x)
+-#define LONG(x)         (x)
++#define LONG(x)         ((int32_t)(x))
+ #endif
+ 
+ 
+diff --git a/src/p_setup.c b/src/p_setup.c
+index 23967a0..708ea73 100644
+--- a/src/p_setup.c
++++ b/src/p_setup.c
+@@ -408,7 +408,7 @@ void P_GroupLines (void)
+     }
+ 	
+     // build line tables for each sector	
+-    linebuffer = Z_Malloc (total*4, PU_LEVEL, 0);
++    linebuffer = Z_Malloc (total * sizeof(*linebuffer), PU_LEVEL, 0);
+     sector = sectors;
+     for (i=0 ; i<numsectors ; i++, sector++)
+     {
+@@ -891,4 +891,3 @@ void P_Init (void)
+ }
+ 
+ 
+-
+diff --git a/src/r_data.c b/src/r_data.c
+index 5737c8b..94e3916 100644
+--- a/src/r_data.c
++++ b/src/r_data.c
+@@ -436,13 +436,13 @@ void R_InitTextures (void)
+ 	}
+ #ifdef GENERATE_BAKED
+ 	numtextures = numtextures1 + numtextures2;
+-	textures = Z_Malloc (numtextures*4, PU_STATIC, 0);
+-	texturecolumnlump = Z_Malloc (numtextures*4, PU_STATIC, 0);
+-	texturecolumnofs = Z_Malloc (numtextures*4, PU_STATIC, 0);
+-	texturecomposite = Z_Malloc (numtextures*4, PU_STATIC, 0);
+-	texturecompositesize = Z_Malloc (numtextures*4, PU_STATIC, 0);
+-	texturewidthmask = Z_Malloc (numtextures*4, PU_STATIC, 0);
+-	textureheight = Z_Malloc (numtextures*4, PU_STATIC, 0);
++	textures = Z_Malloc (numtextures * sizeof(*textures), PU_STATIC, 0);
++	texturecolumnlump = Z_Malloc (numtextures * sizeof(*texturecolumnlump), PU_STATIC, 0);
++	texturecolumnofs = Z_Malloc (numtextures * sizeof(*texturecolumnofs), PU_STATIC, 0);
++	texturecomposite = Z_Malloc (numtextures * sizeof(*texturecomposite), PU_STATIC, 0);
++	texturecompositesize = Z_Malloc (numtextures * sizeof(*texturecompositesize), PU_STATIC, 0);
++	texturewidthmask = Z_Malloc (numtextures * sizeof(*texturewidthmask), PU_STATIC, 0);
++	textureheight = Z_Malloc (numtextures * sizeof(*textureheight), PU_STATIC, 0);
+ 	totalwidth = 0;
+ 	
+ 	//		Really complex printing shit...
+@@ -754,7 +754,7 @@ void R_PrecacheLevel (void)
+ 		{
+ 			lump = firstflat + i;
+ 
+-#ifdef GENERATE_BAKED
++#if defined(GENERATE_BAKED) && !defined(THEOS_RUNTIME)
+ 				printf( "\nACCESS_LUMP 7 %d\n", lump );
+ #endif
+ 
+@@ -794,7 +794,7 @@ void R_PrecacheLevel (void)
+ 		{
+ 			lump = texture->patches[j].patch;
+ 
+-#ifdef GENERATE_BAKED
++#if defined(GENERATE_BAKED) && !defined(THEOS_RUNTIME)
+ 				printf( "\nACCESS_LUMP 6 %d\n", lump );
+ #endif
+ 
+@@ -827,7 +827,7 @@ void R_PrecacheLevel (void)
+ 				lump = firstspritelump + sf->lump[k];
+ 
+ 
+-#ifdef GENERATE_BAKED
++#if defined(GENERATE_BAKED) && !defined(THEOS_RUNTIME)
+ 				printf( "\nACCESS_LUMP 8 %d\n", lump );
+ #endif
+ 
+@@ -839,5 +839,3 @@ void R_PrecacheLevel (void)
+ }
+ 
+ 
+-
+-
+diff --git a/src/r_data.h b/src/r_data.h
+index f82e081..e7915b3 100644
+--- a/src/r_data.h
++++ b/src/r_data.h
+@@ -24,6 +24,9 @@
+ #ifndef __R_DATA__
+ #define __R_DATA__
+ 
++#include <stddef.h>
++#include <stdint.h>
++
+ #include "r_defs.h"
+ #include "r_state.h"
+ 
+@@ -61,11 +64,19 @@ typedef struct
+     boolean		masked;	
+     short		width;
+     short		height;
+-    void		**columndirectory;	// OBSOLETE
++    // WAD on-disk field is a 32-bit obsolete pointer, keep fixed width on LP64.
++    uint32_t		columndirectory;
+     short		patchcount;
+     mappatch_t	patches[1];
+ } maptexture_t;
+ 
++typedef char maptexture_columndirectory_is_32_bit[
++	(sizeof(((maptexture_t*)0)->columndirectory) == 4) ? 1 : -1
++];
++typedef char maptexture_patchcount_offset_is_20[
++	(offsetof(maptexture_t, patchcount) == 20) ? 1 : -1
++];
++
+ 
+ // A single patch from a texture definition,
+ //  basically a rectangular area within
+diff --git a/src/r_things.c b/src/r_things.c
+index dbde35f..5e999b8 100644
+--- a/src/r_things.c
++++ b/src/r_things.c
+@@ -232,7 +232,7 @@ void R_InitSpriteDefs (char** namelist)
+ 					patched = l;
+ 
+ 		
+-#ifdef GENERATE_BAKED
++#if defined(GENERATE_BAKED) && !defined(THEOS_RUNTIME)
+ 				printf( "\nACCESS_LUMP 5 %d\n", l );
+ 				printf( "\nACCESS_LUMP 5 %d\n", patched );
+ #endif
+@@ -996,4 +996,3 @@ void R_DrawMasked (void)
+ }
+ 
+ 
+-
+diff --git a/src/s_sound.c b/src/s_sound.c
+index 2b4962e..cb7d9d3 100644
+--- a/src/s_sound.c
++++ b/src/s_sound.c
+@@ -171,7 +171,7 @@ void S_Init
+   I_SetChannels();
+   
+   S_SetSfxVolume(sfxVolume);
+-  // No music with Linux - another dummy.
++  // Music backend is provided by I_* in i_sound.c.
+   S_SetMusicVolume(musicVolume);
+ 
+   // Allocating the internal channels for mixing
+diff --git a/src/stubs.h b/src/stubs.h
+index 01dfeb4..fd953e9 100644
+--- a/src/stubs.h
++++ b/src/stubs.h
+@@ -1,21 +1,30 @@
+-#define TUNE_MAXVISPLANES 32  //At 16, frequently causes visual glitches, but size is critical.
+-#define TUNE_MAXOPENINGS	SCREENWIDTH*16
++#if defined(THEOS_RUNTIME)
++#define TUNE_MAXVISPLANES 128
++#define TUNE_MAXOPENINGS (SCREENWIDTH * 64)
++#else
++#define TUNE_MAXVISPLANES 32  // At 16, frequently causes visual glitches, but size is critical.
++#define TUNE_MAXOPENINGS (SCREENWIDTH * 16)
+ #define STUB_NET
++#endif
+ 
+ #ifndef SET_MEMORY_DEBUG
+ #define SET_MEMORY_DEBUG 1 // For printing free RAM.
+ #endif
+ 
+-#define COMBINE_SCREENS //Overlap memory for screens #0-3, saves RAM would mess up wipes, but we don't care.
++#if !defined(THEOS_RUNTIME)
++#define COMBINE_SCREENS // Overlap memory for screens #0-3 on constrained embedded targets.
+ 
+-//Disable screen wipings, saves peaks of 64k on heap.
++// Disable screen wipes on constrained embedded targets.
+ #define DISABLE_WIPES
++#endif
+ 
+ //We can create tables for things like the textures and maps... You can set the flags here to produce these.
+ //Don't do this on target hardware!!!
+ 
+ #ifndef FIXED_HEAP
+-#ifdef GENERATE_BAKED
++#if defined(THEOS_RUNTIME)
++#define FIXED_HEAP (64 * 1024 * 1024)
++#elif defined(GENERATE_BAKED)
+ #define FIXED_HEAP 40000000 //Heap size when running on computer to store full size.
+ #else
+ #define FIXED_HEAP (384*1024)   //Actual heap for embedded device.
+@@ -23,8 +32,10 @@
+ #endif
+ 
+ 
+-//Always stub sound, right now the existing system takes up like 1.5MB of heap!
++// Keep sound stubbed on constrained embedded targets, but enable real audio on TheOS runtime.
++#if !defined(THEOS_RUNTIME)
+ #define STUB_SOUND
++#endif
+ 
+ 
+ 
+@@ -49,5 +60,3 @@
+ #endif
+ 
+ 
+-
+-
+diff --git a/src/support/shrinkwad.c b/src/support/shrinkwad.c
+index 50e0db4..551b472 100644
+--- a/src/support/shrinkwad.c
++++ b/src/support/shrinkwad.c
+@@ -1,6 +1,7 @@
+ #include <stdio.h>
+ #include <string.h>
+ #include <stdlib.h>
++#include <stdint.h>
+ 
+ #include "rawwad.h"
+ #include "rawwad.c"
+@@ -43,10 +44,11 @@ typedef struct
+ typedef struct
+ {
+     char		name[8];
+-    char		masked;	
++    int32_t		masked;	
+     short		width;
+     short		height;
+-    void		**columndirectory;	// OBSOLETE
++    // WAD on-disk field is a 32-bit obsolete pointer.
++    uint32_t		columndirectory;
+     short		patchcount;
+     mappatch_t	patches[1];
+ } maptexture_t;
+@@ -176,7 +178,7 @@ int main( int argc, char ** argv )
+ 		if( strncmp( lumpinfo[i].name, "TEXTURE1", 8 ) == 0 )
+ 		{
+ 			int offset = lumpinfo[i].position;
+-			texture1datasize = lumpinfo[i].position;
++			texture1datasize = lumpinfo[i].size;
+ 			texture1data = malloc( texture1datasize+1 );
+ 			memcpy( texture1data, &rawwad[offset], texture1datasize );
+ 			((unsigned char*)texture1data)[texture1datasize] = 0;
+@@ -386,4 +388,3 @@ int main( int argc, char ** argv )
+ 	fclose( f_c );
+ }
+ 
+-
+diff --git a/src/w_wad.c b/src/w_wad.c
+index e58b20f..1009384 100644
+--- a/src/w_wad.c
++++ b/src/w_wad.c
+@@ -238,7 +238,7 @@ int W_CheckNumForName (char* name)
+ 		if ( *(int *)lump_p->name == v1
+ 			 && *(int *)&lump_p->name[4] == v2)
+ 		{
+-#ifdef GENERATE_BAKED
++#if defined(GENERATE_BAKED) && !defined(THEOS_RUNTIME)
+ 			printf( "\nACCESS_LUMP 0 %d\n", lump_p - lumpinfo );
+ #endif
+ 			return lump_p - lumpinfo;
+@@ -277,7 +277,7 @@ int W_GetNumForName (char* name)
+ //
+ int W_LumpLength (int lump)
+ {
+-#ifdef GENERATE_BAKED
++#if defined(GENERATE_BAKED) && !defined(THEOS_RUNTIME)
+ 	printf( "\nACCESS_LUMP 1 %d\n", lump );
+ #endif
+ 	if (lump >= numlumps)
+@@ -299,7 +299,7 @@ void W_ReadLump( int lump, void* dest )
+ 	lumpinfo_t*		l;
+ 	int				handle;
+ 
+-#ifdef GENERATE_BAKED
++#if defined(GENERATE_BAKED) && !defined(THEOS_RUNTIME)
+ 	printf( "\nACCESS_LUMP 2 %d\n", lump );
+ #endif
+ 	if (lump >= numlumps)
+@@ -322,7 +322,7 @@ W_CacheLumpNum
+ {
+ 	byte*		ptr;
+ 
+-#ifdef GENERATE_BAKED
++#if defined(GENERATE_BAKED) && !defined(THEOS_RUNTIME)
+ 	printf( "\nACCESS_LUMP 3 %d\n", lump );
+ #endif
+ 	if ((unsigned)lump >= numlumps)
+@@ -355,7 +355,7 @@ W_CacheLumpNum_Old
+ {
+ 	byte*		ptr;
+ 
+-#ifdef GENERATE_BAKED
++#if defined(GENERATE_BAKED) && !defined(THEOS_RUNTIME)
+ 	printf( "\nACCESS_LUMP 4 %d\n", lump );
+ #endif
+ 
+@@ -382,4 +382,3 @@ W_CacheLumpName
+ }
+ 
+ 
+-
+diff --git a/src/z_zone.c b/src/z_zone.c
+index d879a26..68a1522 100644
+--- a/src/z_zone.c
++++ b/src/z_zone.c
+@@ -481,4 +481,3 @@ int Z_FreeMemory (void)
+     }
+     return free;
+ }
+-
