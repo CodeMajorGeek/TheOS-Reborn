@@ -3,6 +3,7 @@
 #include <fcntl.h>
 #include <libc_tls.h>
 #include <sched.h>
+#include <signal.h>
 #include <stddef.h>
 #include <pthread.h>
 #include <stdlib.h>
@@ -43,6 +44,7 @@
 // pthread API is expected to be true shared-address-space threading.
 #define TEST_PTHREAD_SHIM
 #define TEST_TLS_DYNAMIC
+#define TEST_SIGNALS
 #define TEST_DRM_KMS
 #define TEST_AUDIO_DSP
 #define TEST_LIBDL
@@ -842,6 +844,236 @@ static void thetest_cow_probe(void)
                (unsigned int) probe[probe_size - 1U]);
 
     free(probe);
+}
+
+static volatile sig_atomic_t thetest_signal_hits = 0;
+static volatile sig_atomic_t thetest_signal_last = 0;
+
+static void thetest_signal_handler(int sig)
+{
+    thetest_signal_hits++;
+    thetest_signal_last = (sig_atomic_t) sig;
+}
+
+static void thetest_signal_report_check(const char* label, bool ok, uint32_t* passed, uint32_t* failed)
+{
+    if (ok)
+    {
+        if (passed)
+            (*passed)++;
+        printf("[TheTest][signal] %s: OK\n", label);
+    }
+    else
+    {
+        if (failed)
+            (*failed)++;
+        printf("[TheTest][signal] %s: FAILED\n", label);
+    }
+}
+
+static int thetest_signal_spawn_child(uint32_t hold_ticks, int exit_code)
+{
+    int pid = fork();
+    if (pid < 0)
+        return pid;
+
+    if (pid == 0)
+    {
+        if (hold_ticks != 0U)
+        {
+            uint64_t start_tick = sys_tick_get();
+            while ((sys_tick_get() - start_tick) < (uint64_t) hold_ticks)
+                (void) sched_yield();
+        }
+        _exit(exit_code);
+    }
+
+    return pid;
+}
+
+static void thetest_signal_probe_action(int sig,
+                                        const char* name,
+                                        int expected_status,
+                                        int expected_signal,
+                                        uint32_t* passed,
+                                        uint32_t* failed)
+{
+    int pid = thetest_signal_spawn_child(220U, expected_status);
+    if (pid < 0)
+    {
+        char label[96];
+        (void) snprintf(label, sizeof(label), "spawn for %s", name);
+        thetest_signal_report_check(label, false, passed, failed);
+        return;
+    }
+
+    int kill_rc = kill(pid, sig);
+    int status = 0;
+    int signal = 0;
+    int wait_rc = thetest_wait_child(pid, &status, &signal, 2000U);
+
+    bool ok = (kill_rc == 0 &&
+               wait_rc == pid &&
+               status == expected_status &&
+               signal == expected_signal);
+
+    if (wait_rc == -2)
+        (void) kill(pid, SIGKILL);
+    if (!ok)
+    {
+        printf("[TheTest][signal] detail %s: kill_rc=%d wait_rc=%d status=%d signal=%d\n",
+               name,
+               kill_rc,
+               wait_rc,
+               status,
+               signal);
+    }
+
+    char label[96];
+    (void) snprintf(label, sizeof(label), "default action %s", name);
+    thetest_signal_report_check(label, ok, passed, failed);
+}
+
+static void thetest_signals_probe(void)
+{
+    uint32_t passed = 0U;
+    uint32_t failed = 0U;
+    printf("[TheTest] signal probe start\n");
+
+    thetest_signal_hits = 0;
+    thetest_signal_last = 0;
+    errno = 0;
+    bool install_ok = (signal(SIGUSR1, thetest_signal_handler) != SIG_ERR);
+    bool raise_ok = (raise(SIGUSR1) == 0);
+    bool handler_ok = (thetest_signal_hits == 1 && thetest_signal_last == SIGUSR1);
+    bool reset_ok = (signal(SIGUSR1, SIG_DFL) != SIG_ERR);
+    thetest_signal_report_check("signal()+raise(SIGUSR1) handler path",
+                                install_ok && raise_ok && handler_ok && reset_ok,
+                                &passed,
+                                &failed);
+
+    errno = 0;
+    bool sigkill_catch_ok = (signal(SIGKILL, thetest_signal_handler) == SIG_ERR && errno == EINVAL);
+    thetest_signal_report_check("SIGKILL is not catchable", sigkill_catch_ok, &passed, &failed);
+
+    thetest_signal_hits = 0;
+    thetest_signal_last = 0;
+    bool ign_set_ok = (signal(SIGUSR2, SIG_IGN) != SIG_ERR);
+    bool ign_raise_ok = (raise(SIGUSR2) == 0);
+    bool ign_state_ok = (thetest_signal_hits == 0 && thetest_signal_last == 0);
+    bool ign_reset_ok = (signal(SIGUSR2, SIG_DFL) != SIG_ERR);
+    thetest_signal_report_check("SIG_IGN path (SIGUSR2)",
+                                ign_set_ok && ign_raise_ok && ign_state_ok && ign_reset_ok,
+                                &passed,
+                                &failed);
+
+    int probe_pid = thetest_signal_spawn_child(25U, 0);
+    if (probe_pid < 0)
+    {
+        thetest_signal_report_check("kill(pid, 0) probe", false, &passed, &failed);
+        thetest_signal_report_check("kill invalid signal range", false, &passed, &failed);
+    }
+    else
+    {
+        bool probe_ok = (kill(probe_pid, 0) == 0);
+        thetest_signal_report_check("kill(pid, 0) probe", probe_ok, &passed, &failed);
+
+        errno = 0;
+        bool invalid_sig_ok = (kill(probe_pid, NSIG) < 0 && errno == EINVAL);
+        thetest_signal_report_check("kill invalid signal range", invalid_sig_ok, &passed, &failed);
+
+        int status = 0;
+        int signal = 0;
+        int wait_rc = thetest_wait_child(probe_pid, &status, &signal, 2000U);
+        bool child_ok = (wait_rc == probe_pid && status == 0 && signal == 0);
+        thetest_signal_report_check("kill probe child exits normally", child_ok, &passed, &failed);
+        if (wait_rc == -2)
+            (void) kill(probe_pid, SIGKILL);
+    }
+
+    thetest_signal_probe_action(SIGTERM, "SIGTERM", 0, SIGTERM, &passed, &failed);
+    thetest_signal_probe_action(SIGABRT, "SIGABRT", 0, SIGABRT, &passed, &failed);
+
+    int ignored_pid = thetest_signal_spawn_child(30U, 7);
+    if (ignored_pid < 0)
+    {
+        thetest_signal_report_check("default ignore SIGCHLD", false, &passed, &failed);
+    }
+    else
+    {
+        int kill_rc = kill(ignored_pid, SIGCHLD);
+        int status = 0;
+        int signal = 0;
+        int wait_rc = thetest_wait_child(ignored_pid, &status, &signal, 2000U);
+        bool ignore_ok = (kill_rc == 0 && wait_rc == ignored_pid && status == 7 && signal == 0);
+        if (!ignore_ok)
+        {
+            printf("[TheTest][signal] detail SIGCHLD: kill_rc=%d wait_rc=%d status=%d signal=%d\n",
+                   kill_rc,
+                   wait_rc,
+                   status,
+                   signal);
+        }
+        thetest_signal_report_check("default ignore SIGCHLD", ignore_ok, &passed, &failed);
+        if (wait_rc == -2)
+            (void) kill(ignored_pid, SIGKILL);
+    }
+
+    int stop_pid = thetest_signal_spawn_child(35U, 9);
+    if (stop_pid < 0)
+    {
+        thetest_signal_report_check("SIGSTOP semantics probe", false, &passed, &failed);
+    }
+    else
+    {
+        int stop_kill_rc = kill(stop_pid, SIGSTOP);
+        int status = 0;
+        int signal = 0;
+        int wait_rc = thetest_wait_child(stop_pid, &status, &signal, 700U);
+        bool stop_ok = false;
+
+        if (wait_rc == stop_pid && status == 9 && signal == 0)
+        {
+            stop_ok = (stop_kill_rc == 0);
+            if (stop_ok)
+                printf("[TheTest][signal] SIGSTOP behaved as non-blocking/no-op (not implemented yet)\n");
+        }
+        else if (wait_rc == -2)
+        {
+            int cont_rc = kill(stop_pid, SIGCONT);
+            int resume_wait_rc = thetest_wait_child(stop_pid, &status, &signal, 1500U);
+            stop_ok = (stop_kill_rc == 0 &&
+                       cont_rc == 0 &&
+                       resume_wait_rc == stop_pid &&
+                       status == 9 &&
+                       signal == 0);
+            if (stop_ok)
+                printf("[TheTest][signal] SIGSTOP/SIGCONT behaved as true stop/continue\n");
+        }
+
+        if (!stop_ok)
+        {
+            printf("[TheTest][signal] detail SIGSTOP: kill_rc=%d wait_rc=%d status=%d signal=%d\n",
+                   stop_kill_rc,
+                   wait_rc,
+                   status,
+                   signal);
+        }
+        thetest_signal_report_check("SIGSTOP semantics probe", stop_ok, &passed, &failed);
+        if (wait_rc == -2 && !stop_ok)
+            (void) kill(stop_pid, SIGKILL);
+    }
+
+    if (failed == 0U)
+    {
+        printf("[TheTest] signal probe: OK (checks=%u)\n", (unsigned int) passed);
+    }
+    else
+    {
+        printf("[TheTest] signal probe: FAILED (ok=%u failed=%u)\n",
+               (unsigned int) passed,
+               (unsigned int) failed);
+    }
 }
 
 typedef struct thetest_pthread_arg
@@ -1880,6 +2112,10 @@ int main(int argc, char** argv, char** envp)
 
 #ifdef TEST_TLS_DYNAMIC
     thetest_tls_dynamic_probe();
+#endif
+
+#ifdef TEST_SIGNALS
+    thetest_signals_probe();
 #endif
 
 #ifdef TEST_AUDIO_DSP

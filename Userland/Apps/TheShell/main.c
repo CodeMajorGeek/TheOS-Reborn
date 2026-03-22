@@ -402,14 +402,74 @@ static const char* shell_signal_name(int signal)
 {
     switch (signal)
     {
-        case SIGFPE:
-            return "SIGFPE";
-        case SIGTRAP:
-            return "SIGTRAP";
+        case SIGHUP:
+            return "SIGHUP";
+        case SIGINT:
+            return "SIGINT";
+        case SIGQUIT:
+            return "SIGQUIT";
         case SIGILL:
             return "SIGILL";
+        case SIGTRAP:
+            return "SIGTRAP";
+        case SIGABRT:
+            return "SIGABRT";
+        case SIGEMT:
+            return "SIGEMT";
+        case SIGFPE:
+            return "SIGFPE";
+        case SIGKILL:
+            return "SIGKILL";
+        case SIGBUS:
+            return "SIGBUS";
         case SIGSEGV:
             return "SIGSEGV";
+        case SIGSYS:
+            return "SIGSYS";
+        case SIGPIPE:
+            return "SIGPIPE";
+        case SIGALRM:
+            return "SIGALRM";
+        case SIGTERM:
+            return "SIGTERM";
+        case SIGUSR1:
+            return "SIGUSR1";
+        case SIGUSR2:
+            return "SIGUSR2";
+        case SIGCHLD:
+            return "SIGCHLD";
+        case SIGPWR:
+            return "SIGPWR";
+        case SIGWINCH:
+            return "SIGWINCH";
+        case SIGURG:
+            return "SIGURG";
+        case SIGPOLL:
+            return "SIGPOLL";
+        case SIGSTOP:
+            return "SIGSTOP";
+        case SIGTSTP:
+            return "SIGTSTP";
+        case SIGCONT:
+            return "SIGCONT";
+        case SIGTTIN:
+            return "SIGTTIN";
+        case SIGTTOU:
+            return "SIGTTOU";
+        case SIGVTALRM:
+            return "SIGVTALRM";
+        case SIGPROF:
+            return "SIGPROF";
+        case SIGXCPU:
+            return "SIGXCPU";
+        case SIGXFSZ:
+            return "SIGXFSZ";
+        case SIGWAITING:
+            return "SIGWAITING";
+        case SIGLWP:
+            return "SIGLWP";
+        case SIGAIO:
+            return "SIGAIO";
         default:
             return "SIGUNKNOWN";
     }

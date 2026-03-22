@@ -3778,42 +3778,195 @@ static int32_t Syscall_user_exception_signal_num(uint64_t int_no)
     {
         case 0:
         case 16:
+        case 19:
             return SYS_SIGFPE;
+        case 1:
         case 3:
             return SYS_SIGTRAP;
         case 6:
             return SYS_SIGILL;
+        case 17:
+            return SYS_SIGBUS;
         case 10:
         case 11:
         case 12:
         case 13:
         case 14:
-        case 17:
             return SYS_SIGSEGV;
         default:
-            return SYS_SIGFAULT;
+            return SYS_SIGSYS;
     }
+}
+
+static bool Syscall_signal_is_valid(int32_t signal)
+{
+    return (signal >= SYS_SIGNAL_MIN && signal <= SYS_SIGNAL_MAX);
 }
 
 static const char* Syscall_signal_name(int32_t signal)
 {
     switch (signal)
     {
+        case SYS_SIGHUP:
+            return "SIGHUP";
+        case SYS_SIGINT:
+            return "SIGINT";
+        case SYS_SIGQUIT:
+            return "SIGQUIT";
+        case SYS_SIGILL:
+            return "SIGILL";
+        case SYS_SIGTRAP:
+            return "SIGTRAP";
+        case SYS_SIGABRT:
+            return "SIGABRT";
+        case SYS_SIGEMT:
+            return "SIGEMT";
         case SYS_SIGFPE:
             return "SIGFPE";
         case SYS_SIGKILL:
             return "SIGKILL";
-        case SYS_SIGTRAP:
-            return "SIGTRAP";
-        case SYS_SIGILL:
-            return "SIGILL";
+        case SYS_SIGBUS:
+            return "SIGBUS";
         case SYS_SIGSEGV:
             return "SIGSEGV";
-        case SYS_SIGFAULT:
-            return "SIGFAULT";
+        case SYS_SIGSYS:
+            return "SIGSYS";
+        case SYS_SIGPIPE:
+            return "SIGPIPE";
+        case SYS_SIGALRM:
+            return "SIGALRM";
+        case SYS_SIGTERM:
+            return "SIGTERM";
+        case SYS_SIGUSR1:
+            return "SIGUSR1";
+        case SYS_SIGUSR2:
+            return "SIGUSR2";
+        case SYS_SIGCHLD:
+            return "SIGCHLD";
+        case SYS_SIGPWR:
+            return "SIGPWR";
+        case SYS_SIGWINCH:
+            return "SIGWINCH";
+        case SYS_SIGURG:
+            return "SIGURG";
+        case SYS_SIGPOLL:
+            return "SIGPOLL";
+        case SYS_SIGSTOP:
+            return "SIGSTOP";
+        case SYS_SIGTSTP:
+            return "SIGTSTP";
+        case SYS_SIGCONT:
+            return "SIGCONT";
+        case SYS_SIGTTIN:
+            return "SIGTTIN";
+        case SYS_SIGTTOU:
+            return "SIGTTOU";
+        case SYS_SIGVTALRM:
+            return "SIGVTALRM";
+        case SYS_SIGPROF:
+            return "SIGPROF";
+        case SYS_SIGXCPU:
+            return "SIGXCPU";
+        case SYS_SIGXFSZ:
+            return "SIGXFSZ";
+        case SYS_SIGWAITING:
+            return "SIGWAITING";
+        case SYS_SIGLWP:
+            return "SIGLWP";
+        case SYS_SIGAIO:
+            return "SIGAIO";
         default:
             return "SIGUNKNOWN";
     }
+}
+
+static char Syscall_signal_default_action(int32_t signal)
+{
+    switch (signal)
+    {
+        case SYS_SIGHUP:
+        case SYS_SIGINT:
+        case SYS_SIGKILL:
+        case SYS_SIGPIPE:
+        case SYS_SIGALRM:
+        case SYS_SIGTERM:
+        case SYS_SIGUSR1:
+        case SYS_SIGUSR2:
+        case SYS_SIGVTALRM:
+        case SYS_SIGPROF:
+            return 'E';
+
+        case SYS_SIGQUIT:
+        case SYS_SIGILL:
+        case SYS_SIGTRAP:
+        case SYS_SIGABRT:
+        case SYS_SIGEMT:
+        case SYS_SIGFPE:
+        case SYS_SIGBUS:
+        case SYS_SIGSEGV:
+        case SYS_SIGSYS:
+        case SYS_SIGXCPU:
+        case SYS_SIGXFSZ:
+            return 'C';
+
+        case SYS_SIGCHLD:
+        case SYS_SIGPWR:
+        case SYS_SIGWINCH:
+        case SYS_SIGURG:
+        case SYS_SIGPOLL:
+        case SYS_SIGCONT:
+        case SYS_SIGWAITING:
+        case SYS_SIGLWP:
+        case SYS_SIGAIO:
+            return 'I';
+
+        case SYS_SIGSTOP:
+        case SYS_SIGTSTP:
+        case SYS_SIGTTIN:
+        case SYS_SIGTTOU:
+            return 'S';
+
+        default:
+            return '?';
+    }
+}
+
+static bool Syscall_signal_terminate_owner_locked(uint32_t owner_pid, int32_t signal)
+{
+    if (owner_pid == 0 || !Syscall_signal_is_valid(signal))
+        return false;
+
+    bool terminated = false;
+    for (uint32_t i = 0; i < SYSCALL_MAX_PROCS; i++)
+    {
+        syscall_process_t* proc = &Syscall_state.procs[i];
+        if (!proc->used || proc->owner_pid != owner_pid)
+            continue;
+
+        proc->exiting = true;
+        proc->terminated_by_signal = true;
+        proc->term_signal = signal;
+        proc->exit_status = 128 + signal;
+        proc->thread_exit_value = 0;
+        terminated = true;
+    }
+
+    if (!terminated)
+        return false;
+
+    for (uint32_t i = 0; i < 256; i++)
+    {
+        uint32_t running_slot = Syscall_state.cpu_current_proc[i];
+        if (running_slot >= SYSCALL_MAX_PROCS)
+            continue;
+        if (!Syscall_state.procs[running_slot].used)
+            continue;
+        if (Syscall_state.procs[running_slot].owner_pid != owner_pid)
+            continue;
+        __atomic_store_n(&Syscall_state.cpu_need_resched[i], 1, __ATOMIC_RELEASE);
+    }
+
+    return true;
 }
 
 static void Syscall_exit_event_push_locked(uint32_t ppid, uint32_t pid, int64_t status, int32_t signal)
@@ -5155,11 +5308,18 @@ mprotect_out:
 
             int32_t target_pid = (int32_t) frame->rdi;
             int32_t signal = (int32_t) frame->rsi;
-            if (target_pid <= 0 || signal != SYS_SIGKILL)
+            if (target_pid <= 0)
+                return (uint64_t) -1;
+            if (signal < 0)
+                return (uint64_t) -1;
+            if (signal != 0 && !Syscall_signal_is_valid(signal))
                 return (uint64_t) -1;
 
             uint32_t sender_pid = 0;
-            bool killed = false;
+            bool delivered = false;
+            bool core_dump_not_implemented = false;
+            bool stop_semantics_not_implemented = false;
+            bool ignored = false;
             uint32_t target_owner_pid = 0;
 
             uint64_t lock_flags = spin_lock_irqsave(&Syscall_state.proc_lock);
@@ -5179,40 +5339,74 @@ mprotect_out:
 
             if (target_slot >= 0 && target_owner_pid != 0)
             {
-                for (uint32_t i = 0; i < SYSCALL_MAX_PROCS; i++)
+                if (signal == 0)
                 {
-                    syscall_process_t* proc = &Syscall_state.procs[i];
-                    if (!proc->used || proc->owner_pid != target_owner_pid)
-                        continue;
-                    proc->exiting = true;
-                    proc->terminated_by_signal = true;
-                    proc->term_signal = SYS_SIGKILL;
-                    proc->exit_status = 128 + SYS_SIGKILL;
-                    proc->thread_exit_value = 0;
+                    delivered = true;
                 }
-
-                for (uint32_t i = 0; i < 256; i++)
+                else
                 {
-                    uint32_t running_slot = Syscall_state.cpu_current_proc[i];
-                    if (running_slot >= SYSCALL_MAX_PROCS)
-                        continue;
-                    if (!Syscall_state.procs[running_slot].used)
-                        continue;
-                    if (Syscall_state.procs[running_slot].owner_pid != target_owner_pid)
-                        continue;
-                    __atomic_store_n(&Syscall_state.cpu_need_resched[i], 1, __ATOMIC_RELEASE);
+                    char action = Syscall_signal_default_action(signal);
+                    switch (action)
+                    {
+                        case 'E':
+                            delivered = Syscall_signal_terminate_owner_locked(target_owner_pid, signal);
+                            break;
+                        case 'C':
+                            delivered = Syscall_signal_terminate_owner_locked(target_owner_pid, signal);
+                            core_dump_not_implemented = delivered;
+                            break;
+                        case 'I':
+                            delivered = true;
+                            ignored = true;
+                            break;
+                        case 'S':
+                            delivered = true;
+                            stop_semantics_not_implemented = true;
+                            break;
+                        default:
+                            delivered = false;
+                            break;
+                    }
                 }
-                killed = true;
             }
 
             spin_unlock_irqrestore(&Syscall_state.proc_lock, lock_flags);
 
-            if (!killed)
+            if (!delivered)
                 return (uint64_t) -1;
 
-            kdebug_printf("[USER] pid=%u sent SIGKILL to pid=%d\n",
-                          (unsigned int) sender_pid,
-                          (int) target_pid);
+            if (signal != 0)
+            {
+                const char* signal_name = Syscall_signal_name(signal);
+                if (stop_semantics_not_implemented)
+                {
+                    kdebug_printf("[USER] pid=%u sent %s to pid=%d (stop semantics not implemented yet)\n",
+                                  (unsigned int) sender_pid,
+                                  signal_name,
+                                  (int) target_pid);
+                }
+                else if (core_dump_not_implemented)
+                {
+                    kdebug_printf("[USER] pid=%u sent %s to pid=%d (core dump not implemented yet, process terminated)\n",
+                                  (unsigned int) sender_pid,
+                                  signal_name,
+                                  (int) target_pid);
+                }
+                else if (ignored)
+                {
+                    kdebug_printf("[USER] pid=%u sent %s to pid=%d (ignored by default)\n",
+                                  (unsigned int) sender_pid,
+                                  signal_name,
+                                  (int) target_pid);
+                }
+                else
+                {
+                    kdebug_printf("[USER] pid=%u sent %s to pid=%d\n",
+                                  (unsigned int) sender_pid,
+                                  signal_name,
+                                  (int) target_pid);
+                }
+            }
             return 0;
         }
 
@@ -5641,30 +5835,68 @@ bool Syscall_handle_user_exception(interrupt_frame_t* frame, uintptr_t fault_add
     int32_t signal = Syscall_user_exception_signal_num(frame->int_no);
     syscall_process_t* proc = &Syscall_state.procs[slot];
     pid = proc->pid;
-    proc->exiting = true;
-    proc->terminated_by_signal = true;
-    proc->term_signal = signal;
-    proc->exit_status = 128 + signal;
+    uint32_t owner_pid = proc->owner_pid;
+    char action = Syscall_signal_default_action(signal);
+    bool terminated = false;
+    bool core_dump_not_implemented = false;
+
+    if (action == 'E' || action == 'C')
+    {
+        terminated = Syscall_signal_terminate_owner_locked(owner_pid, signal);
+        core_dump_not_implemented = (action == 'C');
+    }
+
+    if (!terminated)
+    {
+        proc->exiting = true;
+        proc->terminated_by_signal = true;
+        proc->term_signal = signal;
+        proc->exit_status = 128 + signal;
+    }
     spin_unlock_irqrestore(&Syscall_state.proc_lock, lock_flags);
 
     const char* signal_name = Syscall_signal_name(signal);
     if (frame->int_no == 14)
     {
-        kdebug_printf("[USER] pid=%u killed by %s (#PF) rip=0x%llX err=0x%llX cr2=0x%llX\n",
-                      (unsigned int) pid,
-                      signal_name,
-                      (unsigned long long) frame->rip,
-                      (unsigned long long) frame->err_code,
-                      (unsigned long long) fault_addr);
+        if (core_dump_not_implemented)
+        {
+            kdebug_printf("[USER] pid=%u killed by %s (#PF) rip=0x%llX err=0x%llX cr2=0x%llX (core dump not implemented yet)\n",
+                          (unsigned int) pid,
+                          signal_name,
+                          (unsigned long long) frame->rip,
+                          (unsigned long long) frame->err_code,
+                          (unsigned long long) fault_addr);
+        }
+        else
+        {
+            kdebug_printf("[USER] pid=%u killed by %s (#PF) rip=0x%llX err=0x%llX cr2=0x%llX\n",
+                          (unsigned int) pid,
+                          signal_name,
+                          (unsigned long long) frame->rip,
+                          (unsigned long long) frame->err_code,
+                          (unsigned long long) fault_addr);
+        }
     }
     else
     {
-        kdebug_printf("[USER] pid=%u killed by %s (vec=%llu) rip=0x%llX err=0x%llX\n",
-                      (unsigned int) pid,
-                      signal_name,
-                      (unsigned long long) frame->int_no,
-                      (unsigned long long) frame->rip,
-                      (unsigned long long) frame->err_code);
+        if (core_dump_not_implemented)
+        {
+            kdebug_printf("[USER] pid=%u killed by %s (vec=%llu) rip=0x%llX err=0x%llX (core dump not implemented yet)\n",
+                          (unsigned int) pid,
+                          signal_name,
+                          (unsigned long long) frame->int_no,
+                          (unsigned long long) frame->rip,
+                          (unsigned long long) frame->err_code);
+        }
+        else
+        {
+            kdebug_printf("[USER] pid=%u killed by %s (vec=%llu) rip=0x%llX err=0x%llX\n",
+                          (unsigned int) pid,
+                          signal_name,
+                          (unsigned long long) frame->int_no,
+                          (unsigned long long) frame->rip,
+                          (unsigned long long) frame->err_code);
+        }
     }
 
     uint64_t next_rax = Syscall_post_handler(frame->rax, &syscall_frame, cpu_index);

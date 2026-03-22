@@ -712,7 +712,7 @@ int kill(pid_t pid, int sig)
         errno = ESRCH;
         return -1;
     }
-    if (sig <= 0)
+    if (sig < 0 || sig >= NSIG)
     {
         errno = EINVAL;
         return -1;

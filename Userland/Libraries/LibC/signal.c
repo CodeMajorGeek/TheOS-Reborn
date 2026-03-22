@@ -1,8 +1,9 @@
 #include <errno.h>
 #include <signal.h>
+#include <syscall.h>
 #include <unistd.h>
 
-#define LIBC_SIGNAL_MAX 64
+#define LIBC_SIGNAL_MAX NSIG
 
 static sighandler_t LibC_signal_handlers[LIBC_SIGNAL_MAX];
 static volatile unsigned char LibC_signal_lock = 0U;
@@ -35,7 +36,7 @@ static void signal_init_handlers_locked(void)
 
 static int signal_is_valid_number(int sig)
 {
-    return (sig > 0 && sig < LIBC_SIGNAL_MAX);
+    return (sig > 0 && sig < NSIG);
 }
 
 sighandler_t signal(int sig, sighandler_t handler)
@@ -78,7 +79,22 @@ int raise(int sig)
         return 0;
 
     if (handler == SIG_DFL)
-        _exit(128 + sig);
+    {
+        int self_tid = sys_thread_self();
+        if (self_tid <= 0)
+        {
+            errno = ESRCH;
+            return -1;
+        }
+
+        int rc = sys_kill(self_tid, sig);
+        if (rc < 0)
+        {
+            errno = ESRCH;
+            return -1;
+        }
+        return 0;
+    }
 
     handler(sig);
     return 0;
