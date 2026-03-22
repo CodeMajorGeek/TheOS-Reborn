@@ -1,9 +1,11 @@
 [submodule "Userland/Apps/MicroPython"]
 	path = Userland/Apps/MicroPython
-	url = https://github.com/micropython/micropython.git
+	url = git@github.com:CodeMajorGeek/TheOS-Reborn.git
+	branch = submodules/micropython-theos
 [submodule "Userland/Libraries/EasyArgs"]
 	path = Userland/Libraries/EasyArgs
 	url = https://github.com/gouwsxander/easy-args.git
 [submodule "Userland/Apps/embeddedDOOM"]
 	path = Userland/Apps/embeddedDOOM
-	url = https://github.com/cnlohr/embeddedDOOM.git
+	url = git@github.com:CodeMajorGeek/TheOS-Reborn.git
+	branch = submodules/embeddeddoom-theos
