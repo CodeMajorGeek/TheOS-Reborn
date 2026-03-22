@@ -19,7 +19,7 @@ INC += -I$(THEOS_LIBC_INC)
 
 CWARN = -Wall -Wextra -Wno-unused-parameter
 CFLAGS += $(INC) $(CWARN) -std=c99 $(COPT)
-CFLAGS += -fno-pie -ffreestanding -nostdlib -nostdinc -static
+CFLAGS += -fno-pie -ffreestanding -nostdlib -nostdinc
 
 # Tune for size but keep symbols for debugging.
 CSUPEROPT = -Os
@@ -31,11 +31,20 @@ CFLAGS += -Os -DNDEBUG
 CFLAGS += -fdata-sections -ffunction-sections
 endif
 
-LDFLAGS += -nostdlib -static -n -no-pie
+LDFLAGS += -nostdlib -n -no-pie
+LDFLAGS += -Wl,-rpath,/lib -Wl,--hash-style=sysv
 LDFLAGS += -Wl,-Map=$@.map,--cref -Wl,--gc-sections
 LDFLAGS += -Wl,-T,$(CURDIR)/linker.ld
+ifneq ($(strip $(THEOS_SYSROOT)),)
+LDFLAGS += --sysroot=$(THEOS_SYSROOT)
+endif
 
+ifeq ($(strip $(THEOS_USERLIBC_SO)),)
 LIB += $(THEOS_USERLIBC)
+else
+LIB += -Wl,-Bdynamic
+LIB += $(THEOS_USERLIBC_SO)
+endif
 
 SRC_C = \
 	main.c \
@@ -46,7 +55,7 @@ SRC_C = \
 	shared/runtime/stdout_helpers.c \
 
 SRC_S = \
-	crt0.S \
+	crt0.c.S \
 
 SRC_QSTR += main.c shared/readline/readline.c shared/runtime/pyexec.c
 

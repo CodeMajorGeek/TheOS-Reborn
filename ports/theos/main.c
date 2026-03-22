@@ -164,28 +164,50 @@ mp_lexer_t *mp_lexer_new_from_file(qstr filename)
     if (fd < 0)
         mp_raise_OSError(MP_ENOENT);
 
-    int64_t file_size64 = fs_seek(fd, 0, SYS_SEEK_END);
-    (void) sys_close(fd);
+    int64_t file_size64 = sys_lseek(fd, 0, SYS_SEEK_END);
+    if (file_size64 >= 0)
+        (void) sys_lseek(fd, 0, SYS_SEEK_SET);
     if (file_size64 < 0)
+    {
+        (void) sys_close(fd);
         mp_raise_OSError(MP_ENOENT);
+    }
     if ((uint64_t) file_size64 > (uint64_t) THEOS_MPY_FILE_MAX)
+    {
+        (void) sys_close(fd);
         mp_raise_OSError(MP_ENOMEM);
+    }
 
     size_t file_size_cap = (size_t) file_size64;
     size_t alloc_len = file_size_cap + 1U;
     if (alloc_len == 0U)
+    {
+        (void) sys_close(fd);
         mp_raise_OSError(MP_ENOMEM);
+    }
 
     byte* file_buf = m_new_maybe(byte, alloc_len);
     if (!file_buf)
+    {
+        (void) sys_close(fd);
         mp_raise_OSError(MP_ENOMEM);
+    }
 
     size_t file_size = 0;
-    if (fs_read(abs_path, file_buf, file_size_cap, &file_size) != 0)
+    while (file_size < file_size_cap)
     {
-        m_del(byte, file_buf, alloc_len);
-        mp_raise_OSError(MP_ENOENT);
+        int rc = sys_read(fd, file_buf + file_size, file_size_cap - file_size);
+        if (rc < 0)
+        {
+            (void) sys_close(fd);
+            m_del(byte, file_buf, alloc_len);
+            mp_raise_OSError(MP_ENOENT);
+        }
+        if (rc == 0)
+            break;
+        file_size += (size_t) rc;
     }
+    (void) sys_close(fd);
 
     file_buf[file_size] = '\0';
     return mp_lexer_new_from_str_len(qstr_from_str(abs_path),
