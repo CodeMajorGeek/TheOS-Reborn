@@ -23,6 +23,8 @@
 #ifndef __M_SWAP__
 #define __M_SWAP__
 
+#include <stdint.h>
+
 
 #ifdef __GNUG__
 #pragma interface
@@ -33,12 +35,12 @@
 // WAD files are stored little endian.
 #ifdef __BIG_ENDIAN__
 short	SwapSHORT(short);
-long	SwapLONG(long);
+int32_t	SwapLONG(int32_t);
 #define SHORT(x)	((short)SwapSHORT((unsigned short) (x)))
-#define LONG(x)         ((long)SwapLONG((unsigned long) (x)))
+#define LONG(x)         ((int32_t)SwapLONG((int32_t)(x)))
 #else
 #define SHORT(x)	(x)
-#define LONG(x)         (x)
+#define LONG(x)         ((int32_t)(x))
 #endif
 
 

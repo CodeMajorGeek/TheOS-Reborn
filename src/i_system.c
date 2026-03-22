@@ -72,17 +72,63 @@ ticcmd_t*	I_BaseTiccmd(void)
     return &emptycmd;
 }
 
+#if defined(THEOS_RUNTIME)
+static unsigned char* DOOMHeap = NULL;
+static int DOOMHeapSize = 0;
+
+static int I_EnsureZoneHeap(void)
+{
+    int mib;
+
+    if (DOOMHeap && DOOMHeapSize > 0)
+        return DOOMHeapSize;
+
+    // Prefer larger contiguous blocks first; fall back gradually.
+    for (mib = 128; mib >= 16; mib -= 8)
+    {
+        size_t bytes = (size_t) mib * 1024U * 1024U;
+        unsigned char* heap = (unsigned char*) malloc(bytes);
+        if (!heap)
+            continue;
+
+        DOOMHeap = heap;
+        DOOMHeapSize = (int) bytes;
+        memset(DOOMHeap, 0, bytes);
+        fprintf(stderr, "[DOOM] zone heap=%d MiB\n", mib);
+        return DOOMHeapSize;
+    }
+
+    return 0;
+}
+#else
 unsigned char DOOMHeap[FIXED_HEAP];
+#endif
 
 int  I_GetHeapSize (void)
 {
+#if defined(THEOS_RUNTIME)
+    return I_EnsureZoneHeap();
+#else
     return FIXED_HEAP;
+#endif
 }
 
 byte* I_ZoneBase (int*	size)
 {
+#if defined(THEOS_RUNTIME)
+    int heap_size = I_EnsureZoneHeap();
+    if (heap_size <= 0 || !DOOMHeap)
+    {
+        *size = 0;
+        return NULL;
+    }
+
+    *size = heap_size;
+    return (byte*) DOOMHeap;
+#else
     *size = FIXED_HEAP; //mb_used*1024*1024;
     return (byte *) DOOMHeap;
+#endif
 }
 
 
@@ -126,6 +172,14 @@ void I_Quit (void)
     I_ShutdownMusic();
     M_SaveDefaults ();
     I_ShutdownGraphics();
+#if defined(THEOS_RUNTIME)
+    if (DOOMHeap)
+    {
+        free(DOOMHeap);
+        DOOMHeap = NULL;
+        DOOMHeapSize = 0;
+    }
+#endif
     exit(0);
 }
 
@@ -183,6 +237,14 @@ void I_Error (char *error, ...)
 
     D_QuitNetGame ();
     I_ShutdownGraphics();
+#if defined(THEOS_RUNTIME)
+    if (DOOMHeap)
+    {
+        free(DOOMHeap);
+        DOOMHeap = NULL;
+        DOOMHeapSize = 0;
+    }
+#endif
     
     exit(-1);
 }

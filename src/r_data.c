@@ -436,13 +436,13 @@ void R_InitTextures (void)
 	}
 #ifdef GENERATE_BAKED
 	numtextures = numtextures1 + numtextures2;
-	textures = Z_Malloc (numtextures*4, PU_STATIC, 0);
-	texturecolumnlump = Z_Malloc (numtextures*4, PU_STATIC, 0);
-	texturecolumnofs = Z_Malloc (numtextures*4, PU_STATIC, 0);
-	texturecomposite = Z_Malloc (numtextures*4, PU_STATIC, 0);
-	texturecompositesize = Z_Malloc (numtextures*4, PU_STATIC, 0);
-	texturewidthmask = Z_Malloc (numtextures*4, PU_STATIC, 0);
-	textureheight = Z_Malloc (numtextures*4, PU_STATIC, 0);
+	textures = Z_Malloc (numtextures * sizeof(*textures), PU_STATIC, 0);
+	texturecolumnlump = Z_Malloc (numtextures * sizeof(*texturecolumnlump), PU_STATIC, 0);
+	texturecolumnofs = Z_Malloc (numtextures * sizeof(*texturecolumnofs), PU_STATIC, 0);
+	texturecomposite = Z_Malloc (numtextures * sizeof(*texturecomposite), PU_STATIC, 0);
+	texturecompositesize = Z_Malloc (numtextures * sizeof(*texturecompositesize), PU_STATIC, 0);
+	texturewidthmask = Z_Malloc (numtextures * sizeof(*texturewidthmask), PU_STATIC, 0);
+	textureheight = Z_Malloc (numtextures * sizeof(*textureheight), PU_STATIC, 0);
 	totalwidth = 0;
 	
 	//		Really complex printing shit...
@@ -754,7 +754,7 @@ void R_PrecacheLevel (void)
 		{
 			lump = firstflat + i;
 
-#ifdef GENERATE_BAKED
+#if defined(GENERATE_BAKED) && !defined(THEOS_RUNTIME)
 				printf( "\nACCESS_LUMP 7 %d\n", lump );
 #endif
 
@@ -794,7 +794,7 @@ void R_PrecacheLevel (void)
 		{
 			lump = texture->patches[j].patch;
 
-#ifdef GENERATE_BAKED
+#if defined(GENERATE_BAKED) && !defined(THEOS_RUNTIME)
 				printf( "\nACCESS_LUMP 6 %d\n", lump );
 #endif
 
@@ -827,7 +827,7 @@ void R_PrecacheLevel (void)
 				lump = firstspritelump + sf->lump[k];
 
 
-#ifdef GENERATE_BAKED
+#if defined(GENERATE_BAKED) && !defined(THEOS_RUNTIME)
 				printf( "\nACCESS_LUMP 8 %d\n", lump );
 #endif
 
@@ -837,7 +837,5 @@ void R_PrecacheLevel (void)
 		}
 	}
 }
-
-
 
 

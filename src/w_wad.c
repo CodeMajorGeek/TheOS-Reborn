@@ -238,7 +238,7 @@ int W_CheckNumForName (char* name)
 		if ( *(int *)lump_p->name == v1
 			 && *(int *)&lump_p->name[4] == v2)
 		{
-#ifdef GENERATE_BAKED
+#if defined(GENERATE_BAKED) && !defined(THEOS_RUNTIME)
 			printf( "\nACCESS_LUMP 0 %d\n", lump_p - lumpinfo );
 #endif
 			return lump_p - lumpinfo;
@@ -277,7 +277,7 @@ int W_GetNumForName (char* name)
 //
 int W_LumpLength (int lump)
 {
-#ifdef GENERATE_BAKED
+#if defined(GENERATE_BAKED) && !defined(THEOS_RUNTIME)
 	printf( "\nACCESS_LUMP 1 %d\n", lump );
 #endif
 	if (lump >= numlumps)
@@ -299,7 +299,7 @@ void W_ReadLump( int lump, void* dest )
 	lumpinfo_t*		l;
 	int				handle;
 
-#ifdef GENERATE_BAKED
+#if defined(GENERATE_BAKED) && !defined(THEOS_RUNTIME)
 	printf( "\nACCESS_LUMP 2 %d\n", lump );
 #endif
 	if (lump >= numlumps)
@@ -322,7 +322,7 @@ W_CacheLumpNum
 {
 	byte*		ptr;
 
-#ifdef GENERATE_BAKED
+#if defined(GENERATE_BAKED) && !defined(THEOS_RUNTIME)
 	printf( "\nACCESS_LUMP 3 %d\n", lump );
 #endif
 	if ((unsigned)lump >= numlumps)
@@ -355,7 +355,7 @@ W_CacheLumpNum_Old
 {
 	byte*		ptr;
 
-#ifdef GENERATE_BAKED
+#if defined(GENERATE_BAKED) && !defined(THEOS_RUNTIME)
 	printf( "\nACCESS_LUMP 4 %d\n", lump );
 #endif
 
@@ -380,6 +380,5 @@ W_CacheLumpName
 {
 	return W_CacheLumpNum (W_GetNumForName(name), tag);
 }
-
 
 

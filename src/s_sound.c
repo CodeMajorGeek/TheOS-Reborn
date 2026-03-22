@@ -171,7 +171,7 @@ void S_Init
   I_SetChannels();
   
   S_SetSfxVolume(sfxVolume);
-  // No music with Linux - another dummy.
+  // Music backend is provided by I_* in i_sound.c.
   S_SetMusicVolume(musicVolume);
 
   // Allocating the internal channels for mixing

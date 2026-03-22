@@ -232,7 +232,7 @@ void R_InitSpriteDefs (char** namelist)
 					patched = l;
 
 		
-#ifdef GENERATE_BAKED
+#if defined(GENERATE_BAKED) && !defined(THEOS_RUNTIME)
 				printf( "\nACCESS_LUMP 5 %d\n", l );
 				printf( "\nACCESS_LUMP 5 %d\n", patched );
 #endif
@@ -994,6 +994,5 @@ void R_DrawMasked (void)
 	if (!viewangleoffset)				
 		R_DrawPlayerSprites ();
 }
-
 
 

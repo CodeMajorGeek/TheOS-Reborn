@@ -1,6 +1,7 @@
 #include <stdio.h>
 #include <string.h>
 #include <stdlib.h>
+#include <stdint.h>
 
 #include "rawwad.h"
 #include "rawwad.c"
@@ -43,10 +44,11 @@ typedef struct
 typedef struct
 {
     char		name[8];
-    char		masked;	
+    int32_t		masked;	
     short		width;
     short		height;
-    void		**columndirectory;	// OBSOLETE
+    // WAD on-disk field is a 32-bit obsolete pointer.
+    uint32_t		columndirectory;
     short		patchcount;
     mappatch_t	patches[1];
 } maptexture_t;
@@ -176,7 +178,7 @@ int main( int argc, char ** argv )
 		if( strncmp( lumpinfo[i].name, "TEXTURE1", 8 ) == 0 )
 		{
 			int offset = lumpinfo[i].position;
-			texture1datasize = lumpinfo[i].position;
+			texture1datasize = lumpinfo[i].size;
 			texture1data = malloc( texture1datasize+1 );
 			memcpy( texture1data, &rawwad[offset], texture1datasize );
 			((unsigned char*)texture1data)[texture1datasize] = 0;
@@ -385,5 +387,4 @@ int main( int argc, char ** argv )
 	fprintf( f_c, "};\n" );
 	fclose( f_c );
 }
-
 

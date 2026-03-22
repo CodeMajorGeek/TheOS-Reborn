@@ -920,10 +920,9 @@ void D_DoomMain (void)
 	    G_InitNew (startskill, startepisode, startmap);
 	else
 	    D_StartTitle ();                // start up intro loop
-
     }
 
-#ifdef GENERATE_BAKED
+#if defined(GENERATE_BAKED) && !defined(THEOS_RUNTIME)
 	int i;
 	extern int numtextures;
 	printf( "NRT: %d\n", numtextures );

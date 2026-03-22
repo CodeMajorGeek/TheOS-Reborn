@@ -24,6 +24,9 @@
 #ifndef __R_DATA__
 #define __R_DATA__
 
+#include <stddef.h>
+#include <stdint.h>
+
 #include "r_defs.h"
 #include "r_state.h"
 
@@ -61,10 +64,18 @@ typedef struct
     boolean		masked;	
     short		width;
     short		height;
-    void		**columndirectory;	// OBSOLETE
+    // WAD on-disk field is a 32-bit obsolete pointer, keep fixed width on LP64.
+    uint32_t		columndirectory;
     short		patchcount;
     mappatch_t	patches[1];
 } maptexture_t;
+
+typedef char maptexture_columndirectory_is_32_bit[
+	(sizeof(((maptexture_t*)0)->columndirectory) == 4) ? 1 : -1
+];
+typedef char maptexture_patchcount_offset_is_20[
+	(offsetof(maptexture_t, patchcount) == 20) ? 1 : -1
+];
 
 
 // A single patch from a texture definition,

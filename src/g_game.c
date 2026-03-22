@@ -1574,6 +1574,7 @@ void G_BeginRecording (void)
 //
 
 char*	defdemoname; 
+static boolean	demo_version_mismatch_reported = false;
  
 void G_DeferedPlayDemo (char* name) 
 { 
@@ -1590,8 +1591,14 @@ void G_DoPlayDemo (void)
     demobuffer = demo_p = W_CacheLumpName (defdemoname, PU_STATIC); 
     if ( *demo_p++ != VERSION)
     {
-      fprintf( stderr, "Demo is from a different game version!\n");
+      if (!demo_version_mismatch_reported)
+      {
+	fprintf( stderr, "Demo '%s' is from a different game version, skipping demos.\n", defdemoname);
+	demo_version_mismatch_reported = true;
+      }
+      demoplayback = false;
       gameaction = ga_nothing;
+      D_AdvanceDemo ();
       return;
     }
     
