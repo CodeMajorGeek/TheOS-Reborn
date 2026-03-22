@@ -31,14 +31,60 @@
 #define SYSCALL_ELF_MAX_PHDRS          64U
 #define SYSCALL_ELF_STACK_TOP          0x0000000070000000ULL
 #define SYSCALL_ELF_STACK_SIZE         (512ULL * 1024ULL)
+#define SYSCALL_ELF_DYN_BASE           0x0000000040000000ULL
+#define SYSCALL_ELF_DYN_ALIGN          0x200000ULL
+#define SYSCALL_ELF_DSO_BASE           0x0000000048000000ULL
+#define SYSCALL_ELF_DSO_LIMIT          0x000000004F000000ULL
+#define SYSCALL_ELF_DSO_ALIGN          0x200000ULL
 #define SYSCALL_EXEC_MAX_ARGS          64U
 #define SYSCALL_EXEC_MAX_ENVP          64U
+#define SYSCALL_EXEC_MAX_MODULES       8U
+#define SYSCALL_EXEC_MAX_SEGMENTS      128U
+#define SYSCALL_EXEC_MAX_NEEDED        32U
 #define SYSCALL_ELF_CANONICAL_LOW_MAX  0x0000800000000000ULL
+#define SYSCALL_ELF_TYPE_EXEC          2U
+#define SYSCALL_ELF_TYPE_DYN           3U
+#define SYSCALL_ELF_PT_LOAD            1U
+#define SYSCALL_ELF_PT_DYNAMIC         2U
+#define SYSCALL_ELF_PT_TLS             7U
 #define SYSCALL_PTE_PS                 (1ULL << 7)
 #define SYSCALL_PTE_COW                (1ULL << 9)
 #define SYSCALL_PTE_DMABUF             (1ULL << 10)
 #define SYSCALL_ELF_PF_X               (1U << 0)
 #define SYSCALL_ELF_PF_W               (1U << 1)
+#define SYSCALL_ELF_PF_R               (1U << 2)
+#define SYSCALL_ELF_DT_NULL            0
+#define SYSCALL_ELF_DT_NEEDED          1
+#define SYSCALL_ELF_DT_PLTRELSZ        2
+#define SYSCALL_ELF_DT_HASH            4
+#define SYSCALL_ELF_DT_STRTAB          5
+#define SYSCALL_ELF_DT_SYMTAB          6
+#define SYSCALL_ELF_DT_RELA            7
+#define SYSCALL_ELF_DT_RELASZ          8
+#define SYSCALL_ELF_DT_RELAENT         9
+#define SYSCALL_ELF_DT_STRSZ           10
+#define SYSCALL_ELF_DT_SYMENT          11
+#define SYSCALL_ELF_DT_SONAME          14
+#define SYSCALL_ELF_DT_PLTREL          20
+#define SYSCALL_ELF_DT_JMPREL          23
+#define SYSCALL_ELF_STN_UNDEF          0U
+#define SYSCALL_ELF_SHN_UNDEF          0U
+#define SYSCALL_ELF_STB_LOCAL          0U
+#define SYSCALL_ELF_STB_GLOBAL         1U
+#define SYSCALL_ELF_STB_WEAK           2U
+#define SYSCALL_ELF_R_X86_64_NONE      0U
+#define SYSCALL_ELF_R_X86_64_64        1U
+#define SYSCALL_ELF_R_X86_64_COPY      5U
+#define SYSCALL_ELF_R_X86_64_GLOB_DAT  6U
+#define SYSCALL_ELF_R_X86_64_JUMP_SLOT 7U
+#define SYSCALL_ELF_R_X86_64_RELATIVE  8U
+#define SYSCALL_ELF_R_X86_64_DTPMOD64  16U
+#define SYSCALL_ELF_R_X86_64_DTPOFF64  17U
+#define SYSCALL_ELF_R_X86_64_TPOFF64   18U
+#define SYSCALL_ELF64_R_SYM(info)      ((uint32_t) ((info) >> 32))
+#define SYSCALL_ELF64_R_TYPE(info)     ((uint32_t) (info))
+#define SYSCALL_ELF64_ST_BIND(info)    ((uint8_t) ((info) >> 4))
+#define SYSCALL_ELF64_ST_TYPE(info)    ((uint8_t) ((info) & 0x0FU))
 #define SYSCALL_PAGE_FAULT_PRESENT     (1ULL << 0)
 #define SYSCALL_PAGE_FAULT_WRITE       (1ULL << 1)
 #define SYSCALL_PREEMPT_QUANTUM_TICKS  4U
@@ -184,6 +230,33 @@ typedef struct syscall_elf64_phdr
     uint64_t p_align;
 } __attribute__((packed)) syscall_elf64_phdr_t;
 
+typedef struct syscall_elf64_dyn
+{
+    int64_t d_tag;
+    union
+    {
+        uint64_t d_val;
+        uint64_t d_ptr;
+    } d_un;
+} __attribute__((packed)) syscall_elf64_dyn_t;
+
+typedef struct syscall_elf64_sym
+{
+    uint32_t st_name;
+    uint8_t st_info;
+    uint8_t st_other;
+    uint16_t st_shndx;
+    uint64_t st_value;
+    uint64_t st_size;
+} __attribute__((packed)) syscall_elf64_sym_t;
+
+typedef struct syscall_elf64_rela
+{
+    uint64_t r_offset;
+    uint64_t r_info;
+    int64_t r_addend;
+} __attribute__((packed)) syscall_elf64_rela_t;
+
 typedef struct syscall_runtime_state
 {
     volatile uint64_t count_per_cpu[256];
@@ -210,6 +283,10 @@ typedef struct syscall_runtime_state
 } syscall_runtime_state_t;
 
 void Syscall_init(void);
+bool Syscall_prepare_initial_user_process(const char* path,
+                                          uintptr_t* out_cr3_phys,
+                                          uintptr_t* out_entry,
+                                          uintptr_t* out_rsp);
 
 uint64_t Syscall_interrupt_handler(uint64_t syscall_num, syscall_frame_t* frame, uint32_t cpu_index);
 uint64_t Syscall_interupt_handler(uint64_t syscall_num, syscall_frame_t* frame, uint32_t cpu_index);

@@ -13,6 +13,8 @@ set -euo pipefail
 [ -z "${THEOS_USERLAND_SYSTEMMONITOR:-}" ] && THEOS_USERLAND_SYSTEMMONITOR="Userland/Apps/TheSystemMonitor/TheSystemMonitor"
 [ -z "${THEOS_USERLAND_MICROPY:-}" ] && THEOS_USERLAND_MICROPY="Userland/Apps/TheMicroPython/TheMicroPython"
 [ -z "${THEOS_USERLAND_EMBEDDEDDOOM:-}" ] && THEOS_USERLAND_EMBEDDEDDOOM="Userland/Apps/TheEmbeddedDOOM/embeddedDOOM"
+[ -z "${THEOS_USERLAND_LIBC_SO:-}" ] && THEOS_USERLAND_LIBC_SO="Userland/Libraries/LibC/libc.so"
+[ -z "${THEOS_USERLAND_LIBTHETESTDYN_SO:-}" ] && THEOS_USERLAND_LIBTHETESTDYN_SO="Userland/Libraries/LibTheTestDyn/libthetestdyn.so"
 
 
 if [ ! -f "$THEOS_USERLAND_APP" ] && [ -f "Build/Userland/Apps/TheApp/TheApp" ]; then
@@ -39,6 +41,12 @@ fi
 if [ ! -f "$THEOS_USERLAND_EMBEDDEDDOOM" ] && [ -f "Build/Userland/Apps/embeddedDOOM/embeddedDOOM" ]; then
 	THEOS_USERLAND_EMBEDDEDDOOM="Build/Userland/Apps/embeddedDOOM/embeddedDOOM"
 fi
+if [ ! -f "$THEOS_USERLAND_LIBC_SO" ] && [ -f "Build/Userland/Libraries/LibC/libc.so" ]; then
+	THEOS_USERLAND_LIBC_SO="Build/Userland/Libraries/LibC/libc.so"
+fi
+if [ ! -f "$THEOS_USERLAND_LIBTHETESTDYN_SO" ] && [ -f "Build/Userland/Libraries/LibTheTestDyn/libthetestdyn.so" ]; then
+	THEOS_USERLAND_LIBTHETESTDYN_SO="Build/Userland/Libraries/LibTheTestDyn/libthetestdyn.so"
+fi
 
 STAGE_DIR="$(mktemp -d)"
 cleanup() {
@@ -51,6 +59,7 @@ if [ -d "$THEOS_BASE_FOLDER" ]; then
 	cp -a "$THEOS_BASE_FOLDER"/. "$STAGE_DIR"/
 fi
 mkdir -p "$STAGE_DIR/bin"
+mkdir -p "$STAGE_DIR/lib"
 mkdir -p "$STAGE_DIR/system/fonts"
 
 if [ -f "$THEOS_USERLAND_APP" ]; then
@@ -100,6 +109,20 @@ if [ -f "$THEOS_USERLAND_EMBEDDEDDOOM" ]; then
 	cp "$THEOS_USERLAND_EMBEDDEDDOOM" "$STAGE_DIR/bin/embeddedDOOM"
 else
 	echo "[disk] warning: embeddedDOOM binary not found at '$THEOS_USERLAND_EMBEDDEDDOOM'"
+fi
+
+if [ -f "$THEOS_USERLAND_LIBC_SO" ]; then
+	echo "[disk] install libc.so -> /lib/libc.so from '$THEOS_USERLAND_LIBC_SO'"
+	cp "$THEOS_USERLAND_LIBC_SO" "$STAGE_DIR/lib/libc.so"
+else
+	echo "[disk] warning: libc.so not found at '$THEOS_USERLAND_LIBC_SO'"
+fi
+
+if [ -f "$THEOS_USERLAND_LIBTHETESTDYN_SO" ]; then
+	echo "[disk] install libthetestdyn.so -> /lib/libthetestdyn.so from '$THEOS_USERLAND_LIBTHETESTDYN_SO'"
+	cp "$THEOS_USERLAND_LIBTHETESTDYN_SO" "$STAGE_DIR/lib/libthetestdyn.so"
+else
+	echo "[disk] warning: libthetestdyn.so not found at '$THEOS_USERLAND_LIBTHETESTDYN_SO'"
 fi
 
 echo "[disk] create image '$THEOS_DISK_NAME' size=$THEOS_DISK_SIZE"

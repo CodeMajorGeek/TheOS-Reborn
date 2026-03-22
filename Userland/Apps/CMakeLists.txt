@@ -1,3 +1,5 @@
+include(${CMAKE_CURRENT_SOURCE_DIR}/AppRuntime.cmake)
+
 add_subdirectory(TheApp)
 add_subdirectory(TheShell)
 add_subdirectory(TheTest)

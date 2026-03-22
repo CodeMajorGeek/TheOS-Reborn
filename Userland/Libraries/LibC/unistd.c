@@ -471,6 +471,33 @@ int isatty(int fd)
     return (fd == STDIN_FILENO || fd == STDOUT_FILENO || fd == STDERR_FILENO) ? 1 : 0;
 }
 
+int clear_screen(void)
+{
+    static const char clear_seq[] = "\x1b[2J\x1b[H";
+    size_t written = 0U;
+
+    if (isatty(STDOUT_FILENO) != 1)
+    {
+        errno = ENOTTY;
+        return -1;
+    }
+
+    while (written < (sizeof(clear_seq) - 1U))
+    {
+        ssize_t rc = write(STDOUT_FILENO, clear_seq + written, (sizeof(clear_seq) - 1U) - written);
+        if (rc < 0)
+            return -1;
+        if (rc == 0)
+        {
+            errno = EIO;
+            return -1;
+        }
+        written += (size_t) rc;
+    }
+
+    return 0;
+}
+
 int brk(void* addr)
 {
     if (!addr)

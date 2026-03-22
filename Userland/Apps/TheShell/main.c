@@ -1367,8 +1367,7 @@ static void shell_cmd_echo(const char* cwd, char* arg)
 
 static void shell_cmd_clear(void)
 {
-    static const char clear_seq[] = "\x1b[2J\x1b[H";
-    (void) write(STDOUT_FILENO, clear_seq, sizeof(clear_seq) - 1U);
+    (void) clear_screen();
 }
 
 static void shell_print_help(void)

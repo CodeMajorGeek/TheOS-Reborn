@@ -1,7 +1,9 @@
 #include <stdlib.h>
 
+#ifdef __THEOS_KERNEL
 #include <Debug/Spinlock.h>
 #include <CPU/x86.h>
+#endif
 
 #include <stdbool.h>
 #include <stdio.h>
@@ -17,6 +19,7 @@
 
 void panic(char* s)
 {
+#ifdef __THEOS_KERNEL
     uintptr_t pcs[10];
 
     cli();
@@ -32,8 +35,14 @@ void panic(char* s)
 
     printf("HLT\n");
     halt();
-
-     __builtin_unreachable();
+#else
+    printf("PANIC in user process.\n");
+    if (s)
+        printf(s);
+    printf("\n");
+    sys_exit(127);
+#endif
+    __builtin_unreachable();
 }
 
 void abort(void)

@@ -1,6 +1,7 @@
 #include <CPU/ISR.h>
 
 #include <Device/PIC.h>
+#include <Device/COM.h>
 #include <CPU/Syscall.h>
 #include <CPU/APIC.h>
 #include <CPU/GDT.h>
@@ -14,6 +15,68 @@ static ISR_runtime_state_t ISR_state = {
     .tick_source = TICK_SOURCE_PIT_IOAPIC,
     .tick_hz = 1000
 };
+
+static void ISR_serial_puts_unsafe(const char* str)
+{
+    if (!str)
+        return;
+    COM_puts(COM1, str);
+}
+
+static void ISR_serial_put_hex64_unsafe(uint64_t value)
+{
+    static const char digits[] = "0123456789ABCDEF";
+    char buffer[16];
+    for (int i = 15; i >= 0; i--)
+    {
+        buffer[i] = digits[value & 0xFU];
+        value >>= 4;
+    }
+    COM_write(COM1, buffer, sizeof(buffer));
+}
+
+static void ISR_serial_put_uint_unsafe(uint64_t value)
+{
+    char buffer[21];
+    size_t index = 0;
+    if (value == 0)
+    {
+        COM_putc(COM1, '0');
+        return;
+    }
+
+    while (value != 0 && index < sizeof(buffer))
+    {
+        buffer[index++] = (char) ('0' + (value % 10U));
+        value /= 10U;
+    }
+
+    while (index > 0)
+    {
+        index--;
+        COM_putc(COM1, buffer[index]);
+    }
+}
+
+static void ISR_serial_dump_exception_unsafe(const interrupt_frame_t* frame, uintptr_t fault_addr)
+{
+    if (!frame)
+        return;
+
+    ISR_serial_puts_unsafe("[ISR-RAW] Exception ");
+    ISR_serial_put_uint_unsafe(frame->int_no);
+    ISR_serial_puts_unsafe(" RIP=0x");
+    ISR_serial_put_hex64_unsafe(frame->rip);
+    ISR_serial_puts_unsafe(" CS=0x");
+    ISR_serial_put_hex64_unsafe(frame->cs);
+    ISR_serial_puts_unsafe(" RFLAGS=0x");
+    ISR_serial_put_hex64_unsafe(frame->rflags);
+    ISR_serial_puts_unsafe(" ERR=0x");
+    ISR_serial_put_hex64_unsafe(frame->err_code);
+    ISR_serial_puts_unsafe(" CR2=0x");
+    ISR_serial_put_hex64_unsafe((uint64_t) fault_addr);
+    ISR_serial_puts_unsafe("\n");
+}
 
 static const char* ISR_exception_messages[MAX_KNOWN_EXCEPTIONS] = {
     "Division By Zero",
@@ -132,6 +195,7 @@ void ISR_handler(interrupt_frame_t* frame)
 
         if (frame->int_no == 14)
         {
+            ISR_serial_dump_exception_unsafe(frame, fault_addr);
             kdebug_printf(
                 "[ISR] Exception %llu (%s)\n"
                 "      RIP=0x%llX  CS=0x%llX  RFLAGS=0x%llX  ERR=0x%llX  CR2=0x%llX\n",
@@ -146,6 +210,7 @@ void ISR_handler(interrupt_frame_t* frame)
             abort();
         }
 
+        ISR_serial_dump_exception_unsafe(frame, fault_addr);
         kdebug_printf(
             "[ISR] Exception %llu (%s)\n"
             "      RIP=0x%llX  CS=0x%llX  RFLAGS=0x%llX\n",
@@ -177,6 +242,7 @@ void ISR_handler(interrupt_frame_t* frame)
     }
     else
     {
+        ISR_serial_dump_exception_unsafe(frame, 0);
         kdebug_printf(
             "[ISR] Exception %llu (Unknown)\n"
             "      RIP=0x%llX  CS=0x%llX  RFLAGS=0x%llX\n",
