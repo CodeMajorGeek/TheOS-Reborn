@@ -298,6 +298,20 @@ flowchart TD
 
 ## Build & Run
 
+### Clone repository (with submodules)
+
+```bash
+git clone --recursive git@github.com:CodeMajorGeek/TheOS-Reborn.git
+cd TheOS-Reborn
+```
+
+If the repository is already cloned:
+
+```bash
+git submodule sync --recursive
+git submodule update --init --recursive
+```
+
 ### Prerequisites (Ubuntu/Debian)
 
 ```bash
