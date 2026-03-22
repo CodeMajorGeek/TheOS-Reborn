@@ -151,6 +151,21 @@ static const char* monitor_proc_kind(uint32_t flags)
     return (flags & SYS_PROC_FLAG_THREAD) ? "thread" : "process";
 }
 
+static const char* monitor_proc_domain(uint32_t domain)
+{
+    switch (domain)
+    {
+        case SYS_PROC_DOMAIN_KERNEL:
+            return "krn";
+        case SYS_PROC_DOMAIN_DRIVERLAND:
+            return "drv";
+        case SYS_PROC_DOMAIN_USERLAND:
+            return "usr";
+        default:
+            return "?";
+    }
+}
+
 static const char* monitor_proc_state(uint32_t flags)
 {
     if ((flags & SYS_PROC_FLAG_EXITING) == 0U)
@@ -340,12 +355,13 @@ static void monitor_render(const monitor_snapshot_t* snap,
     putc('\n');
 
     printf("\n");
-    printf("  PID   PPID  OWN   TYPE     STATE    CPU  SIG  EXIT\n");
+    printf("  PID   PPID  OWN   DOM  TYPE     STATE    CPU  SIG  EXIT\n");
 
     for (uint32_t i = 0; i < snap->proc_copied; i++)
     {
         const syscall_proc_info_t* proc = &snap->procs[i];
         const char* kind = monitor_proc_kind(proc->flags);
+        const char* domain = monitor_proc_domain(proc->domain);
         const char* state = monitor_proc_state(proc->flags);
 
         char cpu_text[12];
@@ -360,10 +376,11 @@ static void monitor_render(const monitor_snapshot_t* snap,
         else
             snprintf(sig_text, sizeof(sig_text), "-");
 
-        printf("  %-5u %-5u %-5u %-8s %-8s %-4s %-4s %lld\n",
+        printf("  %-5u %-5u %-5u %-4s %-8s %-8s %-4s %-4s %lld\n",
                proc->pid,
                proc->ppid,
                proc->owner_pid,
+               domain,
                kind,
                state,
                cpu_text,

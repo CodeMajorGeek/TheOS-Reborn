@@ -29,14 +29,24 @@ function(theos_add_user_app target_name)
         message(FATAL_ERROR "theos_add_user_app(${target_name}) requires SOURCES.")
     endif()
 
+    set(default_crt0 ${THEOS_USERLAND_DEFAULT_CRT0})
+    if(NOT default_crt0)
+        set(default_crt0 ${CMAKE_SOURCE_DIR}/Userland/Libraries/LibC/crt/crt0.c.S)
+    endif()
+
+    set(default_linker_script ${THEOS_USERLAND_DEFAULT_LINKER_SCRIPT})
+    if(NOT default_linker_script)
+        set(default_linker_script ${CMAKE_SOURCE_DIR}/Userland/Libraries/LibC/crt/linker.dynamic.ld)
+    endif()
+
     set(app_crt0 ${THEOS_APP_CRT0})
     if(NOT app_crt0)
-        set(app_crt0 ${THEOS_USERLAND_DEFAULT_CRT0})
+        set(app_crt0 ${default_crt0})
     endif()
 
     set(app_linker_script ${THEOS_APP_LINKER_SCRIPT})
     if(NOT app_linker_script)
-        set(app_linker_script ${THEOS_USERLAND_DEFAULT_LINKER_SCRIPT})
+        set(app_linker_script ${default_linker_script})
     endif()
 
     add_executable(${target_name}

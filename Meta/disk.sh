@@ -11,10 +11,15 @@ set -euo pipefail
 [ -z "${THEOS_USERLAND_TEST:-}" ] && THEOS_USERLAND_TEST="Userland/Apps/TheTest/TheTest"
 [ -z "${THEOS_USERLAND_POWERMANAGER:-}" ] && THEOS_USERLAND_POWERMANAGER="Userland/Apps/ThePowerManager/ThePowerManager"
 [ -z "${THEOS_USERLAND_SYSTEMMONITOR:-}" ] && THEOS_USERLAND_SYSTEMMONITOR="Userland/Apps/TheSystemMonitor/TheSystemMonitor"
+[ -z "${THEOS_DRIVERLAND_DHCPD:-}" ] && THEOS_DRIVERLAND_DHCPD="Driverland/Daemons/TheDHCPd/TheDHCPd"
 [ -z "${THEOS_USERLAND_MICROPY:-}" ] && THEOS_USERLAND_MICROPY="Userland/Apps/TheMicroPython/TheMicroPython"
 [ -z "${THEOS_USERLAND_EMBEDDEDDOOM:-}" ] && THEOS_USERLAND_EMBEDDEDDOOM="Userland/Apps/TheEmbeddedDOOM/embeddedDOOM"
 [ -z "${THEOS_USERLAND_LIBC_SO:-}" ] && THEOS_USERLAND_LIBC_SO="Userland/Libraries/LibC/libc.so"
 [ -z "${THEOS_USERLAND_LIBTHETESTDYN_SO:-}" ] && THEOS_USERLAND_LIBTHETESTDYN_SO="Userland/Libraries/LibTheTestDyn/libthetestdyn.so"
+
+if [ -n "${THEOS_USERLAND_DHCPD:-}" ] && [ -f "${THEOS_USERLAND_DHCPD}" ]; then
+	THEOS_DRIVERLAND_DHCPD="${THEOS_USERLAND_DHCPD}"
+fi
 
 
 if [ ! -f "$THEOS_USERLAND_APP" ] && [ -f "Build/Userland/Apps/TheApp/TheApp" ]; then
@@ -31,6 +36,12 @@ if [ ! -f "$THEOS_USERLAND_POWERMANAGER" ] && [ -f "Build/Userland/Apps/ThePower
 fi
 if [ ! -f "$THEOS_USERLAND_SYSTEMMONITOR" ] && [ -f "Build/Userland/Apps/TheSystemMonitor/TheSystemMonitor" ]; then
 	THEOS_USERLAND_SYSTEMMONITOR="Build/Userland/Apps/TheSystemMonitor/TheSystemMonitor"
+fi
+if [ ! -f "$THEOS_DRIVERLAND_DHCPD" ] && [ -f "Build/Driverland/Daemons/TheDHCPd/TheDHCPd" ]; then
+	THEOS_DRIVERLAND_DHCPD="Build/Driverland/Daemons/TheDHCPd/TheDHCPd"
+fi
+if [ ! -f "$THEOS_DRIVERLAND_DHCPD" ] && [ -f "Build/Userland/Apps/TheDHCPd/TheDHCPd" ]; then
+	THEOS_DRIVERLAND_DHCPD="Build/Userland/Apps/TheDHCPd/TheDHCPd"
 fi
 if [ ! -f "$THEOS_USERLAND_MICROPY" ] && [ -f "Build/Userland/Apps/TheMicroPython/TheMicroPython" ]; then
 	THEOS_USERLAND_MICROPY="Build/Userland/Apps/TheMicroPython/TheMicroPython"
@@ -59,6 +70,7 @@ if [ -d "$THEOS_BASE_FOLDER" ]; then
 	cp -a "$THEOS_BASE_FOLDER"/. "$STAGE_DIR"/
 fi
 mkdir -p "$STAGE_DIR/bin"
+mkdir -p "$STAGE_DIR/drv"
 mkdir -p "$STAGE_DIR/lib"
 mkdir -p "$STAGE_DIR/system/fonts"
 
@@ -95,6 +107,13 @@ if [ -f "$THEOS_USERLAND_SYSTEMMONITOR" ]; then
 	cp "$THEOS_USERLAND_SYSTEMMONITOR" "$STAGE_DIR/bin/TheSystemMonitor"
 else
 	echo "[disk] warning: TheSystemMonitor binary not found at '$THEOS_USERLAND_SYSTEMMONITOR'"
+fi
+
+if [ -f "$THEOS_DRIVERLAND_DHCPD" ]; then
+	echo "[disk] install TheDHCPd -> /drv/TheDHCPd from '$THEOS_DRIVERLAND_DHCPD'"
+	cp "$THEOS_DRIVERLAND_DHCPD" "$STAGE_DIR/drv/TheDHCPd"
+else
+	echo "[disk] warning: TheDHCPd binary not found at '$THEOS_DRIVERLAND_DHCPD'"
 fi
 
 if [ -f "$THEOS_USERLAND_MICROPY" ]; then

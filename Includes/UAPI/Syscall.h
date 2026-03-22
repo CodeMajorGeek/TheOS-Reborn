@@ -40,6 +40,15 @@
 #define SYS_THREAD_GET_FSBASE 33
 #define SYS_PROC_INFO_GET     34
 #define SYS_IOCTL             35
+#define SYS_SOCKET            36
+#define SYS_BIND              37
+#define SYS_SENDTO            38
+#define SYS_RECVFROM          39
+#define SYS_CONNECT           40
+#define SYS_GETSOCKNAME       41
+#define SYS_GETPEERNAME       42
+#define SYS_LISTEN            43
+#define SYS_ACCEPT            44
 
 #define SYS_PROT_READ    (1ULL << 0)
 #define SYS_PROT_WRITE   (1ULL << 1)
@@ -116,6 +125,10 @@
 #define SYS_PROC_FLAG_THREAD               (1U << 0)
 #define SYS_PROC_FLAG_EXITING              (1U << 1)
 #define SYS_PROC_FLAG_TERMINATED_BY_SIGNAL (1U << 2)
+#define SYS_PROC_FLAG_DRIVERLAND           (1U << 3)
+#define SYS_PROC_DOMAIN_KERNEL             0U
+#define SYS_PROC_DOMAIN_DRIVERLAND         2U
+#define SYS_PROC_DOMAIN_USERLAND           3U
 #define SYS_PROC_CPU_NONE                  0xFFFFFFFFU
 #define SYS_PROC_MAX_ENTRIES               32U
 
@@ -166,6 +179,7 @@ typedef struct syscall_proc_info
     uint32_t pid;
     uint32_t ppid;
     uint32_t owner_pid;
+    uint32_t domain;
     uint32_t flags;
     uint32_t current_cpu;
     uint32_t term_signal;

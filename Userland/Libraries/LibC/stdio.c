@@ -1274,6 +1274,11 @@ int sprintf(char* str, const char* __restrict format, ...)
     return result;
 }
 
+int vsnprintf(char* str, size_t size, const char* __restrict format, va_list parameters)
+{
+    return __printf(str, size, format, parameters);
+}
+
 int snprintf(char* str, size_t size, const char* __restrict format, ...)
 {
     int result = EOF;
@@ -1281,7 +1286,7 @@ int snprintf(char* str, size_t size, const char* __restrict format, ...)
     va_list parameters;
     va_start(parameters, format);
 
-    result = __printf(str, size, format, parameters);
+    result = vsnprintf(str, size, format, parameters);
 
     va_end(parameters);
 

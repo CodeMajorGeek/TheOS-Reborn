@@ -7,6 +7,7 @@ set(LIBC_SOURCES
     signal.c
     sys/ipc.c
     sys/ioctl.c
+    sys/socket.c
     sys/termios.c
     sys/time.c
     string.c

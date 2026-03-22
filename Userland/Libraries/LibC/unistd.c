@@ -11,6 +11,7 @@
 #include <string.h>
 #include <sys/mman.h>
 #include <sys/stat.h>
+#include <sys/ioctl.h>
 #include <syscall.h>
 #include <sys/wait.h>
 #include <unistd.h>
@@ -35,6 +36,10 @@ static uintptr_t LibC_brk_base = 0;
 static uintptr_t LibC_brk_curr = 0;
 static uintptr_t LibC_brk_mapped_end = 0;
 static volatile uint8_t LibC_unistd_lock = 0;
+static volatile uint8_t LibC_stdio_null_mask = 0;
+static const uint8_t LibC_stdio_null_stdin_bit = 1U << 0;
+static const uint8_t LibC_stdio_null_stdout_bit = 1U << 1;
+static const uint8_t LibC_stdio_null_stderr_bit = 1U << 2;
 
 static void unistd_lock(void)
 {
@@ -56,6 +61,28 @@ static void unistd_lock(void)
 static void unistd_unlock(void)
 {
     __atomic_clear(&LibC_unistd_lock, __ATOMIC_RELEASE);
+}
+
+static bool unistd_stdio_null_enabled(int fd)
+{
+    uint8_t mask = __atomic_load_n(&LibC_stdio_null_mask, __ATOMIC_ACQUIRE);
+    if (fd == STDIN_FILENO)
+        return (mask & LibC_stdio_null_stdin_bit) != 0U;
+    if (fd == STDOUT_FILENO)
+        return (mask & LibC_stdio_null_stdout_bit) != 0U;
+    if (fd == STDERR_FILENO)
+        return (mask & LibC_stdio_null_stderr_bit) != 0U;
+    return false;
+}
+
+static void unistd_stdio_set_null_all(bool enabled)
+{
+    uint8_t value = enabled
+                        ? (uint8_t) (LibC_stdio_null_stdin_bit |
+                                     LibC_stdio_null_stdout_bit |
+                                     LibC_stdio_null_stderr_bit)
+                        : 0U;
+    __atomic_store_n(&LibC_stdio_null_mask, value, __ATOMIC_RELEASE);
 }
 
 static uintptr_t unistd_align_up_uintptr(uintptr_t value, uintptr_t align)
@@ -267,6 +294,9 @@ ssize_t read(int fd, void* buf, size_t count)
 
     if (fd == STDIN_FILENO)
     {
+        if (unistd_stdio_null_enabled(STDIN_FILENO))
+            return 0;
+
         uint8_t* out = (uint8_t*) buf;
         size_t total = 0U;
         while (total < count)
@@ -307,7 +337,7 @@ ssize_t read(int fd, void* buf, size_t count)
     int rc = sys_read(kernel_fd, buf, count);
     if (rc < 0)
     {
-        errno = EIO;
+        errno = (rc == -2) ? EAGAIN : EIO;
         return -1;
     }
 
@@ -324,6 +354,9 @@ ssize_t write(int fd, const void* buf, size_t count)
 
     if (fd == STDOUT_FILENO || fd == STDERR_FILENO)
     {
+        if (unistd_stdio_null_enabled(fd))
+            return (ssize_t) count;
+
         int rc = sys_console_write(buf, count);
         if (rc < 0)
         {
@@ -348,7 +381,7 @@ ssize_t write(int fd, const void* buf, size_t count)
     int rc = sys_write(kernel_fd, buf, count);
     if (rc < 0)
     {
-        errno = EIO;
+        errno = (rc == -2) ? EAGAIN : EIO;
         return -1;
     }
 
@@ -363,7 +396,7 @@ int open(const char* path, int flags, ...)
         return -1;
     }
 
-    int unsupported = flags & ~(O_ACCMODE | O_CREAT | O_TRUNC | O_LOCK);
+    int unsupported = flags & ~(O_ACCMODE | O_CREAT | O_TRUNC | O_LOCK | O_NONBLOCK);
     if (unsupported != 0)
     {
         errno = EINVAL;
@@ -414,6 +447,21 @@ int open(const char* path, int flags, ...)
         (void) sys_close(kernel_fd);
         errno = EMFILE;
         return -1;
+    }
+
+    if ((flags & O_NONBLOCK) != 0)
+    {
+        int non_blocking = 1;
+        if (ioctl(fd, FIONBIO, &non_blocking) < 0)
+        {
+            if (errno == ENOTTY)
+                return fd;
+
+            int saved_errno = errno;
+            (void) close(fd);
+            errno = saved_errno;
+            return -1;
+        }
     }
 
     return fd;
@@ -724,6 +772,32 @@ int kill(pid_t pid, int sig)
         errno = ESRCH;
         return -1;
     }
+
+    return 0;
+}
+
+int daemon(int nochdir, int noclose)
+{
+    int first_fork = fork();
+    if (first_fork < 0)
+        return -1;
+    if (first_fork > 0)
+        _exit(0);
+
+    int second_fork = fork();
+    if (second_fork < 0)
+        return -1;
+    if (second_fork > 0)
+        _exit(0);
+
+    if (!nochdir && fs_is_dir("/") != 1)
+    {
+        errno = ENOENT;
+        return -1;
+    }
+
+    if (!noclose)
+        unistd_stdio_set_null_all(true);
 
     return 0;
 }

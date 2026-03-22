@@ -28,6 +28,8 @@
 #include <CPU/FPU.h>
 #include <CPU/PCI.h>
 #include <CPU/x86.h>
+#include <Network/ARP.h>
+#include <Storage/VFS.h>
 
 #include <stdint.h>
 #include <stdio.h>
@@ -524,6 +526,8 @@ __attribute__((__noreturn__)) void k_entry(void)
     kdebug_puts("[BOOT] PCI scan start (ACPI/RSDP/MADT already resolved via Limine)\n");
     PCI_init();
     kdebug_puts("[BOOT] PCI scanned\n");
+    ARP_init();
+    kdebug_puts("[BOOT] ARP table ready\n");
 
     Keyboard_init();
     kdebug_puts("[BOOT] keyboard init\n");
@@ -616,6 +620,8 @@ __attribute__((__noreturn__)) void k_entry(void)
     if (root_port)
     {
         ext4_set_active(&fs);
+        if (!VFS_mount_root_ext4())
+            panic("Unable to mount VFS root on ext4 backend");
         kdebug_printf("[BOOT] ext4 mounted dev=%d lba_base=0x%llX%s\n",
                       root_device_index,
                       (unsigned long long) root_lba_base,
@@ -623,12 +629,15 @@ __attribute__((__noreturn__)) void k_entry(void)
                           ? " source=limine-file"
                           : ""
                       );
+        kdebug_printf("[BOOT] VFS root mounted backend=%s mountpoint=%s\n",
+                      VFS_backend_name() ? VFS_backend_name() : "unknown",
+                      VFS_MOUNT_ROOT_PATH);
 
         bool psf_loaded = false;
         uint8_t* font_data = NULL;
         size_t font_size = 0;
         const char* font_path = THEOS_PSF2_FONT_PATH;
-        if (ext4_read_file(&fs, font_path, &font_data, &font_size))
+        if (VFS_read_file(font_path, &font_data, &font_size))
         {
             if (TTY_load_psf2(font_data, font_size))
             {
@@ -771,7 +780,7 @@ __attribute__((__noreturn__)) void k_entry(void)
 
     uint8_t* app_probe_data = NULL;
     size_t app_probe_size = 0;
-    if (!ext4_read_file(&fs, "/bin/TheApp", &app_probe_data, &app_probe_size))
+    if (!VFS_read_file("/bin/TheApp", &app_probe_data, &app_probe_size))
         panic("/bin/TheApp missing on mounted root filesystem");
 
     kfree(app_probe_data);

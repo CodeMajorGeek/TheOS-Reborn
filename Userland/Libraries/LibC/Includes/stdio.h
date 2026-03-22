@@ -42,6 +42,7 @@ int printf(const char* __restrict, ...);
 int vfprintf(FILE* stream, const char* __restrict format, va_list ap);
 int fprintf(FILE* stream, const char* __restrict format, ...);
 int sprintf(char*, const char* __restrict, ...);
+int vsnprintf(char*, size_t, const char* __restrict, va_list);
 int snprintf(char*, size_t, const char* __restrict, ...);
 
 char* itoa(int, char*, size_t, unsigned int);

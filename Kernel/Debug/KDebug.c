@@ -5,13 +5,14 @@
 #include <Device/COM.h>
 #include <Debug/Spinlock.h>
 #if defined(THEOS_KDEBUG_LOG_FILE) && (THEOS_KDEBUG_LOG_FILE)
-#include <FileSystem/ext4.h>
+#include <Storage/VFS.h>
 #endif
 #include <stdbool.h>
 #include <stdint.h>
 #include <stdarg.h>
 #include <string.h>
 #include <stddef.h>
+#include <stdio.h>
 
 static kdebug_runtime_state_t kdebug_state;
 
@@ -185,8 +186,7 @@ void kdebug_file_flush(void)
     if (!kdebug_state.initialized)
         return;
 
-    ext4_fs_t* fs = ext4_get_active();
-    if (!fs)
+    if (!VFS_is_ready())
         return;
 
     size_t snapshot_len = 0;
@@ -204,7 +204,7 @@ void kdebug_file_flush(void)
     if (snapshot_len == 0 && snapshot_dropped == 0)
         return;
 
-    size_t chunk_size = fs->block_size;
+    size_t chunk_size = VFS_block_size();
     if (chunk_size == 0)
         return;
     if (chunk_size > KDEBUG_FILE_CHUNK_STACK_MAX)
@@ -238,7 +238,7 @@ void kdebug_file_flush(void)
             drop_msg[cursor++] = p1[i];
         drop_msg[cursor] = '\0';
 
-        success = ext4_create_file(fs, "kdebug.log.overflow", (const uint8_t*) drop_msg, cursor);
+        success = VFS_write_file("kdebug.log.overflow", (const uint8_t*) drop_msg, cursor);
         drop_note_written = success;
     }
 
@@ -263,7 +263,7 @@ void kdebug_file_flush(void)
             break;
         }
 
-        if (!ext4_create_file(fs, file_name, chunk, part))
+        if (!VFS_write_file(file_name, chunk, part))
         {
             success = false;
             break;
@@ -381,110 +381,13 @@ void kdebug_printf(const char* format, ...)
     va_list parameters;
     va_start(parameters, format);
 
-    while (*format != '\0')
-    {
-        if (*format == '%')
-        {
-            format++;
-            
-            if (*format == 's')
-            {
-                format++;
-                const char* str = va_arg(parameters, const char*);
-                kdebug_puts_raw(str);
-            }
-            else if (*format == 'c')
-            {
-                format++;
-                char c = (char) va_arg(parameters, int);
-                kdebug_putc_raw(c);
-            }
-            else if (*format == 'd' || *format == 'i')
-            {
-                format++;
-                int v = va_arg(parameters, int);
-                kdebug_dec_raw(v);
-            }
-            else if (*format == 'u')
-            {
-                format++;
-                unsigned int v = va_arg(parameters, unsigned int);
-                kdebug_dec_raw(v);
-            }
-            else if (*format == 'x')
-            {
-                format++;
-                unsigned int v = va_arg(parameters, unsigned int);
-                kdebug_hex_raw(v, 0);
-            }
-            else if (*format == 'X')
-            {
-                format++;
-                unsigned int v = va_arg(parameters, unsigned int);
-                kdebug_hex_raw(v, 0);
-            }
-            else if (*format == 'l')
-            {
-                format++;
-                if (*format == 'l')
-                {
-                    format++;
-                    if (*format == 'X')
-                    {
-                        format++;
-                        unsigned long long v = va_arg(parameters, unsigned long long);
-                        kdebug_hex_raw(v, 0);
-                    }
-                    else if (*format == 'x')
-                    {
-                        format++;
-                        unsigned long long v = va_arg(parameters, unsigned long long);
-                        kdebug_hex_raw(v, 0);
-                    }
-                    else if (*format == 'u')
-                    {
-                        format++;
-                        unsigned long long v = va_arg(parameters, unsigned long long);
-                        kdebug_dec_raw(v);
-                    }
-                    else if (*format == 'd' || *format == 'i')
-                    {
-                        format++;
-                        long long v = va_arg(parameters, long long);
-                        if (v < 0)
-                        {
-                            kdebug_putc_raw('-');
-                            v = -v;
-                        }
-                        kdebug_dec_raw(v);
-                    }
-                }
-            }
-            else if (*format == 'p')
-            {
-                format++;
-                void* ptr = va_arg(parameters, void*);
-                kdebug_puts_raw("0x");
-                kdebug_hex_raw((uintptr_t) ptr, 16);
-            }
-            else if (*format == '%')
-            {
-                kdebug_putc_raw('%');
-                format++;
-            }
-            else
-            {
-                kdebug_putc_raw('%');
-                kdebug_putc_raw(*format);
-                format++;
-            }
-        }
-        else
-        {
-            kdebug_putc_raw(*format);
-            format++;
-        }
-    }
+    char line[1024];
+    memset(line, 0, sizeof(line));
+    int rc = vsnprintf(line, sizeof(line), format, parameters);
+    if (line[0] != '\0')
+        kdebug_puts_raw(line);
+    if (rc == EOF)
+        kdebug_puts_raw("[KDEBUG] printf truncation or format error\n");
 
     va_end(parameters);
     spin_unlock_irqrestore(&kdebug_state.lock, flags);

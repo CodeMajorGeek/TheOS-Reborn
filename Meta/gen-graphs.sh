@@ -20,6 +20,7 @@ count_lines() {
 
 kernel_lines=$(count_lines "Kernel")
 userland_all_lines=$(count_lines "Userland")
+driverland_lines=$(count_lines "Driverland")
 micropython_lines=$(count_lines "Userland/Apps/MicroPython")
 embeddeddoom_lines=$(count_lines "Userland/Apps/embeddedDOOM")
 
@@ -28,19 +29,20 @@ if [ "${userland_native_lines}" -lt 0 ]; then
   userland_native_lines=0
 fi
 
-total=$((kernel_lines + userland_native_lines))
+total=$((kernel_lines + userland_native_lines + driverland_lines))
 if [ "${total}" -eq 0 ]; then
   echo "[gen-graphs] no source lines found, skipping graph generation"
   exit 0
 fi
 
-echo "[gen-graphs] LOC: kernel=${kernel_lines} userland_native=${userland_native_lines} micropython_ignored=${micropython_lines}"
+echo "[gen-graphs] LOC: kernel=${kernel_lines} driverland=${driverland_lines} userland_native=${userland_native_lines} micropython_ignored=${micropython_lines}"
 
 # Convert to percentage of total LOC (one decimal place).
 kernel_pct=$(LC_NUMERIC=C awk -v k="${kernel_lines}" -v t="${total}" 'BEGIN { if (t>0) printf "%.1f", (k*100.0/t); else print "0.0"; }')
+driverland_pct=$(LC_NUMERIC=C awk -v k="${driverland_lines}" -v t="${total}" 'BEGIN { if (t>0) printf "%.1f", (k*100.0/t); else print "0.0"; }')
 userland_native_pct=$(LC_NUMERIC=C awk -v k="${userland_native_lines}" -v t="${total}" 'BEGIN { if (t>0) printf "%.1f", (k*100.0/t); else print "0.0"; }')
 
-echo "[gen-graphs] PCT: kernel=${kernel_pct}% userland_native=${userland_native_pct}% (MicroPython ignored)"
+echo "[gen-graphs] PCT: kernel=${kernel_pct}% driverland=${driverland_pct}% userland_native=${userland_native_pct}% (MicroPython ignored)"
 
 chart_json=$(cat <<EOF
 {
@@ -48,10 +50,11 @@ chart_json=$(cat <<EOF
   "data": {
     "labels": [
       "Kernel (${kernel_pct}%)",
+      "Driverland (${driverland_pct}%)",
       "Userland (${userland_native_pct}%)"
     ],
     "datasets": [{
-      "data": [${kernel_pct}, ${userland_native_pct}]
+      "data": [${kernel_pct}, ${driverland_pct}, ${userland_native_pct}]
     }]
   },
   "options": {
@@ -80,4 +83,3 @@ curl -s -X POST \
 echo "[gen-graphs] done -> ${OUT_PNG}"
 
 exit 0
-

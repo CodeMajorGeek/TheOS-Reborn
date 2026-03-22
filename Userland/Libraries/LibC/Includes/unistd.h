@@ -35,6 +35,7 @@ int execl(const char* path, const char* arg, ...);
 int execlp(const char* file, const char* arg, ...);
 int kill(pid_t pid, int sig);
 __attribute__((__noreturn__)) void _exit(int status);
+int daemon(int nochdir, int noclose);
 
 unsigned int sleep(unsigned int seconds);
 int usleep(unsigned int usec);

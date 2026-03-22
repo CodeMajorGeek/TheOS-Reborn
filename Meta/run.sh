@@ -17,6 +17,13 @@
 [ -z "$THEOS_QEMU_AUDIO" ] && THEOS_QEMU_AUDIO=1
 [ -z "$THEOS_QEMU_AUDIO_BACKEND" ] && THEOS_QEMU_AUDIO_BACKEND="pa"
 [ -z "$THEOS_QEMU_AUDIO_WAV_PATH" ] && THEOS_QEMU_AUDIO_WAV_PATH="theos-audio.wav"
+[ -z "$THEOS_QEMU_NET" ] && THEOS_QEMU_NET="e1000e"
+[ -z "$THEOS_QEMU_NET_SOCKET_MCAST" ] && THEOS_QEMU_NET_SOCKET_MCAST="230.0.0.42:23456"
+[ -z "$THEOS_QEMU_NET_INJECT_ON_BOOT" ] && THEOS_QEMU_NET_INJECT_ON_BOOT=0
+[ -z "$THEOS_QEMU_NET_INJECT_DELAY_MS" ] && THEOS_QEMU_NET_INJECT_DELAY_MS=4000
+[ -z "$THEOS_QEMU_NET_INJECT_COUNT" ] && THEOS_QEMU_NET_INJECT_COUNT=3
+[ -z "$THEOS_QEMU_NET_INJECT_INTERVAL_MS" ] && THEOS_QEMU_NET_INJECT_INTERVAL_MS=300
+[ -z "$THEOS_QEMU_NET_INJECT_SIGNATURE" ] && THEOS_QEMU_NET_INJECT_SIGNATURE="THEOS_RX_AUTOTEST"
 
 if [ ! -f "$THEOS_ISO_NAME" ]; then
 	echo "[run] missing '$THEOS_ISO_NAME' (build it first with: ninja -C Build iso)" >&2
@@ -134,18 +141,68 @@ if [ "$THEOS_QEMU_AUDIO" = "1" ]; then
 	)
 fi
 
+NET_ARGS=()
+case "$THEOS_QEMU_NET" in
+	none|NONE|off|OFF|0)
+		THEOS_QEMU_NET="none"
+		NET_ARGS=(
+			-net none
+		)
+		;;
+	e1000e|E1000E|intel|INTEL|1)
+		THEOS_QEMU_NET="e1000e"
+		NET_ARGS=(
+			-netdev "user,id=theos_net0"
+			-device "e1000e,netdev=theos_net0,id=theos_nic0"
+		)
+		;;
+	socket|SOCKET|mcast|MCAST|2)
+		THEOS_QEMU_NET="socket"
+		NET_ARGS=(
+			-netdev "socket,id=theos_net0,mcast=$THEOS_QEMU_NET_SOCKET_MCAST"
+			-device "e1000e,netdev=theos_net0,id=theos_nic0"
+		)
+		;;
+	*)
+		echo "[run] invalid THEOS_QEMU_NET='$THEOS_QEMU_NET' (expected: none|e1000e|socket)" >&2
+		exit 1
+		;;
+esac
+
+echo "[run] network device: $THEOS_QEMU_NET"
+if [ "$THEOS_QEMU_NET" = "socket" ]; then
+	echo "[run] network socket mcast: $THEOS_QEMU_NET_SOCKET_MCAST"
+fi
+
+NET_INJECT_PID=""
+if [ "$THEOS_QEMU_NET" = "socket" ] && [ "$THEOS_QEMU_NET_INJECT_ON_BOOT" = "1" ]; then
+	echo "[run] net inject on boot: enabled (delay_ms=$THEOS_QEMU_NET_INJECT_DELAY_MS count=$THEOS_QEMU_NET_INJECT_COUNT interval_ms=$THEOS_QEMU_NET_INJECT_INTERVAL_MS sig='$THEOS_QEMU_NET_INJECT_SIGNATURE')"
+	python3 "$(dirname "$0")/net_inject.py" \
+		--mcast "$THEOS_QEMU_NET_SOCKET_MCAST" \
+		--delay-ms "$THEOS_QEMU_NET_INJECT_DELAY_MS" \
+		--count "$THEOS_QEMU_NET_INJECT_COUNT" \
+		--interval-ms "$THEOS_QEMU_NET_INJECT_INTERVAL_MS" \
+		--signature "$THEOS_QEMU_NET_INJECT_SIGNATURE" &
+	NET_INJECT_PID=$!
+fi
+
 qemu-system-x86_64 \
 	-m $THEOS_RAM_SIZE \
 	-cpu $THEOS_QEMU_CPU \
 	-smp 4 \
-	-net none \
 	"${SERIAL_ARGS[@]}" \
 	"${MONITOR_ARGS[@]}" \
 	"${GDB_ARGS[@]}" \
 	"${GPU_ARGS[@]}" \
 	"${AUDIO_ARGS[@]}" \
+	"${NET_ARGS[@]}" \
 	"${NUMA_ARGS[@]}" \
 	"${KVM_ARGS[@]}" \
 	"${BOOT_MEDIA_ARGS[@]}"
-	
-exit 0
+
+QEMU_STATUS=$?
+if [ -n "$NET_INJECT_PID" ]; then
+	wait "$NET_INJECT_PID" 2>/dev/null || true
+fi
+
+exit $QEMU_STATUS

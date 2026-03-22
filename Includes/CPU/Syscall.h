@@ -96,6 +96,9 @@
 #define SYSCALL_FD_TYPE_DRM_CARD 2U
 #define SYSCALL_FD_TYPE_DMABUF   3U
 #define SYSCALL_FD_TYPE_AUDIO_DSP 4U
+#define SYSCALL_FD_TYPE_NET_RAW  5U
+#define SYSCALL_FD_TYPE_NET_UDP_SOCKET 6U
+#define SYSCALL_FD_TYPE_NET_TCP_SOCKET 7U
 
 extern void enable_syscall_ext(void);
 extern void syscall_handler_stub(void);
@@ -127,8 +130,10 @@ typedef struct syscall_file_desc
     uint32_t owner_pid;
     uint32_t drm_file_id;
     uint32_t drm_dmabuf_id;
+    uint32_t net_socket_id;
     bool can_read;
     bool can_write;
+    bool non_blocking;
     bool exclusive;
     bool dirty;
     bool io_busy;
@@ -150,6 +155,7 @@ typedef struct syscall_process
     uint32_t pid;
     uint32_t ppid;
     uint32_t owner_pid;
+    uint32_t domain;
     int64_t exit_status;
     uint64_t thread_exit_value;
     int32_t term_signal;
@@ -264,8 +270,6 @@ typedef struct syscall_runtime_state
     syscall_file_desc_t fds[SYSCALL_MAX_OPEN_FILES];
     spinlock_t fd_lock;
     bool fd_lock_ready;
-    spinlock_t fs_lock;
-    bool fs_lock_ready;
     spinlock_t vm_lock;
     bool vm_lock_ready;
     syscall_process_t procs[SYSCALL_MAX_PROCS];

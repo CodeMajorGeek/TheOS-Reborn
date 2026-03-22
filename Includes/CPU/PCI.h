@@ -10,8 +10,10 @@
 #define PCI_CONF_DATA_IO_PORT   0xCFC
 
 #define PCI_DEV_CLASS_STORAGE   0x01
+#define PCI_DEV_CLASS_NETWORK   0x02
 #define PCI_DEV_CLASS_MULTIMEDIA 0x04
 #define PCI_DEV_CLASS_BRIDGE    0x06
+#define PCI_DEV_SUBCLASS_ETHERNET 0x00
 #define PCI_DEV_SUBCLASS_HDA    0x03
 #define PCI_DEV_PROGIF_HDA      0x00
 
@@ -30,6 +32,9 @@
 #define PCI_SECONDARY_BUS_REG   0x19
 #define PCI_BAR5_ADDR_REG       0x24
 
+#define PCI_COMMAND_IO_SPACE        (1U << 0)
+#define PCI_COMMAND_MEMORY_SPACE    (1U << 1)
+#define PCI_COMMAND_BUS_MASTER      (1U << 2)
 #define PCI_COMMAND_INTX_DISABLE    (1U << 10)
 #define PCI_STATUS_CAP_LIST         (1U << 4)
 

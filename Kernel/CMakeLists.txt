@@ -55,6 +55,7 @@ set(KERNEL_DEVICES_SOURCES
     Device/TTYFramebuffer.c
     Device/DRM.c
     Device/HDA.c
+    Device/E1000.c
     Device/PIC.c
     Device/HPET.c
     Device/PIT.c
@@ -71,10 +72,17 @@ set(KERNEL_MEMORY_SOURCES
 
 set(KERNEL_STORAGE_SOURCES
     Storage/AHCI.c
+    Storage/VFS.c
 )
 
 set(KERNEL_FILESYSTEM_SOURCES
     FileSystem/ext4.c
+)
+
+set(KERNEL_NETWORK_SOURCES
+    Network/ARP.c
+    Network/Socket.c
+    Network/TCP.c
 )
 
 set(KERNEL_TASK_SOURCES
@@ -92,6 +100,7 @@ set(KERNEL_SOURCES
     ${KERNEL_MEMORY_SOURCES}
     ${KERNEL_STORAGE_SOURCES}
     ${KERNEL_FILESYSTEM_SOURCES}
+    ${KERNEL_NETWORK_SOURCES}
     ${KERNEL_TASK_SOURCES}
 )
 

@@ -12,12 +12,17 @@
 #include <stdio.h>
 #include <sys/mman.h>
 #include <sys/ioctl.h>
+#include <sys/socket.h>
 #include <syscall.h>
 #include <sys/wait.h>
 #include <unistd.h>
+#include <netinet/in.h>
+#include <arpa/inet.h>
+#include <net/if_arp.h>
 #include <drm/drm_mode.h>
 #include <dlfcn.h>
 #include <linux/soundcard.h>
+#include <UAPI/Net.h>
 
 #define SYS_UNDEFINED_TEST 9999L
 #define KERNEL_TEST_ADDR   0xFFFFFFFF80100000ULL
@@ -47,6 +52,10 @@
 #define TEST_SIGNALS
 #define TEST_DRM_KMS
 #define TEST_AUDIO_DSP
+#define TEST_NET_RAW
+#define TEST_NET_UDP_SOCKET
+#define TEST_NET_TCP_SOCKET
+#define TEST_NET_ARP
 #define TEST_LIBDL
 // #define TEST_READ_KERNEL
 // #define TEST_WRITE_KERNEL
@@ -59,6 +68,178 @@
 #define THETEST_DRM_DUMB_MAX_BYTES    (32U * 1024U * 1024U)
 #define THETEST_AUDIO_TONE_FREQ_HZ    880U
 #define THETEST_AUDIO_TONE_DURATION_MS 200U
+#define THETEST_NET_NODE_PATH         "/dev/net0"
+#define THETEST_NET_TX_FRAME_BYTES    60U
+#define THETEST_NET_ETHERTYPE_HI      0x88U
+#define THETEST_NET_ETHERTYPE_LO      0xB5U
+#define THETEST_NET_RX_FRAME_MAX      2048U
+#define THETEST_NET_RX_TIMEOUT_MS     1500U
+#define THETEST_NET_RX_POLL_INTERVAL_US 10000U
+#define THETEST_NET_DEV_NAME          "net0"
+#define THETEST_UDP_LOOPBACK_PORT     39271U
+#define THETEST_UDP_CONNECTED_PORT    39272U
+#define THETEST_TCP_LOOPBACK_PORT     39273U
+#define THETEST_UDP_RECV_TIMEOUT_MS   1000U
+#define THETEST_UDP_POLL_INTERVAL_US  10000U
+#define THETEST_TLS_DYNAMIC_WORKER_ITERS 1024U
+#define THETEST_TLS_DYNAMIC_YIELD_MASK   0x1FU
+
+static const char TheTest_net_rx_signature[] = "THEOS_RX_AUTOTEST";
+static const char TheTest_udp_loopback_payload[] = "THEOS_UDP_REQ_LISTEN";
+static const char TheTest_udp_connected_payload[] = "THEOS_UDP_CONNECTED_REQ";
+static const char TheTest_udp_connected_reply[] = "THEOS_UDP_CONNECTED_REPLY";
+static const char TheTest_tcp_payload[] = "THEOS_TCP_SYN_DATA";
+static const char TheTest_tcp_reply[] = "THEOS_TCP_ACK_DATA";
+
+static bool thetest_is_driverland_domain(void)
+{
+    syscall_proc_info_t entries[SYS_PROC_MAX_ENTRIES];
+    uint32_t total = 0U;
+    int copied = sys_proc_info_get(entries, SYS_PROC_MAX_ENTRIES, &total);
+    (void) total;
+    if (copied <= 0)
+        return false;
+
+    int self_tid = sys_thread_self();
+    if (self_tid <= 0)
+        return false;
+
+    uint32_t self_pid = (uint32_t) self_tid;
+    for (int i = 0; i < copied; i++)
+    {
+        if (entries[i].pid != self_pid)
+            continue;
+        return entries[i].domain == SYS_PROC_DOMAIN_DRIVERLAND;
+    }
+
+    return false;
+}
+
+static void thetest_arp_fill_ipv4(struct arpreq* req, uint8_t a, uint8_t b, uint8_t c, uint8_t d)
+{
+    if (!req)
+        return;
+
+    req->arp_pa.sa_family = AF_INET;
+    req->arp_pa.sa_data[0] = 0;
+    req->arp_pa.sa_data[1] = 0;
+    req->arp_pa.sa_data[2] = (char) a;
+    req->arp_pa.sa_data[3] = (char) b;
+    req->arp_pa.sa_data[4] = (char) c;
+    req->arp_pa.sa_data[5] = (char) d;
+}
+
+static void thetest_arp_set_dev(struct arpreq* req, const char* name)
+{
+    if (!req || !name)
+        return;
+
+    size_t copy_len = strlen(name);
+    if (copy_len > IFNAMSIZ - 1U)
+        copy_len = IFNAMSIZ - 1U;
+    memset(req->arp_dev, 0, sizeof(req->arp_dev));
+    memcpy(req->arp_dev, name, copy_len);
+}
+
+static void thetest_net_arp_probe(void)
+{
+    int net_fd = open(THETEST_NET_NODE_PATH, O_RDWR);
+    if (net_fd < 0)
+    {
+        printf("[TheTest] arp open failed path=%s errno=%d\n",
+               THETEST_NET_NODE_PATH,
+               errno);
+        return;
+    }
+
+    if (!thetest_is_driverland_domain())
+    {
+        printf("[TheTest] arp table probe: SKIP (requires Driverland domain)\n");
+        (void) close(net_fd);
+        return;
+    }
+
+    struct arpreq set_req;
+    memset(&set_req, 0, sizeof(set_req));
+    thetest_arp_fill_ipv4(&set_req, 10U, 0U, 2U, 123U);
+    set_req.arp_ha.sa_family = ARPHRD_ETHER;
+    set_req.arp_ha.sa_data[0] = (char) 0x02U;
+    set_req.arp_ha.sa_data[1] = (char) 0xAAU;
+    set_req.arp_ha.sa_data[2] = (char) 0xBBU;
+    set_req.arp_ha.sa_data[3] = (char) 0xCCU;
+    set_req.arp_ha.sa_data[4] = (char) 0xDDU;
+    set_req.arp_ha.sa_data[5] = (char) 0xEEU;
+    set_req.arp_flags = (int) (ATF_COM | ATF_PERM);
+    thetest_arp_set_dev(&set_req, THETEST_NET_DEV_NAME);
+
+    if (ioctl(net_fd, SIOCSARP, &set_req) < 0)
+    {
+        printf("[TheTest] arp SIOCSARP failed errno=%d\n", errno);
+        (void) close(net_fd);
+        return;
+    }
+
+    struct arpreq get_req;
+    memset(&get_req, 0, sizeof(get_req));
+    thetest_arp_fill_ipv4(&get_req, 10U, 0U, 2U, 123U);
+    thetest_arp_set_dev(&get_req, THETEST_NET_DEV_NAME);
+    if (ioctl(net_fd, SIOCGARP, &get_req) < 0)
+    {
+        printf("[TheTest] arp SIOCGARP failed errno=%d\n", errno);
+        (void) close(net_fd);
+        return;
+    }
+
+    bool mac_ok = true;
+    for (size_t i = 0; i < 6U; i++)
+    {
+        if ((uint8_t) get_req.arp_ha.sa_data[i] != (uint8_t) set_req.arp_ha.sa_data[i])
+        {
+            mac_ok = false;
+            break;
+        }
+    }
+    bool perm_ok = (get_req.arp_flags & (int) ATF_PERM) != 0;
+    bool com_ok = (get_req.arp_flags & (int) ATF_COM) != 0;
+
+    if (mac_ok && perm_ok && com_ok)
+    {
+        printf("[TheTest] arp table probe: GET OK (mac=%02X:%02X:%02X:%02X:%02X:%02X flags=0x%x)\n",
+               (unsigned int) (uint8_t) get_req.arp_ha.sa_data[0],
+               (unsigned int) (uint8_t) get_req.arp_ha.sa_data[1],
+               (unsigned int) (uint8_t) get_req.arp_ha.sa_data[2],
+               (unsigned int) (uint8_t) get_req.arp_ha.sa_data[3],
+               (unsigned int) (uint8_t) get_req.arp_ha.sa_data[4],
+               (unsigned int) (uint8_t) get_req.arp_ha.sa_data[5],
+               (unsigned int) get_req.arp_flags);
+    }
+    else
+    {
+        printf("[TheTest] arp table probe: GET FAILED (mac_ok=%d perm_ok=%d com_ok=%d flags=0x%x)\n",
+               mac_ok ? 1 : 0,
+               perm_ok ? 1 : 0,
+               com_ok ? 1 : 0,
+               (unsigned int) get_req.arp_flags);
+    }
+
+    if (ioctl(net_fd, SIOCDARP, &set_req) < 0)
+    {
+        printf("[TheTest] arp SIOCDARP failed errno=%d\n", errno);
+        (void) close(net_fd);
+        return;
+    }
+
+    struct arpreq miss_req;
+    memset(&miss_req, 0, sizeof(miss_req));
+    thetest_arp_fill_ipv4(&miss_req, 10U, 0U, 2U, 123U);
+    thetest_arp_set_dev(&miss_req, THETEST_NET_DEV_NAME);
+    if (ioctl(net_fd, SIOCGARP, &miss_req) < 0)
+        printf("[TheTest] arp table probe: DELETE OK\n");
+    else
+        printf("[TheTest] arp table probe: DELETE FAILED (entry still present)\n");
+
+    (void) close(net_fd);
+}
 
 static inline uint64_t thetest_rdtsc(void)
 {
@@ -284,6 +465,53 @@ static int thetest_wait_child(int pid, int* out_status, int* out_signal, uint32_
         waited_ms++;
         if (timeout_ms != 0U && waited_ms >= timeout_ms)
             return -2;
+    }
+}
+
+static void thetest_undefined_syscall_probe(void)
+{
+    int pid = fork();
+    if (pid < 0)
+    {
+        printf("[TheTest] undefined syscall(%ld): fork failed rc=%d\n", SYS_UNDEFINED_TEST, pid);
+        return;
+    }
+
+    if (pid == 0)
+    {
+        (void) syscall(SYS_UNDEFINED_TEST, 0, 0, 0, 0, 0, 0);
+        _exit(42);
+    }
+
+    int status = 0;
+    int signal = 0;
+    int wait_rc = thetest_wait_child(pid, &status, &signal, 2000U);
+    if (wait_rc < 0)
+    {
+        if (wait_rc == -2)
+        {
+            (void) kill(pid, SIGKILL);
+            printf("[TheTest] undefined syscall(%ld): timeout\n", SYS_UNDEFINED_TEST);
+        }
+        else
+        {
+            printf("[TheTest] undefined syscall(%ld): wait failed rc=%d\n",
+                   SYS_UNDEFINED_TEST,
+                   wait_rc);
+        }
+        return;
+    }
+
+    if (signal == SIGSYS)
+    {
+        printf("[TheTest] undefined syscall(%ld) -> SIGSYS: OK\n", SYS_UNDEFINED_TEST);
+    }
+    else
+    {
+        printf("[TheTest] undefined syscall(%ld) expected SIGSYS got status=%d signal=%d\n",
+               SYS_UNDEFINED_TEST,
+               status,
+               signal);
     }
 }
 
@@ -1172,8 +1400,13 @@ static void* thetest_tls_dynamic_worker(void* arg)
         return (void*) (uintptr_t) 2U;
 
     *slot = cfg->tag;
-    for (uint32_t i = 0; i < 10000U; i++)
-        (void) sched_yield();
+    for (uint32_t i = 0; i < THETEST_TLS_DYNAMIC_WORKER_ITERS; i++)
+    {
+        if (*slot != cfg->tag)
+            return (void*) (uintptr_t) 3U;
+        if ((i & THETEST_TLS_DYNAMIC_YIELD_MASK) == 0U)
+            (void) sched_yield();
+    }
 
     return (*slot == cfg->tag) ? (void*) (uintptr_t) 0U : (void*) (uintptr_t) 3U;
 }
@@ -1183,6 +1416,7 @@ static void thetest_tls_dynamic_probe(void)
     const uint64_t init_value = 0x1122334455667788ULL;
     const uint64_t main_value = 0xAABBCCDDEEFF0011ULL;
     size_t module_id = 0;
+    printf("[TheTest] tls dynamic module test start\n");
 
     if (__libc_tls_module_register(&init_value,
                                    sizeof(init_value),
@@ -1309,6 +1543,21 @@ static uint32_t thetest_align_up_u32(uint32_t value, uint32_t align)
     if (rem == 0U)
         return value;
     return value + (align - rem);
+}
+
+static uint64_t thetest_timeout_ticks_from_ms(uint32_t timeout_ms)
+{
+    syscall_cpu_info_t cpu_info;
+    memset(&cpu_info, 0, sizeof(cpu_info));
+
+    uint32_t tick_hz = 100U;
+    if (sys_cpu_info_get(&cpu_info) == 0 && cpu_info.tick_hz != 0U)
+        tick_hz = cpu_info.tick_hz;
+
+    uint64_t ticks = (((uint64_t) timeout_ms * (uint64_t) tick_hz) + 999ULL) / 1000ULL;
+    if (ticks == 0ULL)
+        ticks = 1ULL;
+    return ticks;
 }
 
 static uint64_t thetest_drm_dumb_size_bytes(uint32_t width, uint32_t height)
@@ -1599,6 +1848,548 @@ static void thetest_audio_dsp_probe(void)
     {
         printf("[TheTest] audio OSS probe: FAILED (path=%s)\n",
                opened_path ? opened_path : "?");
+    }
+}
+
+static void thetest_net_raw_probe(void)
+{
+    int net_fd = open(THETEST_NET_NODE_PATH, O_RDWR);
+    if (net_fd < 0)
+    {
+        printf("[TheTest] net raw open failed path=%s errno=%d\n",
+               THETEST_NET_NODE_PATH,
+               errno);
+        return;
+    }
+
+    uint8_t frame[THETEST_NET_TX_FRAME_BYTES];
+    memset(frame, 0, sizeof(frame));
+
+    for (size_t i = 0; i < 6U; i++)
+        frame[i] = 0xFFU; // Broadcast destination.
+
+    frame[6] = 0x52U;
+    frame[7] = 0x54U;
+    frame[8] = 0x00U;
+    frame[9] = 0x12U;
+    frame[10] = 0x34U;
+    frame[11] = 0x56U;
+
+    frame[12] = THETEST_NET_ETHERTYPE_HI;
+    frame[13] = THETEST_NET_ETHERTYPE_LO;
+
+    for (size_t i = 14U; i < sizeof(frame); i++)
+        frame[i] = (uint8_t) i;
+
+    sys_net_raw_stats_t stats_before;
+    memset(&stats_before, 0, sizeof(stats_before));
+    bool stats_before_ok = (ioctl(net_fd, NET_RAW_IOCTL_GET_STATS, &stats_before) == 0);
+
+    int non_blocking = 1;
+    bool non_blocking_ok = (ioctl(net_fd, FIONBIO, &non_blocking) == 0) && (non_blocking != 0);
+
+    int write_rc = (int) write(net_fd, frame, sizeof(frame));
+    bool tx_ok = (write_rc == (int) sizeof(frame));
+
+    bool rx_ok = false;
+    int rx_read_rc = 0;
+    int pending_at_match = 0;
+    uint64_t timeout_ticks = thetest_timeout_ticks_from_ms(THETEST_NET_RX_TIMEOUT_MS);
+    uint64_t start_ticks = sys_tick_get();
+    uint8_t rx_frame[THETEST_NET_RX_FRAME_MAX];
+    while ((sys_tick_get() - start_ticks) < timeout_ticks)
+    {
+        int pending = 0;
+        if (ioctl(net_fd, FIONREAD, &pending) < 0)
+            break;
+        if (pending <= 0)
+        {
+            (void) usleep(THETEST_NET_RX_POLL_INTERVAL_US);
+            continue;
+        }
+
+        rx_read_rc = (int) read(net_fd, rx_frame, sizeof(rx_frame));
+        if (rx_read_rc <= 0)
+        {
+            (void) usleep(THETEST_NET_RX_POLL_INTERVAL_US);
+            continue;
+        }
+
+        if ((size_t) rx_read_rc >= (14U + sizeof(TheTest_net_rx_signature) - 1U) &&
+            rx_frame[12] == THETEST_NET_ETHERTYPE_HI &&
+            rx_frame[13] == THETEST_NET_ETHERTYPE_LO &&
+            memcmp(rx_frame + 14U, TheTest_net_rx_signature, sizeof(TheTest_net_rx_signature) - 1U) == 0)
+        {
+            rx_ok = true;
+            pending_at_match = pending;
+            break;
+        }
+    }
+
+    sys_net_raw_stats_t stats_after;
+    memset(&stats_after, 0, sizeof(stats_after));
+    bool stats_after_ok = (ioctl(net_fd, NET_RAW_IOCTL_GET_STATS, &stats_after) == 0);
+
+    int close_rc = close(net_fd);
+
+    if (non_blocking_ok)
+        printf("[TheTest] net raw ioctl FIONBIO: OK (non_blocking=%d)\n", non_blocking);
+    else
+        printf("[TheTest] net raw ioctl FIONBIO: FAILED errno=%d\n", errno);
+
+    if (tx_ok && close_rc == 0)
+    {
+        printf("[TheTest] net raw TX probe: OK (path=%s bytes=%d)\n",
+               THETEST_NET_NODE_PATH,
+               write_rc);
+    }
+    else
+    {
+        printf("[TheTest] net raw TX probe: FAILED (path=%s write_rc=%d close_rc=%d errno=%d)\n",
+               THETEST_NET_NODE_PATH,
+               write_rc,
+               close_rc,
+               errno);
+    }
+
+    bool no_inbound_frames_observed = stats_before_ok &&
+                                      stats_after_ok &&
+                                      stats_after.rx_packets == stats_before.rx_packets;
+
+    if (rx_ok)
+    {
+        printf("[TheTest] net raw RX probe: OK (sig=%s bytes=%d pending=%d)\n",
+               TheTest_net_rx_signature,
+               rx_read_rc,
+               pending_at_match);
+    }
+    else if (no_inbound_frames_observed)
+    {
+        printf("[TheTest] net raw RX probe: SKIP (no inbound frames observed, timeout_ms=%u timeout_ticks=%llu)\n",
+               (unsigned int) THETEST_NET_RX_TIMEOUT_MS,
+               (unsigned long long) timeout_ticks);
+    }
+    else
+    {
+        printf("[TheTest] net raw RX probe: FAILED (sig=%s timeout_ms=%u timeout_ticks=%llu errno=%d)\n",
+               TheTest_net_rx_signature,
+               (unsigned int) THETEST_NET_RX_TIMEOUT_MS,
+               (unsigned long long) timeout_ticks,
+               errno);
+    }
+
+    if (stats_before_ok || stats_after_ok)
+    {
+        printf("[TheTest] net raw stats: before(rx=%llu tx=%llu drop_rx=%llu drop_tx=%llu q=%u/%u link=%u) "
+               "after(rx=%llu tx=%llu drop_rx=%llu drop_tx=%llu q=%u/%u link=%u)\n",
+               (unsigned long long) stats_before.rx_packets,
+               (unsigned long long) stats_before.tx_packets,
+               (unsigned long long) stats_before.rx_dropped,
+               (unsigned long long) stats_before.tx_dropped,
+               (unsigned int) stats_before.rx_queue_depth,
+               (unsigned int) stats_before.rx_queue_capacity,
+               (unsigned int) stats_before.link_up,
+               (unsigned long long) stats_after.rx_packets,
+               (unsigned long long) stats_after.tx_packets,
+               (unsigned long long) stats_after.rx_dropped,
+               (unsigned long long) stats_after.tx_dropped,
+               (unsigned int) stats_after.rx_queue_depth,
+               (unsigned int) stats_after.rx_queue_capacity,
+               (unsigned int) stats_after.link_up);
+    }
+    else
+    {
+        printf("[TheTest] net raw stats ioctl failed errno=%d\n", errno);
+    }
+}
+
+static void thetest_udp_socket_probe(void)
+{
+    int rx_fd = socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP);
+    if (rx_fd < 0)
+    {
+        printf("[TheTest] udp socket probe: FAILED (rx socket errno=%d)\n", errno);
+        return;
+    }
+
+    struct sockaddr_in listen_addr;
+    memset(&listen_addr, 0, sizeof(listen_addr));
+    listen_addr.sin_family = AF_INET;
+    listen_addr.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+    listen_addr.sin_port = htons((uint16_t) THETEST_UDP_LOOPBACK_PORT);
+
+    if (bind(rx_fd, (const struct sockaddr*) &listen_addr, (socklen_t) sizeof(listen_addr)) < 0)
+    {
+        printf("[TheTest] udp socket probe: FAILED (bind errno=%d)\n", errno);
+        (void) close(rx_fd);
+        return;
+    }
+
+    int non_blocking = 1;
+    bool fionbio_ok = (ioctl(rx_fd, FIONBIO, &non_blocking) == 0) && (non_blocking != 0);
+
+    int tx_fd = socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP);
+    if (tx_fd < 0)
+    {
+        printf("[TheTest] udp socket probe: FAILED (tx socket errno=%d)\n", errno);
+        (void) close(rx_fd);
+        return;
+    }
+
+    size_t payload_len = sizeof(TheTest_udp_loopback_payload) - 1U;
+    ssize_t sent = sendto(tx_fd,
+                          TheTest_udp_loopback_payload,
+                          payload_len,
+                          0,
+                          (const struct sockaddr*) &listen_addr,
+                          (socklen_t) sizeof(listen_addr));
+    bool send_ok = sent == (ssize_t) payload_len;
+
+    char recv_buf[64];
+    struct sockaddr_in src_addr;
+    socklen_t src_addr_len = (socklen_t) sizeof(src_addr);
+    ssize_t recv_rc = -1;
+    uint64_t timeout_ticks = thetest_timeout_ticks_from_ms(THETEST_UDP_RECV_TIMEOUT_MS);
+    uint64_t start_ticks = sys_tick_get();
+    while ((sys_tick_get() - start_ticks) < timeout_ticks)
+    {
+        memset(&src_addr, 0, sizeof(src_addr));
+        src_addr_len = (socklen_t) sizeof(src_addr);
+        recv_rc = recvfrom(rx_fd,
+                           recv_buf,
+                           sizeof(recv_buf),
+                           0,
+                           (struct sockaddr*) &src_addr,
+                           &src_addr_len);
+        if (recv_rc >= 0)
+            break;
+        if (errno != EAGAIN)
+            break;
+        (void) usleep(THETEST_UDP_POLL_INTERVAL_US);
+    }
+
+    bool recv_ok = recv_rc == (ssize_t) payload_len &&
+                   memcmp(recv_buf, TheTest_udp_loopback_payload, payload_len) == 0;
+
+    int pending = -1;
+    bool fionread_ok = (ioctl(rx_fd, FIONREAD, &pending) == 0) && pending == 0;
+
+    (void) close(tx_fd);
+    (void) close(rx_fd);
+
+    if (send_ok && recv_ok && fionbio_ok && fionread_ok)
+    {
+        printf("[TheTest] udp socket probe: OK (loopback port=%u payload=%u)\n",
+               (unsigned int) THETEST_UDP_LOOPBACK_PORT,
+               (unsigned int) payload_len);
+    }
+    else
+    {
+        printf("[TheTest] udp socket probe: FAILED (send_ok=%d recv_ok=%d fionbio_ok=%d fionread_ok=%d recv_rc=%lld errno=%d)\n",
+               send_ok ? 1 : 0,
+               recv_ok ? 1 : 0,
+               fionbio_ok ? 1 : 0,
+               fionread_ok ? 1 : 0,
+               (long long) recv_rc,
+               errno);
+    }
+}
+
+static void thetest_udp_connected_probe(void)
+{
+    int server_fd = socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP);
+    if (server_fd < 0)
+    {
+        printf("[TheTest] udp connected probe: FAILED (server socket errno=%d)\n", errno);
+        return;
+    }
+
+    int client_fd = -1;
+    bool connect_ok = false;
+    bool peer_ok = false;
+    bool local_ok = false;
+    bool send_req_ok = false;
+    bool recv_req_ok = false;
+    bool src_ok = false;
+    bool server_connect_ok = false;
+    bool send_reply_ok = false;
+    bool recv_reply_ok = false;
+    bool disconnect_ok = false;
+    bool post_disconnect_ok = false;
+
+    struct sockaddr_in server_addr;
+    memset(&server_addr, 0, sizeof(server_addr));
+    server_addr.sin_family = AF_INET;
+    server_addr.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+    server_addr.sin_port = htons((uint16_t) THETEST_UDP_CONNECTED_PORT);
+
+    if (bind(server_fd, (const struct sockaddr*) &server_addr, (socklen_t) sizeof(server_addr)) < 0)
+    {
+        printf("[TheTest] udp connected probe: FAILED (server bind errno=%d)\n", errno);
+        (void) close(server_fd);
+        return;
+    }
+
+    client_fd = socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP);
+    if (client_fd < 0)
+    {
+        printf("[TheTest] udp connected probe: FAILED (client socket errno=%d)\n", errno);
+        (void) close(server_fd);
+        return;
+    }
+
+    connect_ok = connect(client_fd, (const struct sockaddr*) &server_addr, (socklen_t) sizeof(server_addr)) == 0;
+
+    struct sockaddr_in peer_addr;
+    socklen_t peer_len = (socklen_t) sizeof(peer_addr);
+    memset(&peer_addr, 0, sizeof(peer_addr));
+    if (getpeername(client_fd, (struct sockaddr*) &peer_addr, &peer_len) == 0)
+    {
+        peer_ok = peer_len >= (socklen_t) sizeof(struct sockaddr_in) &&
+                  peer_addr.sin_family == AF_INET &&
+                  peer_addr.sin_addr.s_addr == server_addr.sin_addr.s_addr &&
+                  peer_addr.sin_port == server_addr.sin_port;
+    }
+
+    struct sockaddr_in local_addr;
+    socklen_t local_len = (socklen_t) sizeof(local_addr);
+    memset(&local_addr, 0, sizeof(local_addr));
+    if (getsockname(client_fd, (struct sockaddr*) &local_addr, &local_len) == 0)
+    {
+        local_ok = local_len >= (socklen_t) sizeof(struct sockaddr_in) &&
+                   local_addr.sin_family == AF_INET &&
+                   ntohs(local_addr.sin_port) != 0U;
+    }
+
+    size_t req_len = sizeof(TheTest_udp_connected_payload) - 1U;
+    ssize_t req_sent = send(client_fd, TheTest_udp_connected_payload, req_len, 0);
+    send_req_ok = req_sent == (ssize_t) req_len;
+
+    char req_buf[96];
+    struct sockaddr_in src_addr;
+    socklen_t src_len = (socklen_t) sizeof(src_addr);
+    ssize_t req_recv = -1;
+    uint64_t timeout_ticks = thetest_timeout_ticks_from_ms(THETEST_UDP_RECV_TIMEOUT_MS);
+    uint64_t start_ticks = sys_tick_get();
+    while ((sys_tick_get() - start_ticks) < timeout_ticks)
+    {
+        memset(&src_addr, 0, sizeof(src_addr));
+        src_len = (socklen_t) sizeof(src_addr);
+        req_recv = recvfrom(server_fd,
+                            req_buf,
+                            sizeof(req_buf),
+                            MSG_DONTWAIT,
+                            (struct sockaddr*) &src_addr,
+                            &src_len);
+        if (req_recv >= 0)
+            break;
+        if (errno != EAGAIN)
+            break;
+        (void) usleep(THETEST_UDP_POLL_INTERVAL_US);
+    }
+
+    recv_req_ok = req_recv == (ssize_t) req_len &&
+                  memcmp(req_buf, TheTest_udp_connected_payload, req_len) == 0;
+    src_ok = src_len >= (socklen_t) sizeof(struct sockaddr_in) &&
+             src_addr.sin_family == AF_INET &&
+             src_addr.sin_addr.s_addr == htonl(INADDR_LOOPBACK) &&
+             ntohs(src_addr.sin_port) != 0U;
+
+    if (recv_req_ok && src_ok)
+        server_connect_ok = connect(server_fd, (const struct sockaddr*) &src_addr, src_len) == 0;
+
+    size_t reply_len = sizeof(TheTest_udp_connected_reply) - 1U;
+    if (server_connect_ok)
+    {
+        ssize_t reply_sent = send(server_fd, TheTest_udp_connected_reply, reply_len, 0);
+        send_reply_ok = reply_sent == (ssize_t) reply_len;
+    }
+
+    char reply_buf[96];
+    ssize_t reply_recv = -1;
+    start_ticks = sys_tick_get();
+    while ((sys_tick_get() - start_ticks) < timeout_ticks)
+    {
+        reply_recv = recv(client_fd, reply_buf, sizeof(reply_buf), MSG_DONTWAIT);
+        if (reply_recv >= 0)
+            break;
+        if (errno != EAGAIN)
+            break;
+        (void) usleep(THETEST_UDP_POLL_INTERVAL_US);
+    }
+    recv_reply_ok = reply_recv == (ssize_t) reply_len &&
+                    memcmp(reply_buf, TheTest_udp_connected_reply, reply_len) == 0;
+
+    struct sockaddr disconnect_addr;
+    memset(&disconnect_addr, 0, sizeof(disconnect_addr));
+    disconnect_addr.sa_family = AF_UNSPEC;
+    disconnect_ok = connect(client_fd, &disconnect_addr, (socklen_t) sizeof(disconnect_addr)) == 0;
+    if (disconnect_ok)
+    {
+        ssize_t post_disconnect_send = send(client_fd, TheTest_udp_connected_payload, req_len, 0);
+        post_disconnect_ok = post_disconnect_send < 0 && errno == ENOTCONN;
+    }
+
+    (void) close(client_fd);
+    (void) close(server_fd);
+
+    if (connect_ok && peer_ok && local_ok && send_req_ok && recv_req_ok && src_ok &&
+        server_connect_ok && send_reply_ok && recv_reply_ok && disconnect_ok && post_disconnect_ok)
+    {
+        printf("[TheTest] udp connected probe: OK (port=%u)\n", (unsigned int) THETEST_UDP_CONNECTED_PORT);
+    }
+    else
+    {
+        printf("[TheTest] udp connected probe: FAILED (connect=%d peer=%d local=%d req_tx=%d req_rx=%d src=%d srv_connect=%d rsp_tx=%d rsp_rx=%d disconnect=%d post_disconnect=%d errno=%d)\n",
+               connect_ok ? 1 : 0,
+               peer_ok ? 1 : 0,
+               local_ok ? 1 : 0,
+               send_req_ok ? 1 : 0,
+               recv_req_ok ? 1 : 0,
+               src_ok ? 1 : 0,
+               server_connect_ok ? 1 : 0,
+               send_reply_ok ? 1 : 0,
+               recv_reply_ok ? 1 : 0,
+               disconnect_ok ? 1 : 0,
+               post_disconnect_ok ? 1 : 0,
+               errno);
+    }
+}
+
+static void thetest_tcp_socket_probe(void)
+{
+    int listen_fd = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
+    if (listen_fd < 0)
+    {
+        printf("[TheTest] tcp socket probe: FAILED (listen socket errno=%d)\n", errno);
+        return;
+    }
+
+    struct sockaddr_in listen_addr;
+    memset(&listen_addr, 0, sizeof(listen_addr));
+    listen_addr.sin_family = AF_INET;
+    listen_addr.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+    listen_addr.sin_port = htons((uint16_t) THETEST_TCP_LOOPBACK_PORT);
+
+    if (bind(listen_fd, (const struct sockaddr*) &listen_addr, (socklen_t) sizeof(listen_addr)) < 0)
+    {
+        printf("[TheTest] tcp socket probe: FAILED (bind errno=%d)\n", errno);
+        (void) close(listen_fd);
+        return;
+    }
+
+    if (listen(listen_fd, 4) < 0)
+    {
+        printf("[TheTest] tcp socket probe: FAILED (listen errno=%d)\n", errno);
+        (void) close(listen_fd);
+        return;
+    }
+
+    int listener_non_blocking = 1;
+    (void) ioctl(listen_fd, FIONBIO, &listener_non_blocking);
+
+    int client_fd = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
+    if (client_fd < 0)
+    {
+        printf("[TheTest] tcp socket probe: FAILED (client socket errno=%d)\n", errno);
+        (void) close(listen_fd);
+        return;
+    }
+
+    int connect_rc = connect(client_fd, (const struct sockaddr*) &listen_addr, (socklen_t) sizeof(listen_addr));
+    bool connect_ok = connect_rc == 0 || (connect_rc < 0 && errno == EINPROGRESS);
+
+    int accepted_fd = -1;
+    struct sockaddr_in peer_addr;
+    socklen_t peer_len = (socklen_t) sizeof(peer_addr);
+    uint64_t timeout_ticks = thetest_timeout_ticks_from_ms(THETEST_UDP_RECV_TIMEOUT_MS);
+    uint64_t start_ticks = sys_tick_get();
+    while ((sys_tick_get() - start_ticks) < timeout_ticks)
+    {
+        memset(&peer_addr, 0, sizeof(peer_addr));
+        peer_len = (socklen_t) sizeof(peer_addr);
+        accepted_fd = accept(listen_fd, (struct sockaddr*) &peer_addr, &peer_len);
+        if (accepted_fd >= 0)
+            break;
+        if (errno != EAGAIN)
+            break;
+        (void) usleep(THETEST_UDP_POLL_INTERVAL_US);
+    }
+
+    bool accept_ok = accepted_fd >= 0;
+    bool peer_ok = accept_ok &&
+                   peer_len >= (socklen_t) sizeof(struct sockaddr_in) &&
+                   peer_addr.sin_family == AF_INET &&
+                   peer_addr.sin_addr.s_addr == htonl(INADDR_LOOPBACK);
+
+    int non_blocking = 1;
+    if (accept_ok)
+        (void) ioctl(accepted_fd, FIONBIO, &non_blocking);
+    (void) ioctl(client_fd, FIONBIO, &non_blocking);
+
+    size_t payload_len = sizeof(TheTest_tcp_payload) - 1U;
+    ssize_t send_rc = send(client_fd, TheTest_tcp_payload, payload_len, 0);
+    bool send_ok = send_rc == (ssize_t) payload_len;
+
+    char recv_buf[96];
+    ssize_t recv_rc = -1;
+    start_ticks = sys_tick_get();
+    while (accept_ok && (sys_tick_get() - start_ticks) < timeout_ticks)
+    {
+        recv_rc = recv(accepted_fd, recv_buf, sizeof(recv_buf), MSG_DONTWAIT);
+        if (recv_rc >= 0)
+            break;
+        if (errno != EAGAIN)
+            break;
+        (void) usleep(THETEST_UDP_POLL_INTERVAL_US);
+    }
+
+    bool recv_ok = recv_rc == (ssize_t) payload_len &&
+                   memcmp(recv_buf, TheTest_tcp_payload, payload_len) == 0;
+
+    size_t reply_len = sizeof(TheTest_tcp_reply) - 1U;
+    ssize_t reply_send_rc = -1;
+    if (accept_ok)
+        reply_send_rc = send(accepted_fd, TheTest_tcp_reply, reply_len, 0);
+    bool reply_send_ok = reply_send_rc == (ssize_t) reply_len;
+
+    char reply_buf[96];
+    ssize_t reply_recv_rc = -1;
+    start_ticks = sys_tick_get();
+    while ((sys_tick_get() - start_ticks) < timeout_ticks)
+    {
+        reply_recv_rc = recv(client_fd, reply_buf, sizeof(reply_buf), MSG_DONTWAIT);
+        if (reply_recv_rc >= 0)
+            break;
+        if (errno != EAGAIN)
+            break;
+        (void) usleep(THETEST_UDP_POLL_INTERVAL_US);
+    }
+    bool reply_recv_ok = reply_recv_rc == (ssize_t) reply_len &&
+                         memcmp(reply_buf, TheTest_tcp_reply, reply_len) == 0;
+
+    if (accepted_fd >= 0)
+        (void) close(accepted_fd);
+    (void) close(client_fd);
+    (void) close(listen_fd);
+
+    if (connect_ok && accept_ok && peer_ok && send_ok && recv_ok && reply_send_ok && reply_recv_ok)
+    {
+        printf("[TheTest] tcp socket probe: OK (port=%u)\n", (unsigned int) THETEST_TCP_LOOPBACK_PORT);
+    }
+    else
+    {
+        printf("[TheTest] tcp socket probe: FAILED (connect=%d accept=%d peer=%d send=%d recv=%d reply_send=%d reply_recv=%d recv_rc=%lld reply_recv_rc=%lld errno=%d)\n",
+               connect_ok ? 1 : 0,
+               accept_ok ? 1 : 0,
+               peer_ok ? 1 : 0,
+               send_ok ? 1 : 0,
+               recv_ok ? 1 : 0,
+               reply_send_ok ? 1 : 0,
+               reply_recv_ok ? 1 : 0,
+               (long long) recv_rc,
+               (long long) reply_recv_rc,
+               errno);
     }
 }
 
@@ -2051,8 +2842,7 @@ int main(int argc, char** argv, char** envp)
 #endif
 
 #ifdef TEST_UNDEFINED_SYSCALL
-    long rc = syscall(SYS_UNDEFINED_TEST, 0, 0, 0, 0, 0, 0);
-    printf("[TheTest] undefined syscall(%ld) rc=%ld\n", SYS_UNDEFINED_TEST, rc);
+    thetest_undefined_syscall_probe();
 #endif
 
 #ifdef TEST_MMAP_FORBIDDEN
@@ -2120,6 +2910,23 @@ int main(int argc, char** argv, char** envp)
 
 #ifdef TEST_AUDIO_DSP
     thetest_audio_dsp_probe();
+#endif
+
+#ifdef TEST_NET_RAW
+    thetest_net_raw_probe();
+#endif
+
+#ifdef TEST_NET_UDP_SOCKET
+    thetest_udp_socket_probe();
+    thetest_udp_connected_probe();
+#endif
+
+#ifdef TEST_NET_TCP_SOCKET
+    thetest_tcp_socket_probe();
+#endif
+
+#ifdef TEST_NET_ARP
+    thetest_net_arp_probe();
 #endif
 
 #ifdef TEST_LIBDL

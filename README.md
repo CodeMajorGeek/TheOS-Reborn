@@ -6,10 +6,11 @@
 ![Build](https://img.shields.io/badge/build-passing-brightgreen)
 ![Status](https://img.shields.io/badge/status-experimental-orange)
 
-TheOS-Reborn is an experimental x86_64 operating system project with a full boot-to-userland stack in one repository.
+TheOS-Reborn is an experimental x86_64 operating system project with a full boot stack in one repository.
 It currently boots with Limine, runs a higher-half kernel, mounts ext4 over AHCI, and launches ring3 apps linked against a shared `libc.so`.
+Runtime components are split across `Kernel`, `Driverland` (ring3 service domain for system daemons), and `Userland`.
 
-> This README reflects repository behavior as of **March 21, 2026**.
+> This README reflects repository behavior as of **March 22, 2026**.
 
 ---
 
@@ -117,6 +118,7 @@ Core features currently implemented:
 - Storage and filesystem:
   - AHCI controller discovery and IRQ mode setup (MSI/MSI-X/legacy fallback),
   - AHCI block-device support for both SATA disks and ATAPI media,
+  - VFS root abstraction with ext4 backend wiring,
   - ext4 root mount with preferred Limine hint path and controlled fallback probing.
 - Console and graphics:
   - early VGA path,
@@ -129,8 +131,15 @@ Core features currently implemented:
   - Intel HDA playback path (`/dev/dsp`, `/dev/audio`) with OSS-style ioctls (`RESET/SYNC/SPEED/STEREO/SETFMT/GETFMTS/SETFRAGMENT`),
   - fragment-aware buffering in kernel HDA path (lower-latency queue depth control),
   - embeddedDOOM software music backend (MUS event playback + software synth mixed with SFX).
+- Networking:
+  - Intel E1000e (82574L) PCI path on QEMU (`-device e1000e`) with RX/TX descriptor rings and MSI/MSI-X/legacy fallback,
+  - raw Ethernet device node (`/dev/net0`) with `read/write` for full L2 frames,
+  - Linux-style ioctls for raw net path (`FIONREAD`, `FIONBIO`, `NET_RAW_IOCTL_GET_STATS`) and ARP table ops (`SIOCGARP`, `SIOCSARP`, `SIOCDARP`),
+  - in-kernel ARP table with dynamic learning/expiry and Driverland-gated mutation ioctls (`SIOCSARP`/`SIOCDARP`).
 - Userland/runtime:
   - ring3 ELF launch,
+  - process execution domains (`Userland` and `Driverland`), with driver services installed under `/drv`,
+  - `TheApp` supervisor launches `/drv/TheDHCPd` and `/bin/TheShell`, with respawn policies,
   - shared executable loader baseline in kernel (`execve`) for both `ET_EXEC` and `ET_DYN` user ELFs,
   - process syscalls (`fork/execve/waitpid/kill`) with COW fork handling,
   - timer-driven userland preemption hook (experimental/tuning),
@@ -144,7 +153,8 @@ Core features currently implemented:
   - `pthread` layer backed by shared-address-space kernel threads (no `fork/waitpid` emulation),
   - centralized app runtime build helper (`theos_add_user_app`) that auto-injects `crt0.S` and the canonical user linker script,
   - shell aliases including `doom -> /bin/embeddedDOOM`,
-  - shell, tests, power manager, system monitor, MicroPython, and embeddedDOOM app.
+  - shell, tests, power manager, system monitor, MicroPython, and embeddedDOOM app,
+  - Driverland/service-domain stdout mirroring to `kdebug` (hidden from interactive shell TTY).
 
 ---
 
@@ -198,7 +208,7 @@ The runtime order in `k_entry` is intentionally staged and observable in `Build/
 17. **Drop startup identity map** after SMP is online.
 18. **Timer stack init** (HPET preferred for LAPIC calibration, PIT fallback).
 19. **Enable interrupts**, start LAPIC timers on BSP/APs.
-20. **Launch ring3 userland** (`/bin/TheApp` -> `TheShell`).
+20. **Launch ring3 userland** (`/bin/TheApp` -> `/drv/TheDHCPd` + `/bin/TheShell`).
 
 ---
 
@@ -290,6 +300,9 @@ flowchart TD
 - `fork/execve/waitpid/kill/yield` path implemented.
 - Copy-on-write (COW) clone path for writable user pages on `fork`.
 - Timer-driven userland reschedule hook is present (still experimental/tuning in progress).
+- Execution domains are exposed in proc snapshots (`SYS_PROC_INFO_GET`): `kernel`, `driverland`, `userland`.
+- `/bin/TheApp` is domain-tagged as Driverland and supervises `/drv/*` services.
+- Console writes from Driverland are routed to `kdebug` sink (not to shell TTY), while Userland apps keep normal TTY output.
 - libc provides a `pthread` layer backed by shared-address-space user threads (kernel thread syscalls + FS-base TLS activation).
 - libc `errno` is TLS-backed, and dynamic TLS modules can be registered/unregistered at runtime.
 - Shell-centric workflow with additional user apps (`TheTest`, `ThePowerManager`, `TheSystemMonitor`, `TheMicroPython`).
@@ -407,6 +420,13 @@ Main environment controls:
 - `THEOS_QEMU_AUDIO` (`0`/`1`, default `1`)
 - `THEOS_QEMU_AUDIO_BACKEND` (`none|alsa|dbus|jack|oss|pa|pipewire|sdl|spice|wav`, default `pa`)
 - `THEOS_QEMU_AUDIO_WAV_PATH` (default `theos-audio.wav`, used with backend `wav`)
+- `THEOS_QEMU_NET` (`none|e1000e|socket`, default `e1000e`)
+- `THEOS_QEMU_NET_SOCKET_MCAST` (default `230.0.0.42:23456`, socket backend endpoint)
+- `THEOS_QEMU_NET_INJECT_ON_BOOT` (`0`/`1`, default `0`, enables raw frame injection helper for RX tests in socket mode)
+- `THEOS_QEMU_NET_INJECT_DELAY_MS` (default `4000`)
+- `THEOS_QEMU_NET_INJECT_COUNT` (default `3`)
+- `THEOS_QEMU_NET_INJECT_INTERVAL_MS` (default `300`)
+- `THEOS_QEMU_NET_INJECT_SIGNATURE` (default `THEOS_RX_AUTOTEST`)
 - `THEOS_BOOT_FROM_ISO_DISK` (`1` embedded disk in ISO, `0` external disk image)
 
 Limine config (`Kernel/Boot/limine.conf`) currently enables serial output:
@@ -429,6 +449,7 @@ serial_baudrate: 115200
 - `/bin/TheSystemMonitor`
 - `/bin/TheMicroPython`
 - `/bin/embeddedDOOM`
+- `/drv/TheDHCPd`
 - `/lib/libc.so`
 - `/lib/libthetestdyn.so`
 
@@ -441,14 +462,18 @@ Runtime resources:
 `TheTest` currently exercises:
 
 - mmap/unmap edge cases
+- undefined-syscall -> `SIGSYS` behavior
 - race behavior on ext4 file updates
 - heap stress (`malloc/calloc/realloc/free`, `posix_memalign`, `aligned_alloc`)
 - COW fork probe
 - timer preemption probe (experimental)
 - pthread shared-memory probe
+- signal API/default-action probe (`signal`, `raise`, `kill`, wait status decoding)
 - dynamic TLS module probe (`__libc_tls_module_register` / `__tls_get_addr` / unregister, including register/unregister churn)
 - DRM/KMS probe (`/dev/dri/card0`, dumb buffer + dma-buf export/import + atomic test/commit/disable)
 - OSS audio probe (`/dev/dsp`/`/dev/audio`, `SNDCTL_DSP_SETFRAGMENT` + tone playback)
+- raw net probe (`/dev/net0`, tx/rx, `FIONREAD/FIONBIO`, driver stats)
+- ARP table ioctl probe (`SIOCGARP/SIOCSARP/SIOCDARP`, Driverland-only mutation path)
 - shared-object probe (`dlopen("/lib/libthetestdyn.so")`, symbol resolution, missing-symbol/missing-lib paths, open/close churn)
 
 `TheShell` command UX:
@@ -505,6 +530,13 @@ Current public syscall IDs are `1..35` (`Includes/UAPI/Syscall.h`).
 - `34` `SYS_PROC_INFO_GET`
 - `35` `SYS_IOCTL`
 
+Behavior notes:
+
+- `SYS_PROC_INFO_GET` returns per-entry `domain`, `flags`, `current_cpu`, `term_signal`, and `exit_status`.
+- Unknown syscall numbers are treated as bad syscalls and terminate the owner process with `SIGSYS`.
+- `SYS_IOCTL` currently multiplexes DRM (`/dev/dri/card0`), OSS audio (`/dev/dsp`/`/dev/audio`), and raw net (`/dev/net0`) requests.
+- ARP mutation ioctls (`SIOCSARP`, `SIOCDARP`) are accepted only for Driverland-domain owners.
+
 ---
 
 ## Logging & Debugging
@@ -514,6 +546,12 @@ Current public syscall IDs are `1..35` (`Includes/UAPI/Syscall.h`).
 - Limine serial output is enabled in `limine.conf`.
 - Kernel `kdebug` serial sink is enabled by default (`KERNEL_DEBUG_LOG_SERIAL=ON`).
 - `Meta/run.sh` writes QEMU serial logs to `Build/serial.log` when serial console is enabled.
+
+### Console routing by domain
+
+- Userland `stdout/stderr` keep TTY behavior (`SYS_CONSOLE_WRITE` -> shell framebuffer/terminal + `kdebug` mirror).
+- Driverland domain writes are suppressed on TTY and mirrored to `kdebug` only.
+- This keeps supervisor/daemon logs visible in debug sinks without polluting interactive shell output.
 
 ### File sink
 
@@ -533,6 +571,7 @@ Current public syscall IDs are `1..35` (`Includes/UAPI/Syscall.h`).
 ## Known Gaps
 
 - ext4 implementation remains intentionally limited (not full production ext4 feature set).
+- VFS is currently single-backend in practice (`ext4` mounted at `/`); no pluggable on-disk FS backend set yet.
 - libc remains partial and targeted to current apps/ports.
 - `stat(2)` metadata is currently synthetic/approximated for several fields (`st_ino` path-hash, fixed owner/timestamps/device defaults) and not full ext4 inode metadata passthrough yet.
 - `access(2)` currently checks exposed mode bits only; no full POSIX credential/ACL model yet.
@@ -549,13 +588,19 @@ Current public syscall IDs are `1..35` (`Includes/UAPI/Syscall.h`).
 - Dynamic loader scope is intentionally minimal for now:
   - supports `ELF64 ET_DYN` shared objects on x86_64 and dynamic dependencies for current `ET_EXEC` user binaries,
   - requires `DT_HASH` symbol table metadata (GNU hash-only objects are not supported yet),
-  - relocation coverage targets current needs (`RELATIVE`, `64`, `GLOB_DAT`, `JUMP_SLOT`, `DTPMOD64`, `DTPOFF64`),
+  - kernel `execve` relocation coverage targets current runtime (`RELATIVE`, `64`, `GLOB_DAT`, `JUMP_SLOT`, `COPY`, `DTPMOD64`, `DTPOFF64`, `TPOFF64`),
+  - userland `libdl` relocation coverage remains narrower (`RELATIVE`, `64`, `GLOB_DAT`, `JUMP_SLOT`, `DTPMOD64`, `DTPOFF64`),
   - no full `PT_INTERP`/`ld.so` userspace loader flow yet (the kernel-side exec path performs the current dynamic-link work),
   - lazy binding and advanced symbol-visibility semantics remain incomplete.
+- Networking is currently raw-L2 oriented (`/dev/net0`) with ARP helper table; no full socket API (`AF_INET`/UDP/TCP stack) yet.
+- Driverland DHCP daemon is intentionally early-stage:
+  - sends DHCPDISCOVER and parses OFFER/ACK/NAK frames,
+  - REQUEST/lease commit/network interface configuration path is not implemented yet.
 - OSS audio compatibility is intentionally minimal (`/dev/dsp`-style subset only); ALSA/PulseAudio native user APIs are not provided by libc/kernel yet.
 - Current embeddedDOOM music is software-synth based (MUS parser + lightweight oscillator mixer), so timbre is functional but not yet faithful to OPL/General MIDI playback.
 - Audio quality defaults are intentionally conservative for stability/latency tuning (8-bit SFX assets + 11025 Hz mix path inherited from this DOOM port), so output fidelity remains limited.
-- Signal model is still minimal.
+- Signal model now covers the UNIX-like numbering/default-action surface and `kill` delivery paths, but remains partial (`sigaction`, masks, handlers on async kernel-delivered signals, stop/continue semantics, and core-dump materialization are not fully implemented).
+- Driverland is a policy/process domain today (same ring3 privilege level as Userland), not a hardware CPU ring isolation boundary yet.
 - Legacy IDE/PIIX storage path is not implemented; storage discovery currently targets AHCI-class controllers.
 - Some components (x2APIC SMP mode, parts of scheduler stress paths) are experimental.
 

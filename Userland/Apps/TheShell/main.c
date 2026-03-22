@@ -362,6 +362,10 @@ static bool shell_resolve_exec_command(const char* cwd, const char* command, cha
     if (direct_len > 0 && (size_t) direct_len < out_size && shell_path_exists(out))
         return true;
 
+    int driver_len = snprintf(out, out_size, "/drv/%s", command);
+    if (driver_len > 0 && (size_t) driver_len < out_size && shell_path_exists(out))
+        return true;
+
     char custom_alias_path[SHELL_PATH_MAX];
     if (shell_build_custom_alias_path(command, custom_alias_path, sizeof(custom_alias_path)) &&
         shell_path_exists(custom_alias_path))
@@ -1441,9 +1445,9 @@ static void shell_print_help(void)
     printf("  mkdir <path>\n");
     printf("  echo <text> | <path>\n");
     printf("  clear\n");
-    printf("  <binary> (ex: TheTest ou test)\n");
+    printf("  <binary> (ex: TheTest or test)\n");
     printf("  <alias> (ex: doom -> /bin/embeddedDOOM)\n");
-    printf("  <path/to/binary> (ex: /bin/TheTest)\n");
+    printf("  <path/to/binary> (ex: /bin/TheTest or /drv/TheDHCPd)\n");
     printf("  help\n");
     printf("  exit\n");
 }

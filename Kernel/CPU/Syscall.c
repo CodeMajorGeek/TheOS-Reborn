@@ -9,16 +9,21 @@
 #include <Device/HPET.h>
 #include <Device/Keyboard.h>
 #include <Device/DRM.h>
+#include <Device/E1000.h>
 #include <Device/HDA.h>
 #include <Debug/KDebug.h>
 #include <Debug/Spinlock.h>
-#include <FileSystem/ext4.h>
 #include <Memory/KMem.h>
 #include <Memory/PMM.h>
 #include <Memory/VMM.h>
+#include <Network/ARP.h>
+#include <Network/Socket.h>
+#include <Network/TCP.h>
 #include <Storage/AHCI.h>
+#include <Storage/VFS.h>
 #include <Task/RCU.h>
 #include <Task/Task.h>
+#include <UAPI/Net.h>
 
 #include <stdbool.h>
 #include <stdint.h>
@@ -30,6 +35,7 @@ static syscall_runtime_state_t Syscall_state = {
     .user_map_hint = SYSCALL_MAP_HINT_BASE,
     .next_pid = 1U
 };
+static uint32_t Syscall_bootstrap_domain = SYS_PROC_DOMAIN_USERLAND;
 
 static inline uintptr_t Syscall_align_up_page(uintptr_t value)
 {
@@ -50,17 +56,43 @@ static inline uintptr_t Syscall_align_up_pow2(uintptr_t value, uintptr_t align)
     return (value + (align - 1U)) & ~(uintptr_t) (align - 1U);
 }
 
-static uint8_t Syscall_dirent_type_from_ext4(uint8_t ext4_type)
+static uint16_t Syscall_read_be16(const uint8_t* bytes)
 {
-    switch (ext4_type)
-    {
-        case EXT4_FT_DIR:
-            return SYS_DT_DIR;
-        case EXT4_FT_REG_FILE:
-            return SYS_DT_REG;
-        default:
-            return SYS_DT_UNKNOWN;
-    }
+    if (!bytes)
+        return 0U;
+
+    return (uint16_t) (((uint16_t) bytes[0] << 8) | (uint16_t) bytes[1]);
+}
+
+static uint32_t Syscall_read_be32(const uint8_t* bytes)
+{
+    if (!bytes)
+        return 0U;
+
+    return ((uint32_t) bytes[0] << 24) |
+           ((uint32_t) bytes[1] << 16) |
+           ((uint32_t) bytes[2] << 8) |
+           (uint32_t) bytes[3];
+}
+
+static void Syscall_write_be16(uint8_t* bytes, uint16_t value)
+{
+    if (!bytes)
+        return;
+
+    bytes[0] = (uint8_t) (value >> 8);
+    bytes[1] = (uint8_t) value;
+}
+
+static void Syscall_write_be32(uint8_t* bytes, uint32_t value)
+{
+    if (!bytes)
+        return;
+
+    bytes[0] = (uint8_t) (value >> 24);
+    bytes[1] = (uint8_t) (value >> 16);
+    bytes[2] = (uint8_t) (value >> 8);
+    bytes[3] = (uint8_t) value;
 }
 
 static bool Syscall_user_range_in_bounds(uintptr_t user_ptr, size_t size)
@@ -234,6 +266,47 @@ static bool Syscall_copy_from_user(void* kernel_dst, const void* user_src, size_
 
     if (Syscall_state.vm_lock_ready)
         spin_unlock(&Syscall_state.vm_lock);
+    return true;
+}
+
+static bool Syscall_copy_in_sockaddr_in(const void* user_addr, size_t user_len, uint32_t* out_addr_be, uint16_t* out_port)
+{
+    if (!user_addr || !out_addr_be || !out_port || user_len < sizeof(sys_sockaddr_t))
+        return false;
+
+    sys_sockaddr_t addr;
+    if (!Syscall_copy_from_user(&addr, user_addr, sizeof(addr)))
+        return false;
+    if (addr.sa_family != AF_INET)
+        return false;
+
+    *out_port = Syscall_read_be16(&addr.sa_data[0]);
+    *out_addr_be = Syscall_read_be32(&addr.sa_data[2]);
+    return true;
+}
+
+static bool Syscall_copy_out_sockaddr_in(void* user_addr, void* user_addrlen_ptr, uint32_t addr_be, uint16_t port)
+{
+    if (!user_addr || !user_addrlen_ptr)
+        return false;
+
+    uint32_t user_len = 0U;
+    if (!Syscall_copy_from_user(&user_len, user_addrlen_ptr, sizeof(user_len)))
+        return false;
+
+    sys_sockaddr_t out_addr;
+    memset(&out_addr, 0, sizeof(out_addr));
+    out_addr.sa_family = AF_INET;
+    Syscall_write_be16(&out_addr.sa_data[0], port);
+    Syscall_write_be32(&out_addr.sa_data[2], addr_be);
+
+    uint32_t required_len = sizeof(out_addr);
+    uint32_t copy_len = (user_len < required_len) ? user_len : required_len;
+    if (copy_len != 0U && !Syscall_copy_to_user(user_addr, &out_addr, copy_len))
+        return false;
+    if (!Syscall_copy_to_user(user_addrlen_ptr, &required_len, sizeof(required_len)))
+        return false;
+
     return true;
 }
 
@@ -652,6 +725,72 @@ static bool Syscall_is_audio_dsp_path(const char* path)
            strcmp(path, HDA_AUDIO_NODE_PATH) == 0;
 }
 
+static bool Syscall_is_net_raw_path(const char* path)
+{
+    if (!path)
+        return false;
+
+    return strcmp(path, E1000_NET_NODE_PATH) == 0;
+}
+
+static bool Syscall_path_is_driverland_binary(const char* path)
+{
+    if (!path)
+        return false;
+
+    if (strcmp(path, "/drv") == 0)
+        return true;
+    if (strcmp(path, "/bin/TheApp") == 0)
+        return true;
+
+    const char prefix[] = "/drv/";
+    return strncmp(path, prefix, sizeof(prefix) - 1U) == 0;
+}
+
+static uint32_t Syscall_process_domain_from_exec_path(const char* path)
+{
+    return Syscall_path_is_driverland_binary(path) ?
+           SYS_PROC_DOMAIN_DRIVERLAND :
+           SYS_PROC_DOMAIN_USERLAND;
+}
+
+static uint32_t Syscall_proc_owner_domain_locked(uint32_t owner_pid)
+{
+    if (owner_pid == 0U)
+        return SYS_PROC_DOMAIN_USERLAND;
+
+    for (uint32_t i = 0; i < SYSCALL_MAX_PROCS; i++)
+    {
+        const syscall_process_t* proc = &Syscall_state.procs[i];
+        if (!proc->used || proc->is_thread)
+            continue;
+        if (proc->pid == owner_pid)
+            return proc->domain;
+    }
+
+    for (uint32_t i = 0; i < SYSCALL_MAX_PROCS; i++)
+    {
+        const syscall_process_t* proc = &Syscall_state.procs[i];
+        if (!proc->used)
+            continue;
+        if (proc->owner_pid == owner_pid)
+            return proc->domain;
+    }
+
+    return SYS_PROC_DOMAIN_USERLAND;
+}
+
+static bool Syscall_proc_owner_is_driverland(uint32_t owner_pid)
+{
+    if (!Syscall_state.proc_lock_ready)
+        return false;
+
+    uint64_t lock_flags = spin_lock_irqsave(&Syscall_state.proc_lock);
+    uint32_t domain = Syscall_proc_owner_domain_locked(owner_pid);
+    spin_unlock_irqrestore(&Syscall_state.proc_lock, lock_flags);
+    return domain == SYS_PROC_DOMAIN_DRIVERLAND;
+}
+
 static int32_t Syscall_fd_alloc_locked(void)
 {
     for (uint32_t i = 0; i < SYSCALL_MAX_OPEN_FILES; i++)
@@ -681,6 +820,644 @@ static bool Syscall_fd_path_conflicts_locked(const char* path, bool want_exclusi
     }
 
     return false;
+}
+
+static uint64_t Syscall_handle_socket(uint32_t cpu_index, const syscall_frame_t* frame)
+{
+    if (!frame || !Syscall_state.fd_lock_ready)
+        return (uint64_t) -1;
+
+    uint32_t owner_pid = Syscall_proc_current_pid(cpu_index, frame);
+    if (owner_pid == 0U)
+        return (uint64_t) -1;
+
+    int domain = (int) frame->rdi;
+    int type = (int) frame->rsi;
+    int protocol = (int) frame->rdx;
+    if (domain != NET_SOCKET_AF_INET)
+        return (uint64_t) -1;
+
+    uint32_t socket_id = 0U;
+    uint32_t fd_type = SYSCALL_FD_TYPE_NONE;
+    if (type == (int) NET_SOCKET_SOCK_DGRAM &&
+        (protocol == 0 || protocol == (int) NET_SOCKET_IPPROTO_UDP))
+    {
+        if (!NET_socket_create_udp(owner_pid, &socket_id))
+            return (uint64_t) -1;
+        fd_type = SYSCALL_FD_TYPE_NET_UDP_SOCKET;
+    }
+    else if (type == (int) NET_TCP_SOCK_STREAM &&
+             (protocol == 0 || protocol == (int) NET_TCP_IPPROTO_TCP))
+    {
+        if (!NET_tcp_create(owner_pid, &socket_id))
+            return (uint64_t) -1;
+        fd_type = SYSCALL_FD_TYPE_NET_TCP_SOCKET;
+    }
+    else
+    {
+        return (uint64_t) -1;
+    }
+
+    spin_lock(&Syscall_state.fd_lock);
+    int32_t fd = Syscall_fd_alloc_locked();
+    if (fd < 0)
+    {
+        spin_unlock(&Syscall_state.fd_lock);
+        if (fd_type == SYSCALL_FD_TYPE_NET_UDP_SOCKET)
+            (void) NET_socket_close_udp(owner_pid, socket_id);
+        else
+            (void) NET_tcp_close(owner_pid, socket_id);
+        return (uint64_t) -1;
+    }
+
+    syscall_file_desc_t* entry = &Syscall_state.fds[(uint32_t) fd];
+    memset(entry, 0, sizeof(*entry));
+    entry->used = true;
+    entry->type = fd_type;
+    entry->owner_pid = owner_pid;
+    entry->can_read = true;
+    entry->can_write = true;
+    entry->net_socket_id = socket_id;
+    spin_unlock(&Syscall_state.fd_lock);
+    return (uint64_t) fd;
+}
+
+static uint64_t Syscall_handle_bind(uint32_t cpu_index, const syscall_frame_t* frame)
+{
+    if (!frame || !Syscall_state.fd_lock_ready)
+        return (uint64_t) -1;
+
+    int64_t fd = (int64_t) frame->rdi;
+    const void* user_addr = (const void*) frame->rsi;
+    size_t addr_len = (size_t) frame->rdx;
+    uint32_t owner_pid = Syscall_proc_current_pid(cpu_index, frame);
+    if (fd < 0 || (uint64_t) fd >= SYSCALL_MAX_OPEN_FILES || owner_pid == 0U)
+        return (uint64_t) -1;
+
+    uint32_t local_addr_be = 0U;
+    uint16_t local_port = 0U;
+    if (!Syscall_copy_in_sockaddr_in(user_addr, addr_len, &local_addr_be, &local_port))
+        return (uint64_t) -1;
+
+    uint32_t socket_id = 0U;
+    uint32_t fd_type = SYSCALL_FD_TYPE_NONE;
+    spin_lock(&Syscall_state.fd_lock);
+    syscall_file_desc_t* entry = &Syscall_state.fds[(uint32_t) fd];
+    if (!entry->used || entry->owner_pid != owner_pid || entry->io_busy)
+    {
+        spin_unlock(&Syscall_state.fd_lock);
+        return (uint64_t) -1;
+    }
+    fd_type = entry->type;
+    if (fd_type != SYSCALL_FD_TYPE_NET_UDP_SOCKET && fd_type != SYSCALL_FD_TYPE_NET_TCP_SOCKET)
+    {
+        spin_unlock(&Syscall_state.fd_lock);
+        return (uint64_t) -1;
+    }
+    socket_id = entry->net_socket_id;
+    spin_unlock(&Syscall_state.fd_lock);
+
+    if (fd_type == SYSCALL_FD_TYPE_NET_UDP_SOCKET)
+        return NET_socket_bind_udp(owner_pid, socket_id, local_addr_be, local_port) ? 0 : (uint64_t) -1;
+
+    return NET_tcp_bind(owner_pid, socket_id, local_addr_be, local_port) ? 0 : (uint64_t) -1;
+}
+
+static uint64_t Syscall_handle_connect(uint32_t cpu_index, const syscall_frame_t* frame)
+{
+    if (!frame || !Syscall_state.fd_lock_ready)
+        return (uint64_t) -1;
+
+    int64_t fd = (int64_t) frame->rdi;
+    const void* user_addr = (const void*) frame->rsi;
+    size_t addr_len = (size_t) frame->rdx;
+    uint32_t owner_pid = Syscall_proc_current_pid(cpu_index, frame);
+    if (fd < 0 || (uint64_t) fd >= SYSCALL_MAX_OPEN_FILES || owner_pid == 0U)
+        return (uint64_t) -1;
+
+    uint32_t socket_id = 0U;
+    uint32_t fd_type = SYSCALL_FD_TYPE_NONE;
+    bool fd_non_blocking = false;
+    spin_lock(&Syscall_state.fd_lock);
+    syscall_file_desc_t* entry = &Syscall_state.fds[(uint32_t) fd];
+    if (!entry->used || entry->owner_pid != owner_pid || entry->io_busy)
+    {
+        spin_unlock(&Syscall_state.fd_lock);
+        return (uint64_t) -1;
+    }
+    fd_type = entry->type;
+    if (fd_type != SYSCALL_FD_TYPE_NET_UDP_SOCKET && fd_type != SYSCALL_FD_TYPE_NET_TCP_SOCKET)
+    {
+        spin_unlock(&Syscall_state.fd_lock);
+        return (uint64_t) -1;
+    }
+    socket_id = entry->net_socket_id;
+    fd_non_blocking = entry->non_blocking;
+    spin_unlock(&Syscall_state.fd_lock);
+
+    if (!user_addr && addr_len == 0U)
+    {
+        if (fd_type == SYSCALL_FD_TYPE_NET_UDP_SOCKET)
+            return NET_socket_disconnect_udp(owner_pid, socket_id) ? 0 : (uint64_t) -1;
+        return NET_tcp_disconnect(owner_pid, socket_id) ? 0 : (uint64_t) -1;
+    }
+    if (!user_addr || addr_len < sizeof(sys_sockaddr_t))
+        return (uint64_t) -1;
+
+    sys_sockaddr_t addr;
+    if (!Syscall_copy_from_user(&addr, user_addr, sizeof(addr)))
+        return (uint64_t) -1;
+
+    if (addr.sa_family == AF_UNSPEC)
+    {
+        if (fd_type == SYSCALL_FD_TYPE_NET_UDP_SOCKET)
+            return NET_socket_disconnect_udp(owner_pid, socket_id) ? 0 : (uint64_t) -1;
+        return NET_tcp_disconnect(owner_pid, socket_id) ? 0 : (uint64_t) -1;
+    }
+    if (addr.sa_family != AF_INET)
+        return (uint64_t) -1;
+
+    uint32_t peer_addr_be = 0U;
+    uint16_t peer_port = 0U;
+    if (!Syscall_copy_in_sockaddr_in(user_addr, addr_len, &peer_addr_be, &peer_port))
+        return (uint64_t) -1;
+
+    if (fd_type == SYSCALL_FD_TYPE_NET_UDP_SOCKET)
+        return NET_socket_connect_udp(owner_pid, socket_id, peer_addr_be, peer_port) ? 0 : (uint64_t) -1;
+
+    bool in_progress = false;
+    if (!NET_tcp_connect(owner_pid,
+                         socket_id,
+                         peer_addr_be,
+                         peer_port,
+                         fd_non_blocking,
+                         &in_progress))
+    {
+        return (uint64_t) -1;
+    }
+
+    return in_progress ? (uint64_t) -2 : 0U;
+}
+
+static uint64_t Syscall_handle_listen(uint32_t cpu_index, const syscall_frame_t* frame)
+{
+    if (!frame || !Syscall_state.fd_lock_ready)
+        return (uint64_t) -1;
+
+    int64_t fd = (int64_t) frame->rdi;
+    int64_t backlog = (int64_t) frame->rsi;
+    uint32_t owner_pid = Syscall_proc_current_pid(cpu_index, frame);
+    if (fd < 0 || (uint64_t) fd >= SYSCALL_MAX_OPEN_FILES || owner_pid == 0U || backlog < 0)
+        return (uint64_t) -1;
+
+    uint32_t socket_id = 0U;
+    spin_lock(&Syscall_state.fd_lock);
+    syscall_file_desc_t* entry = &Syscall_state.fds[(uint32_t) fd];
+    if (!entry->used || entry->owner_pid != owner_pid || entry->type != SYSCALL_FD_TYPE_NET_TCP_SOCKET || entry->io_busy)
+    {
+        spin_unlock(&Syscall_state.fd_lock);
+        return (uint64_t) -1;
+    }
+    socket_id = entry->net_socket_id;
+    spin_unlock(&Syscall_state.fd_lock);
+
+    return NET_tcp_listen(owner_pid, socket_id, (uint32_t) backlog) ? 0U : (uint64_t) -1;
+}
+
+static uint64_t Syscall_handle_accept(uint32_t cpu_index, const syscall_frame_t* frame)
+{
+    if (!frame || !Syscall_state.fd_lock_ready)
+        return (uint64_t) -1;
+
+    int64_t fd = (int64_t) frame->rdi;
+    void* user_addr = (void*) frame->rsi;
+    void* user_addrlen_ptr = (void*) frame->rdx;
+    uint32_t owner_pid = Syscall_proc_current_pid(cpu_index, frame);
+    if (fd < 0 || (uint64_t) fd >= SYSCALL_MAX_OPEN_FILES || owner_pid == 0U)
+        return (uint64_t) -1;
+    if ((user_addr == NULL) != (user_addrlen_ptr == NULL))
+        return (uint64_t) -1;
+
+    uint32_t listener_socket_id = 0U;
+    spin_lock(&Syscall_state.fd_lock);
+    syscall_file_desc_t* entry = &Syscall_state.fds[(uint32_t) fd];
+    if (!entry->used || entry->owner_pid != owner_pid || entry->type != SYSCALL_FD_TYPE_NET_TCP_SOCKET || !entry->can_read || entry->io_busy)
+    {
+        spin_unlock(&Syscall_state.fd_lock);
+        return (uint64_t) -1;
+    }
+    entry->io_busy = true;
+    listener_socket_id = entry->net_socket_id;
+    spin_unlock(&Syscall_state.fd_lock);
+
+    uint32_t child_socket_id = 0U;
+    bool would_block = false;
+    bool accepted = NET_tcp_accept(owner_pid,
+                                   listener_socket_id,
+                                   &child_socket_id,
+                                   false,
+                                   &would_block);
+
+    spin_lock(&Syscall_state.fd_lock);
+    entry = &Syscall_state.fds[(uint32_t) fd];
+    if (entry->used && entry->owner_pid == owner_pid && entry->type == SYSCALL_FD_TYPE_NET_TCP_SOCKET)
+        entry->io_busy = false;
+    spin_unlock(&Syscall_state.fd_lock);
+
+    if (!accepted)
+        return (uint64_t) -1;
+    if (would_block)
+        return (uint64_t) -2;
+    if (child_socket_id == 0U)
+        return (uint64_t) -1;
+
+    spin_lock(&Syscall_state.fd_lock);
+    int32_t accepted_fd = Syscall_fd_alloc_locked();
+    if (accepted_fd < 0)
+    {
+        spin_unlock(&Syscall_state.fd_lock);
+        (void) NET_tcp_close(owner_pid, child_socket_id);
+        return (uint64_t) -1;
+    }
+
+    syscall_file_desc_t* accepted_entry = &Syscall_state.fds[(uint32_t) accepted_fd];
+    memset(accepted_entry, 0, sizeof(*accepted_entry));
+    accepted_entry->used = true;
+    accepted_entry->type = SYSCALL_FD_TYPE_NET_TCP_SOCKET;
+    accepted_entry->owner_pid = owner_pid;
+    accepted_entry->can_read = true;
+    accepted_entry->can_write = true;
+    accepted_entry->net_socket_id = child_socket_id;
+    spin_unlock(&Syscall_state.fd_lock);
+
+    if (user_addr && user_addrlen_ptr)
+    {
+        bool connected = false;
+        uint32_t peer_addr_be = 0U;
+        uint16_t peer_port = 0U;
+        if (!NET_tcp_getpeername(owner_pid, child_socket_id, &connected, &peer_addr_be, &peer_port) || !connected)
+        {
+            spin_lock(&Syscall_state.fd_lock);
+            syscall_file_desc_t* cleanup_entry = &Syscall_state.fds[(uint32_t) accepted_fd];
+            if (cleanup_entry->used &&
+                cleanup_entry->owner_pid == owner_pid &&
+                cleanup_entry->type == SYSCALL_FD_TYPE_NET_TCP_SOCKET &&
+                cleanup_entry->net_socket_id == child_socket_id)
+            {
+                memset(cleanup_entry, 0, sizeof(*cleanup_entry));
+            }
+            spin_unlock(&Syscall_state.fd_lock);
+            (void) NET_tcp_close(owner_pid, child_socket_id);
+            return (uint64_t) -1;
+        }
+
+        if (!Syscall_copy_out_sockaddr_in(user_addr, user_addrlen_ptr, peer_addr_be, peer_port))
+        {
+            spin_lock(&Syscall_state.fd_lock);
+            syscall_file_desc_t* cleanup_entry = &Syscall_state.fds[(uint32_t) accepted_fd];
+            if (cleanup_entry->used &&
+                cleanup_entry->owner_pid == owner_pid &&
+                cleanup_entry->type == SYSCALL_FD_TYPE_NET_TCP_SOCKET &&
+                cleanup_entry->net_socket_id == child_socket_id)
+            {
+                memset(cleanup_entry, 0, sizeof(*cleanup_entry));
+            }
+            spin_unlock(&Syscall_state.fd_lock);
+            (void) NET_tcp_close(owner_pid, child_socket_id);
+            return (uint64_t) -1;
+        }
+    }
+
+    return (uint64_t) accepted_fd;
+}
+
+static uint64_t Syscall_handle_sendto(uint32_t cpu_index, const syscall_frame_t* frame)
+{
+    if (!frame || !Syscall_state.fd_lock_ready)
+        return (uint64_t) -1;
+
+    int64_t fd = (int64_t) frame->rdi;
+    const void* user_buf = (const void*) frame->rsi;
+    size_t len = (size_t) frame->rdx;
+    uint32_t flags = (uint32_t) frame->r10;
+    const void* user_dest_addr = (const void*) frame->r8;
+    size_t dest_addr_len = (size_t) frame->r9;
+    uint32_t owner_pid = Syscall_proc_current_pid(cpu_index, frame);
+    if (fd < 0 || (uint64_t) fd >= SYSCALL_MAX_OPEN_FILES || owner_pid == 0U || (len != 0U && !user_buf))
+        return (uint64_t) -1;
+    if (len == 0U)
+        return 0U;
+    if ((flags & ~NET_SOCKET_MSG_DONTWAIT) != 0U)
+        return (uint64_t) -1;
+    if ((user_dest_addr == NULL) != (dest_addr_len == 0U))
+        return (uint64_t) -1;
+
+    uint32_t socket_id = 0U;
+    uint32_t fd_type = SYSCALL_FD_TYPE_NONE;
+    spin_lock(&Syscall_state.fd_lock);
+    syscall_file_desc_t* entry = &Syscall_state.fds[(uint32_t) fd];
+    if (!entry->used || entry->owner_pid != owner_pid || !entry->can_write || entry->io_busy)
+    {
+        spin_unlock(&Syscall_state.fd_lock);
+        return (uint64_t) -1;
+    }
+    fd_type = entry->type;
+    if (fd_type != SYSCALL_FD_TYPE_NET_UDP_SOCKET && fd_type != SYSCALL_FD_TYPE_NET_TCP_SOCKET)
+    {
+        spin_unlock(&Syscall_state.fd_lock);
+        return (uint64_t) -1;
+    }
+    entry->io_busy = true;
+    socket_id = entry->net_socket_id;
+    spin_unlock(&Syscall_state.fd_lock);
+
+    size_t payload_cap = (fd_type == SYSCALL_FD_TYPE_NET_TCP_SOCKET) ? NET_TCP_MAX_PAYLOAD : NET_SOCKET_UDP_MAX_PAYLOAD;
+    if (len > payload_cap)
+    {
+        spin_lock(&Syscall_state.fd_lock);
+        entry = &Syscall_state.fds[(uint32_t) fd];
+        if (entry->used && entry->owner_pid == owner_pid && entry->type == fd_type)
+            entry->io_busy = false;
+        spin_unlock(&Syscall_state.fd_lock);
+        return (uint64_t) -1;
+    }
+
+    uint8_t payload[NET_SOCKET_UDP_MAX_PAYLOAD];
+    if (len != 0U && !Syscall_copy_from_user(payload, user_buf, len))
+    {
+        spin_lock(&Syscall_state.fd_lock);
+        entry = &Syscall_state.fds[(uint32_t) fd];
+        if (entry->used && entry->owner_pid == owner_pid && entry->type == fd_type)
+            entry->io_busy = false;
+        spin_unlock(&Syscall_state.fd_lock);
+        return (uint64_t) -1;
+    }
+
+    size_t sent = 0U;
+    bool ok = false;
+    bool would_block = false;
+    if (fd_type == SYSCALL_FD_TYPE_NET_UDP_SOCKET)
+    {
+        bool use_connected_peer = user_dest_addr == NULL;
+        uint32_t dst_addr_be = 0U;
+        uint16_t dst_port = 0U;
+        if (!use_connected_peer &&
+            !Syscall_copy_in_sockaddr_in(user_dest_addr, dest_addr_len, &dst_addr_be, &dst_port))
+        {
+            ok = false;
+        }
+        else
+        {
+            if (use_connected_peer)
+            {
+                bool connected = false;
+                if (!NET_socket_getpeername_udp(owner_pid, socket_id, &connected, &dst_addr_be, &dst_port) || !connected)
+                {
+                    ok = false;
+                }
+                else
+                {
+                    ok = NET_socket_sendto_udp(owner_pid, socket_id, dst_addr_be, dst_port, payload, len, &sent);
+                }
+            }
+            else
+            {
+                ok = NET_socket_sendto_udp(owner_pid, socket_id, dst_addr_be, dst_port, payload, len, &sent);
+            }
+        }
+    }
+    else
+    {
+        if (user_dest_addr != NULL)
+        {
+            ok = false;
+        }
+        else
+        {
+            ok = NET_tcp_send(owner_pid,
+                              socket_id,
+                              payload,
+                              len,
+                              &sent,
+                              (flags & NET_SOCKET_MSG_DONTWAIT) != 0U,
+                              &would_block);
+        }
+    }
+
+    spin_lock(&Syscall_state.fd_lock);
+    entry = &Syscall_state.fds[(uint32_t) fd];
+    if (entry->used && entry->owner_pid == owner_pid && entry->type == fd_type)
+        entry->io_busy = false;
+    spin_unlock(&Syscall_state.fd_lock);
+
+    if (!ok)
+        return (uint64_t) -1;
+    if (would_block)
+        return (uint64_t) -2;
+
+    return (uint64_t) sent;
+}
+
+static uint64_t Syscall_handle_recvfrom(uint32_t cpu_index, const syscall_frame_t* frame)
+{
+    if (!frame || !Syscall_state.fd_lock_ready)
+        return (uint64_t) -1;
+
+    int64_t fd = (int64_t) frame->rdi;
+    void* user_buf = (void*) frame->rsi;
+    size_t len = (size_t) frame->rdx;
+    uint32_t flags = (uint32_t) frame->r10;
+    void* user_src_addr = (void*) frame->r8;
+    void* user_src_addrlen_ptr = (void*) frame->r9;
+    uint32_t owner_pid = Syscall_proc_current_pid(cpu_index, frame);
+    if (fd < 0 || (uint64_t) fd >= SYSCALL_MAX_OPEN_FILES || owner_pid == 0U || (len != 0U && !user_buf))
+        return (uint64_t) -1;
+    if ((flags & ~NET_SOCKET_MSG_DONTWAIT) != 0U)
+        return (uint64_t) -1;
+    if ((user_src_addr == NULL) != (user_src_addrlen_ptr == NULL))
+        return (uint64_t) -1;
+
+    uint32_t socket_id = 0U;
+    uint32_t fd_type = SYSCALL_FD_TYPE_NONE;
+    spin_lock(&Syscall_state.fd_lock);
+    syscall_file_desc_t* entry = &Syscall_state.fds[(uint32_t) fd];
+    if (!entry->used || entry->owner_pid != owner_pid || !entry->can_read || entry->io_busy)
+    {
+        spin_unlock(&Syscall_state.fd_lock);
+        return (uint64_t) -1;
+    }
+    fd_type = entry->type;
+    if (fd_type != SYSCALL_FD_TYPE_NET_UDP_SOCKET && fd_type != SYSCALL_FD_TYPE_NET_TCP_SOCKET)
+    {
+        spin_unlock(&Syscall_state.fd_lock);
+        return (uint64_t) -1;
+    }
+    if (len == 0U)
+    {
+        spin_unlock(&Syscall_state.fd_lock);
+        return 0U;
+    }
+    entry->io_busy = true;
+    socket_id = entry->net_socket_id;
+    spin_unlock(&Syscall_state.fd_lock);
+
+    size_t payload_cap = (fd_type == SYSCALL_FD_TYPE_NET_TCP_SOCKET) ? NET_TCP_MAX_PAYLOAD : NET_SOCKET_UDP_MAX_PAYLOAD;
+    uint8_t payload[NET_SOCKET_UDP_MAX_PAYLOAD];
+    size_t recv_cap = len;
+    if (recv_cap > payload_cap)
+        recv_cap = payload_cap;
+
+    size_t recv_len = 0U;
+    uint32_t src_addr_be = 0U;
+    uint16_t src_port = 0U;
+    bool would_block = false;
+    bool ok = false;
+    if (fd_type == SYSCALL_FD_TYPE_NET_UDP_SOCKET)
+    {
+        ok = NET_socket_recvfrom_udp(owner_pid,
+                                     socket_id,
+                                     payload,
+                                     recv_cap,
+                                     &recv_len,
+                                     &src_addr_be,
+                                     &src_port,
+                                     (flags & NET_SOCKET_MSG_DONTWAIT) != 0U,
+                                     &would_block);
+    }
+    else
+    {
+        ok = NET_tcp_recv(owner_pid,
+                          socket_id,
+                          payload,
+                          recv_cap,
+                          &recv_len,
+                          (flags & NET_SOCKET_MSG_DONTWAIT) != 0U,
+                          &would_block);
+        if (ok && recv_len != 0U)
+        {
+            bool connected = false;
+            if (!NET_tcp_getpeername(owner_pid, socket_id, &connected, &src_addr_be, &src_port) || !connected)
+            {
+                src_addr_be = 0U;
+                src_port = 0U;
+            }
+        }
+    }
+
+    spin_lock(&Syscall_state.fd_lock);
+    entry = &Syscall_state.fds[(uint32_t) fd];
+    if (entry->used && entry->owner_pid == owner_pid && entry->type == fd_type)
+        entry->io_busy = false;
+    spin_unlock(&Syscall_state.fd_lock);
+
+    if (!ok)
+        return (uint64_t) -1;
+    if (would_block)
+        return (uint64_t) -2;
+
+    if (recv_len != 0U && !Syscall_copy_to_user(user_buf, payload, recv_len))
+        return (uint64_t) -1;
+
+    if (user_src_addr && user_src_addrlen_ptr)
+    {
+        if (!Syscall_copy_out_sockaddr_in(user_src_addr, user_src_addrlen_ptr, src_addr_be, src_port))
+            return (uint64_t) -1;
+    }
+
+    return (uint64_t) recv_len;
+}
+
+static uint64_t Syscall_handle_getsockname(uint32_t cpu_index, const syscall_frame_t* frame)
+{
+    if (!frame || !Syscall_state.fd_lock_ready)
+        return (uint64_t) -1;
+
+    int64_t fd = (int64_t) frame->rdi;
+    void* user_addr = (void*) frame->rsi;
+    void* user_addrlen_ptr = (void*) frame->rdx;
+    uint32_t owner_pid = Syscall_proc_current_pid(cpu_index, frame);
+    if (fd < 0 || (uint64_t) fd >= SYSCALL_MAX_OPEN_FILES || owner_pid == 0U || !user_addr || !user_addrlen_ptr)
+        return (uint64_t) -1;
+
+    uint32_t socket_id = 0U;
+    uint32_t fd_type = SYSCALL_FD_TYPE_NONE;
+    spin_lock(&Syscall_state.fd_lock);
+    syscall_file_desc_t* entry = &Syscall_state.fds[(uint32_t) fd];
+    if (!entry->used || entry->owner_pid != owner_pid || entry->io_busy)
+    {
+        spin_unlock(&Syscall_state.fd_lock);
+        return (uint64_t) -1;
+    }
+    fd_type = entry->type;
+    if (fd_type != SYSCALL_FD_TYPE_NET_UDP_SOCKET && fd_type != SYSCALL_FD_TYPE_NET_TCP_SOCKET)
+    {
+        spin_unlock(&Syscall_state.fd_lock);
+        return (uint64_t) -1;
+    }
+    socket_id = entry->net_socket_id;
+    spin_unlock(&Syscall_state.fd_lock);
+
+    uint32_t local_addr_be = 0U;
+    uint16_t local_port = 0U;
+    if (fd_type == SYSCALL_FD_TYPE_NET_UDP_SOCKET)
+    {
+        if (!NET_socket_getsockname_udp(owner_pid, socket_id, &local_addr_be, &local_port))
+            return (uint64_t) -1;
+    }
+    else
+    {
+        if (!NET_tcp_getsockname(owner_pid, socket_id, &local_addr_be, &local_port))
+            return (uint64_t) -1;
+    }
+
+    return Syscall_copy_out_sockaddr_in(user_addr, user_addrlen_ptr, local_addr_be, local_port) ? 0U : (uint64_t) -1;
+}
+
+static uint64_t Syscall_handle_getpeername(uint32_t cpu_index, const syscall_frame_t* frame)
+{
+    if (!frame || !Syscall_state.fd_lock_ready)
+        return (uint64_t) -1;
+
+    int64_t fd = (int64_t) frame->rdi;
+    void* user_addr = (void*) frame->rsi;
+    void* user_addrlen_ptr = (void*) frame->rdx;
+    uint32_t owner_pid = Syscall_proc_current_pid(cpu_index, frame);
+    if (fd < 0 || (uint64_t) fd >= SYSCALL_MAX_OPEN_FILES || owner_pid == 0U || !user_addr || !user_addrlen_ptr)
+        return (uint64_t) -1;
+
+    uint32_t socket_id = 0U;
+    uint32_t fd_type = SYSCALL_FD_TYPE_NONE;
+    spin_lock(&Syscall_state.fd_lock);
+    syscall_file_desc_t* entry = &Syscall_state.fds[(uint32_t) fd];
+    if (!entry->used || entry->owner_pid != owner_pid || entry->io_busy)
+    {
+        spin_unlock(&Syscall_state.fd_lock);
+        return (uint64_t) -1;
+    }
+    fd_type = entry->type;
+    if (fd_type != SYSCALL_FD_TYPE_NET_UDP_SOCKET && fd_type != SYSCALL_FD_TYPE_NET_TCP_SOCKET)
+    {
+        spin_unlock(&Syscall_state.fd_lock);
+        return (uint64_t) -1;
+    }
+    socket_id = entry->net_socket_id;
+    spin_unlock(&Syscall_state.fd_lock);
+
+    bool connected = false;
+    uint32_t peer_addr_be = 0U;
+    uint16_t peer_port = 0U;
+    if (fd_type == SYSCALL_FD_TYPE_NET_UDP_SOCKET)
+    {
+        if (!NET_socket_getpeername_udp(owner_pid, socket_id, &connected, &peer_addr_be, &peer_port) || !connected)
+            return (uint64_t) -1;
+    }
+    else
+    {
+        if (!NET_tcp_getpeername(owner_pid, socket_id, &connected, &peer_addr_be, &peer_port) || !connected)
+            return (uint64_t) -1;
+    }
+
+    return Syscall_copy_out_sockaddr_in(user_addr, user_addrlen_ptr, peer_addr_be, peer_port) ? 0U : (uint64_t) -1;
 }
 
 static uint64_t Syscall_handle_open(uint32_t cpu_index, const syscall_frame_t* frame)
@@ -744,6 +1521,34 @@ static uint64_t Syscall_handle_open(uint32_t cpu_index, const syscall_frame_t* f
         return (uint64_t) fd;
     }
 
+    if (Syscall_is_net_raw_path(path))
+    {
+        if (want_create || want_trunc || want_exclusive)
+            return (uint64_t) -1;
+        if (!E1000_is_available())
+            return (uint64_t) -1;
+
+        spin_lock(&Syscall_state.fd_lock);
+        int32_t fd = Syscall_fd_alloc_locked();
+        if (fd < 0)
+        {
+            spin_unlock(&Syscall_state.fd_lock);
+            return (uint64_t) -1;
+        }
+
+        syscall_file_desc_t* entry = &Syscall_state.fds[(uint32_t) fd];
+        memset(entry, 0, sizeof(*entry));
+        entry->used = true;
+        entry->type = SYSCALL_FD_TYPE_NET_RAW;
+        entry->owner_pid = owner_pid;
+        entry->can_read = can_read;
+        entry->can_write = can_write;
+        entry->non_blocking = false;
+        memcpy(entry->path, E1000_NET_NODE_PATH, sizeof(E1000_NET_NODE_PATH));
+        spin_unlock(&Syscall_state.fd_lock);
+        return (uint64_t) fd;
+    }
+
     if (Syscall_is_drm_card_path(path))
     {
         if (want_create || want_trunc || want_exclusive)
@@ -774,9 +1579,6 @@ static uint64_t Syscall_handle_open(uint32_t cpu_index, const syscall_frame_t* f
         spin_unlock(&Syscall_state.fd_lock);
         return (uint64_t) fd;
     }
-
-    if (!Syscall_state.fs_lock_ready)
-        return (uint64_t) -1;
 
     char lock_path[SYSCALL_USER_CSTR_MAX] = { 0 };
     bool lock_path_is_normalized = Syscall_normalize_write_path(path, lock_path, sizeof(lock_path));
@@ -820,21 +1622,16 @@ static uint64_t Syscall_handle_open(uint32_t cpu_index, const syscall_frame_t* f
 
     uint8_t* file_data = NULL;
     size_t file_size = 0;
-    size_t block_size = 0;
     bool fs_ready = false;
+    size_t block_size = 0;
     bool exists = false;
 
-    spin_lock(&Syscall_state.fs_lock);
-    ext4_fs_t* fs = ext4_get_active();
-    if (fs && fs->block_size != 0)
-    {
-        fs_ready = true;
-        block_size = fs->block_size;
-        exists = ext4_read_file(fs, path, &file_data, &file_size);
-    }
-    spin_unlock(&Syscall_state.fs_lock);
+    fs_ready = VFS_is_ready();
+    block_size = VFS_block_size();
+    if (fs_ready && block_size != 0U)
+        exists = VFS_read_file(path, &file_data, &file_size);
 
-    if (!fs_ready)
+    if (!fs_ready || block_size == 0U)
         goto open_fail_slot;
 
     if (!exists)
@@ -937,6 +1734,31 @@ static uint64_t Syscall_handle_close(uint32_t cpu_index, const syscall_frame_t* 
         return 0;
     }
 
+    if (entry_type == SYSCALL_FD_TYPE_NET_UDP_SOCKET)
+    {
+        uint32_t socket_id = entry->net_socket_id;
+        memset(entry, 0, sizeof(*entry));
+        spin_unlock(&Syscall_state.fd_lock);
+        (void) NET_socket_close_udp(owner_pid, socket_id);
+        return 0;
+    }
+
+    if (entry_type == SYSCALL_FD_TYPE_NET_TCP_SOCKET)
+    {
+        uint32_t socket_id = entry->net_socket_id;
+        memset(entry, 0, sizeof(*entry));
+        spin_unlock(&Syscall_state.fd_lock);
+        (void) NET_tcp_close(owner_pid, socket_id);
+        return 0;
+    }
+
+    if (entry_type == SYSCALL_FD_TYPE_NET_RAW)
+    {
+        memset(entry, 0, sizeof(*entry));
+        spin_unlock(&Syscall_state.fd_lock);
+        return 0;
+    }
+
     if (entry_type != SYSCALL_FD_TYPE_REGULAR)
     {
         spin_unlock(&Syscall_state.fd_lock);
@@ -965,21 +1787,11 @@ static uint64_t Syscall_handle_close(uint32_t cpu_index, const syscall_frame_t* 
     }
     spin_unlock(&Syscall_state.fd_lock);
 
-    if (!Syscall_state.fs_lock_ready)
-    {
-        spin_lock(&Syscall_state.fd_lock);
-        entry = &Syscall_state.fds[(uint32_t) fd];
-        if (entry->used && entry->owner_pid == owner_pid && entry->type == SYSCALL_FD_TYPE_REGULAR)
-            entry->io_busy = false;
-        spin_unlock(&Syscall_state.fd_lock);
-        return (uint64_t) -1;
-    }
-
-    spin_lock(&Syscall_state.fs_lock);
-    ext4_fs_t* fs = ext4_get_active();
-    flush_ok = (fs && flush_size <= fs->block_size &&
-                ext4_create_file(fs, flush_path, flush_data, flush_size));
-    spin_unlock(&Syscall_state.fs_lock);
+    size_t block_size = VFS_block_size();
+    flush_ok = (VFS_is_ready() &&
+                block_size != 0U &&
+                flush_size <= block_size &&
+                VFS_write_file(flush_path, flush_data, flush_size));
 
     spin_lock(&Syscall_state.fd_lock);
     entry = &Syscall_state.fds[(uint32_t) fd];
@@ -1021,9 +1833,105 @@ static uint64_t Syscall_handle_read(uint32_t cpu_index, const syscall_frame_t* f
 
     spin_lock(&Syscall_state.fd_lock);
     syscall_file_desc_t* entry = &Syscall_state.fds[(uint32_t) fd];
-    if (!entry->used || entry->owner_pid != owner_pid ||
-        entry->type != SYSCALL_FD_TYPE_REGULAR ||
-        !entry->can_read || entry->io_busy)
+    if (!entry->used || entry->owner_pid != owner_pid || !entry->can_read || entry->io_busy)
+    {
+        spin_unlock(&Syscall_state.fd_lock);
+        return (uint64_t) -1;
+    }
+
+    uint32_t entry_type = entry->type;
+    if (entry_type == SYSCALL_FD_TYPE_NET_RAW)
+    {
+        entry->io_busy = true;
+        bool block = !entry->non_blocking;
+        spin_unlock(&Syscall_state.fd_lock);
+
+        uint8_t frame_buf[E1000_RX_BUFFER_BYTES];
+        size_t frame_len = 0;
+        if (!E1000_raw_read(frame_buf, sizeof(frame_buf), &frame_len, block))
+        {
+            spin_lock(&Syscall_state.fd_lock);
+            entry = &Syscall_state.fds[(uint32_t) fd];
+            if (entry->used && entry->owner_pid == owner_pid && entry->type == SYSCALL_FD_TYPE_NET_RAW)
+                entry->io_busy = false;
+            spin_unlock(&Syscall_state.fd_lock);
+            return (uint64_t) -1;
+        }
+
+        size_t to_copy = frame_len;
+        if (to_copy > len)
+            to_copy = len;
+
+        if (to_copy != 0 && !Syscall_copy_to_user(user_buf, frame_buf, to_copy))
+        {
+            spin_lock(&Syscall_state.fd_lock);
+            entry = &Syscall_state.fds[(uint32_t) fd];
+            if (entry->used && entry->owner_pid == owner_pid && entry->type == SYSCALL_FD_TYPE_NET_RAW)
+                entry->io_busy = false;
+            spin_unlock(&Syscall_state.fd_lock);
+            return (uint64_t) -1;
+        }
+
+        spin_lock(&Syscall_state.fd_lock);
+        entry = &Syscall_state.fds[(uint32_t) fd];
+        if (entry->used && entry->owner_pid == owner_pid && entry->type == SYSCALL_FD_TYPE_NET_RAW)
+            entry->io_busy = false;
+        spin_unlock(&Syscall_state.fd_lock);
+        return (uint64_t) to_copy;
+    }
+
+    if (entry_type == SYSCALL_FD_TYPE_NET_TCP_SOCKET)
+    {
+        entry->io_busy = true;
+        uint32_t socket_id = entry->net_socket_id;
+        spin_unlock(&Syscall_state.fd_lock);
+
+        uint8_t payload[NET_TCP_MAX_PAYLOAD];
+        size_t recv_cap = len;
+        if (recv_cap > sizeof(payload))
+            recv_cap = sizeof(payload);
+
+        size_t recv_len = 0U;
+        bool would_block = false;
+        if (!NET_tcp_recv(owner_pid, socket_id, payload, recv_cap, &recv_len, false, &would_block))
+        {
+            spin_lock(&Syscall_state.fd_lock);
+            entry = &Syscall_state.fds[(uint32_t) fd];
+            if (entry->used && entry->owner_pid == owner_pid && entry->type == SYSCALL_FD_TYPE_NET_TCP_SOCKET)
+                entry->io_busy = false;
+            spin_unlock(&Syscall_state.fd_lock);
+            return (uint64_t) -1;
+        }
+
+        if (would_block)
+        {
+            spin_lock(&Syscall_state.fd_lock);
+            entry = &Syscall_state.fds[(uint32_t) fd];
+            if (entry->used && entry->owner_pid == owner_pid && entry->type == SYSCALL_FD_TYPE_NET_TCP_SOCKET)
+                entry->io_busy = false;
+            spin_unlock(&Syscall_state.fd_lock);
+            return (uint64_t) -2;
+        }
+
+        if (recv_len != 0U && !Syscall_copy_to_user(user_buf, payload, recv_len))
+        {
+            spin_lock(&Syscall_state.fd_lock);
+            entry = &Syscall_state.fds[(uint32_t) fd];
+            if (entry->used && entry->owner_pid == owner_pid && entry->type == SYSCALL_FD_TYPE_NET_TCP_SOCKET)
+                entry->io_busy = false;
+            spin_unlock(&Syscall_state.fd_lock);
+            return (uint64_t) -1;
+        }
+
+        spin_lock(&Syscall_state.fd_lock);
+        entry = &Syscall_state.fds[(uint32_t) fd];
+        if (entry->used && entry->owner_pid == owner_pid && entry->type == SYSCALL_FD_TYPE_NET_TCP_SOCKET)
+            entry->io_busy = false;
+        spin_unlock(&Syscall_state.fd_lock);
+        return (uint64_t) recv_len;
+    }
+
+    if (entry_type != SYSCALL_FD_TYPE_REGULAR)
     {
         spin_unlock(&Syscall_state.fd_lock);
         return (uint64_t) -1;
@@ -1117,6 +2025,100 @@ static uint64_t Syscall_handle_write(uint32_t cpu_index, const syscall_frame_t* 
         return (uint64_t) copied_total;
     }
 
+    if (entry_type == SYSCALL_FD_TYPE_NET_RAW)
+    {
+        if (len > E1000_ETH_FRAME_MAX_BYTES)
+        {
+            spin_unlock(&Syscall_state.fd_lock);
+            return (uint64_t) -1;
+        }
+
+        entry->io_busy = true;
+        spin_unlock(&Syscall_state.fd_lock);
+
+        uint8_t frame_buf[E1000_TX_BUFFER_BYTES];
+        if (!Syscall_copy_from_user(frame_buf, user_buf, len))
+        {
+            spin_lock(&Syscall_state.fd_lock);
+            entry = &Syscall_state.fds[(uint32_t) fd];
+            if (entry->used && entry->owner_pid == owner_pid && entry->type == SYSCALL_FD_TYPE_NET_RAW)
+                entry->io_busy = false;
+            spin_unlock(&Syscall_state.fd_lock);
+            return (uint64_t) -1;
+        }
+
+        size_t written = 0;
+        if (!E1000_raw_write(frame_buf, len, &written))
+        {
+            spin_lock(&Syscall_state.fd_lock);
+            entry = &Syscall_state.fds[(uint32_t) fd];
+            if (entry->used && entry->owner_pid == owner_pid && entry->type == SYSCALL_FD_TYPE_NET_RAW)
+                entry->io_busy = false;
+            spin_unlock(&Syscall_state.fd_lock);
+            return (uint64_t) -1;
+        }
+
+        spin_lock(&Syscall_state.fd_lock);
+        entry = &Syscall_state.fds[(uint32_t) fd];
+        if (entry->used && entry->owner_pid == owner_pid && entry->type == SYSCALL_FD_TYPE_NET_RAW)
+            entry->io_busy = false;
+        spin_unlock(&Syscall_state.fd_lock);
+        return (uint64_t) written;
+    }
+
+    if (entry_type == SYSCALL_FD_TYPE_NET_TCP_SOCKET)
+    {
+        if (len > NET_TCP_MAX_PAYLOAD)
+        {
+            spin_unlock(&Syscall_state.fd_lock);
+            return (uint64_t) -1;
+        }
+
+        entry->io_busy = true;
+        uint32_t socket_id = entry->net_socket_id;
+        spin_unlock(&Syscall_state.fd_lock);
+
+        uint8_t payload[NET_TCP_MAX_PAYLOAD];
+        if (!Syscall_copy_from_user(payload, user_buf, len))
+        {
+            spin_lock(&Syscall_state.fd_lock);
+            entry = &Syscall_state.fds[(uint32_t) fd];
+            if (entry->used && entry->owner_pid == owner_pid && entry->type == SYSCALL_FD_TYPE_NET_TCP_SOCKET)
+                entry->io_busy = false;
+            spin_unlock(&Syscall_state.fd_lock);
+            return (uint64_t) -1;
+        }
+
+        size_t sent = 0U;
+        bool would_block = false;
+        if (!NET_tcp_send(owner_pid, socket_id, payload, len, &sent, false, &would_block))
+        {
+            spin_lock(&Syscall_state.fd_lock);
+            entry = &Syscall_state.fds[(uint32_t) fd];
+            if (entry->used && entry->owner_pid == owner_pid && entry->type == SYSCALL_FD_TYPE_NET_TCP_SOCKET)
+                entry->io_busy = false;
+            spin_unlock(&Syscall_state.fd_lock);
+            return (uint64_t) -1;
+        }
+
+        if (would_block)
+        {
+            spin_lock(&Syscall_state.fd_lock);
+            entry = &Syscall_state.fds[(uint32_t) fd];
+            if (entry->used && entry->owner_pid == owner_pid && entry->type == SYSCALL_FD_TYPE_NET_TCP_SOCKET)
+                entry->io_busy = false;
+            spin_unlock(&Syscall_state.fd_lock);
+            return (uint64_t) -2;
+        }
+
+        spin_lock(&Syscall_state.fd_lock);
+        entry = &Syscall_state.fds[(uint32_t) fd];
+        if (entry->used && entry->owner_pid == owner_pid && entry->type == SYSCALL_FD_TYPE_NET_TCP_SOCKET)
+            entry->io_busy = false;
+        spin_unlock(&Syscall_state.fd_lock);
+        return (uint64_t) sent;
+    }
+
     if (entry_type != SYSCALL_FD_TYPE_REGULAR)
     {
         spin_unlock(&Syscall_state.fd_lock);
@@ -1179,6 +2181,11 @@ static uint64_t Syscall_handle_lseek(uint32_t cpu_index, const syscall_frame_t* 
     spin_lock(&Syscall_state.fd_lock);
     syscall_file_desc_t* entry = &Syscall_state.fds[(uint32_t) fd];
     if (!entry->used || entry->owner_pid != owner_pid || entry->io_busy)
+    {
+        spin_unlock(&Syscall_state.fd_lock);
+        return (uint64_t) -1;
+    }
+    if (entry->type != SYSCALL_FD_TYPE_REGULAR)
     {
         spin_unlock(&Syscall_state.fd_lock);
         return (uint64_t) -1;
@@ -1261,6 +2268,212 @@ static uint64_t Syscall_handle_audio_ioctl(unsigned long request, void* user_arg
     }
 }
 
+static uint64_t Syscall_handle_net_raw_ioctl(uint32_t owner_pid, int64_t fd, unsigned long request, void* user_arg)
+{
+    if (fd < 0 || (uint64_t) fd >= SYSCALL_MAX_OPEN_FILES || owner_pid == 0)
+        return (uint64_t) -1;
+
+    switch (request)
+    {
+        case FIONBIO:
+        {
+            if (!user_arg)
+                return (uint64_t) -1;
+
+            int32_t non_blocking = 0;
+            if (!Syscall_copy_from_user(&non_blocking, user_arg, sizeof(non_blocking)))
+                return (uint64_t) -1;
+
+            bool set_non_blocking = non_blocking != 0;
+            spin_lock(&Syscall_state.fd_lock);
+            syscall_file_desc_t* entry = &Syscall_state.fds[(uint32_t) fd];
+            if (!entry->used || entry->owner_pid != owner_pid || entry->type != SYSCALL_FD_TYPE_NET_RAW || entry->io_busy)
+            {
+                spin_unlock(&Syscall_state.fd_lock);
+                return (uint64_t) -1;
+            }
+            entry->non_blocking = set_non_blocking;
+            spin_unlock(&Syscall_state.fd_lock);
+
+            int32_t out_value = set_non_blocking ? 1 : 0;
+            return Syscall_copy_to_user(user_arg, &out_value, sizeof(out_value)) ? 0 : (uint64_t) -1;
+        }
+
+        case FIONREAD:
+        {
+            if (!user_arg)
+                return (uint64_t) -1;
+
+            size_t pending_bytes = 0;
+            if (!E1000_get_pending_rx_bytes(&pending_bytes))
+                return (uint64_t) -1;
+
+            int32_t out_value = (pending_bytes > 0x7FFFFFFFULL) ? 0x7FFFFFFF : (int32_t) pending_bytes;
+            return Syscall_copy_to_user(user_arg, &out_value, sizeof(out_value)) ? 0 : (uint64_t) -1;
+        }
+
+        case NET_RAW_IOCTL_GET_STATS:
+        {
+            if (!user_arg)
+                return (uint64_t) -1;
+
+            sys_net_raw_stats_t stats;
+            if (!E1000_get_stats(&stats))
+                return (uint64_t) -1;
+            return Syscall_copy_to_user(user_arg, &stats, sizeof(stats)) ? 0 : (uint64_t) -1;
+        }
+
+        case SIOCGARP:
+        {
+            if (!user_arg)
+                return (uint64_t) -1;
+
+            sys_arpreq_t request_data;
+            if (!Syscall_copy_from_user(&request_data, user_arg, sizeof(request_data)))
+                return (uint64_t) -1;
+
+            sys_arpreq_t reply_data;
+            if (!ARP_ioctl_get(&request_data, &reply_data))
+                return (uint64_t) -1;
+
+            return Syscall_copy_to_user(user_arg, &reply_data, sizeof(reply_data)) ? 0 : (uint64_t) -1;
+        }
+
+        case SIOCSARP:
+        {
+            if (!user_arg)
+                return (uint64_t) -1;
+            if (!Syscall_proc_owner_is_driverland(owner_pid))
+                return (uint64_t) -1;
+
+            sys_arpreq_t request_data;
+            if (!Syscall_copy_from_user(&request_data, user_arg, sizeof(request_data)))
+                return (uint64_t) -1;
+            return ARP_ioctl_set(&request_data) ? 0 : (uint64_t) -1;
+        }
+
+        case SIOCDARP:
+        {
+            if (!user_arg)
+                return (uint64_t) -1;
+            if (!Syscall_proc_owner_is_driverland(owner_pid))
+                return (uint64_t) -1;
+
+            sys_arpreq_t request_data;
+            if (!Syscall_copy_from_user(&request_data, user_arg, sizeof(request_data)))
+                return (uint64_t) -1;
+            return ARP_ioctl_delete(&request_data) ? 0 : (uint64_t) -1;
+        }
+
+        default:
+            return (uint64_t) -1;
+    }
+}
+
+static uint64_t Syscall_handle_udp_socket_ioctl(uint32_t owner_pid, int64_t fd, unsigned long request, void* user_arg)
+{
+    if (fd < 0 || (uint64_t) fd >= SYSCALL_MAX_OPEN_FILES || owner_pid == 0U || !user_arg)
+        return (uint64_t) -1;
+
+    uint32_t socket_id = 0U;
+    spin_lock(&Syscall_state.fd_lock);
+    syscall_file_desc_t* entry = &Syscall_state.fds[(uint32_t) fd];
+    if (!entry->used || entry->owner_pid != owner_pid || entry->type != SYSCALL_FD_TYPE_NET_UDP_SOCKET || entry->io_busy)
+    {
+        spin_unlock(&Syscall_state.fd_lock);
+        return (uint64_t) -1;
+    }
+    socket_id = entry->net_socket_id;
+    spin_unlock(&Syscall_state.fd_lock);
+
+    switch (request)
+    {
+        case FIONBIO:
+        {
+            int32_t non_blocking = 0;
+            if (!Syscall_copy_from_user(&non_blocking, user_arg, sizeof(non_blocking)))
+                return (uint64_t) -1;
+
+            bool out_value = false;
+            if (!NET_socket_set_non_blocking(owner_pid, socket_id, non_blocking != 0, &out_value))
+                return (uint64_t) -1;
+
+            int32_t out_int = out_value ? 1 : 0;
+            return Syscall_copy_to_user(user_arg, &out_int, sizeof(out_int)) ? 0 : (uint64_t) -1;
+        }
+
+        case FIONREAD:
+        {
+            size_t pending = 0U;
+            if (!NET_socket_pending_udp_bytes(owner_pid, socket_id, &pending))
+                return (uint64_t) -1;
+
+            int32_t out_int = (pending > 0x7FFFFFFFULL) ? 0x7FFFFFFF : (int32_t) pending;
+            return Syscall_copy_to_user(user_arg, &out_int, sizeof(out_int)) ? 0 : (uint64_t) -1;
+        }
+
+        default:
+            return (uint64_t) -1;
+    }
+}
+
+static uint64_t Syscall_handle_tcp_socket_ioctl(uint32_t owner_pid, int64_t fd, unsigned long request, void* user_arg)
+{
+    if (fd < 0 || (uint64_t) fd >= SYSCALL_MAX_OPEN_FILES || owner_pid == 0U || !user_arg)
+        return (uint64_t) -1;
+
+    uint32_t socket_id = 0U;
+    spin_lock(&Syscall_state.fd_lock);
+    syscall_file_desc_t* entry = &Syscall_state.fds[(uint32_t) fd];
+    if (!entry->used || entry->owner_pid != owner_pid || entry->type != SYSCALL_FD_TYPE_NET_TCP_SOCKET || entry->io_busy)
+    {
+        spin_unlock(&Syscall_state.fd_lock);
+        return (uint64_t) -1;
+    }
+    socket_id = entry->net_socket_id;
+    spin_unlock(&Syscall_state.fd_lock);
+
+    switch (request)
+    {
+        case FIONBIO:
+        {
+            int32_t non_blocking = 0;
+            if (!Syscall_copy_from_user(&non_blocking, user_arg, sizeof(non_blocking)))
+                return (uint64_t) -1;
+
+            bool out_value = false;
+            if (!NET_tcp_set_non_blocking(owner_pid, socket_id, non_blocking != 0, &out_value))
+                return (uint64_t) -1;
+
+            spin_lock(&Syscall_state.fd_lock);
+            entry = &Syscall_state.fds[(uint32_t) fd];
+            if (!entry->used || entry->owner_pid != owner_pid || entry->type != SYSCALL_FD_TYPE_NET_TCP_SOCKET || entry->io_busy)
+            {
+                spin_unlock(&Syscall_state.fd_lock);
+                return (uint64_t) -1;
+            }
+            entry->non_blocking = out_value;
+            spin_unlock(&Syscall_state.fd_lock);
+
+            int32_t out_int = out_value ? 1 : 0;
+            return Syscall_copy_to_user(user_arg, &out_int, sizeof(out_int)) ? 0 : (uint64_t) -1;
+        }
+
+        case FIONREAD:
+        {
+            size_t pending = 0U;
+            if (!NET_tcp_pending_bytes(owner_pid, socket_id, &pending))
+                return (uint64_t) -1;
+
+            int32_t out_int = (pending > 0x7FFFFFFFULL) ? 0x7FFFFFFF : (int32_t) pending;
+            return Syscall_copy_to_user(user_arg, &out_int, sizeof(out_int)) ? 0 : (uint64_t) -1;
+        }
+
+        default:
+            return (uint64_t) -1;
+    }
+}
+
 static uint64_t Syscall_handle_ioctl(uint32_t cpu_index, const syscall_frame_t* frame)
 {
     if (!frame || !Syscall_state.fd_lock_ready)
@@ -1289,6 +2502,12 @@ static uint64_t Syscall_handle_ioctl(uint32_t cpu_index, const syscall_frame_t* 
 
     if (fd_type == SYSCALL_FD_TYPE_AUDIO_DSP)
         return Syscall_handle_audio_ioctl(request, user_arg);
+    if (fd_type == SYSCALL_FD_TYPE_NET_RAW)
+        return Syscall_handle_net_raw_ioctl(owner_pid, fd, request, user_arg);
+    if (fd_type == SYSCALL_FD_TYPE_NET_UDP_SOCKET)
+        return Syscall_handle_udp_socket_ioctl(owner_pid, fd, request, user_arg);
+    if (fd_type == SYSCALL_FD_TYPE_NET_TCP_SOCKET)
+        return Syscall_handle_tcp_socket_ioctl(owner_pid, fd, request, user_arg);
 
     if (fd_type != SYSCALL_FD_TYPE_DRM_CARD || drm_file_id == 0)
         return (uint64_t) -1;
@@ -2181,23 +3400,15 @@ typedef struct syscall_exec_module
 
 static bool Syscall_exec_read_file(const char* path, uint8_t** out_data, size_t* out_size)
 {
-    if (!path || !out_data || !out_size || !Syscall_state.fs_lock_ready)
+    if (!path || !out_data || !out_size)
         return false;
 
     *out_data = NULL;
     *out_size = 0;
 
-    spin_lock(&Syscall_state.fs_lock);
-    ext4_fs_t* fs = ext4_get_active();
-    if (!fs)
-    {
-        spin_unlock(&Syscall_state.fs_lock);
+    if (!VFS_is_ready())
         return false;
-    }
-
-    bool ok = ext4_read_file(fs, path, out_data, out_size);
-    spin_unlock(&Syscall_state.fs_lock);
-    return ok;
+    return VFS_read_file(path, out_data, out_size);
 }
 
 static bool Syscall_exec_module_addr_range_valid(const syscall_exec_module_t* module,
@@ -3302,9 +4513,9 @@ static bool Syscall_load_elf_current(const char* path, uintptr_t* out_entry, uin
     if (!path || !out_entry || !out_rsp)
         return false;
 
-    if (!Syscall_state.fs_lock_ready)
+    if (!VFS_is_ready())
     {
-        kdebug_printf("[USER] exec reject '%s': no active ext4 filesystem\n", path);
+        kdebug_printf("[USER] exec reject '%s': no mounted root VFS backend\n", path);
         return false;
     }
 
@@ -3448,6 +4659,7 @@ bool Syscall_prepare_initial_user_process(const char* path,
         Syscall_free_address_space(new_cr3);
         return false;
     }
+    Syscall_bootstrap_domain = Syscall_process_domain_from_exec_path(path);
     *out_cr3_phys = new_cr3;
     *out_entry = new_entry;
     *out_rsp = new_rsp;
@@ -3504,6 +4716,24 @@ static void Syscall_fd_cleanup_owner(uint32_t owner_pid)
             continue;
         }
 
+        if (entry_type == SYSCALL_FD_TYPE_NET_UDP_SOCKET)
+        {
+            uint32_t socket_id = entry->net_socket_id;
+            memset(entry, 0, sizeof(*entry));
+            spin_unlock(&Syscall_state.fd_lock);
+            (void) NET_socket_close_udp(owner_pid, socket_id);
+            continue;
+        }
+
+        if (entry_type == SYSCALL_FD_TYPE_NET_TCP_SOCKET)
+        {
+            uint32_t socket_id = entry->net_socket_id;
+            memset(entry, 0, sizeof(*entry));
+            spin_unlock(&Syscall_state.fd_lock);
+            (void) NET_tcp_close(owner_pid, socket_id);
+            continue;
+        }
+
         if (entry_type != SYSCALL_FD_TYPE_REGULAR)
         {
             memset(entry, 0, sizeof(*entry));
@@ -3521,13 +4751,11 @@ static void Syscall_fd_cleanup_owner(uint32_t owner_pid)
         }
         spin_unlock(&Syscall_state.fd_lock);
 
-        if (should_flush && Syscall_state.fs_lock_ready)
+        if (should_flush)
         {
-            spin_lock(&Syscall_state.fs_lock);
-            ext4_fs_t* fs = ext4_get_active();
-            if (fs && flush_size <= fs->block_size)
-                (void) ext4_create_file(fs, flush_path, flush_data, flush_size);
-            spin_unlock(&Syscall_state.fs_lock);
+            size_t block_size = VFS_block_size();
+            if (VFS_is_ready() && block_size != 0U && flush_size <= block_size)
+                (void) VFS_write_file(flush_path, flush_data, flush_size);
         }
 
         spin_lock(&Syscall_state.fd_lock);
@@ -3593,6 +4821,7 @@ static int32_t Syscall_proc_ensure_current_locked(uint32_t cpu_index, const sysc
     proc->pid = Syscall_state.next_pid++;
     proc->ppid = 0;
     proc->owner_pid = proc->pid;
+    proc->domain = (proc->pid == 1U) ? Syscall_bootstrap_domain : SYS_PROC_DOMAIN_USERLAND;
     proc->cr3_phys = current_cr3;
     proc->fs_base = current_fs_base;
     proc->rax = 0;
@@ -4155,11 +5384,10 @@ static bool Syscall_proc_has_matching_child_locked(uint32_t ppid, int32_t wait_p
 
 void Syscall_init(void)
 {
+    Syscall_bootstrap_domain = SYS_PROC_DOMAIN_USERLAND;
     memset(Syscall_state.fds, 0, sizeof(Syscall_state.fds));
     spinlock_init(&Syscall_state.fd_lock);
     Syscall_state.fd_lock_ready = true;
-    spinlock_init(&Syscall_state.fs_lock);
-    Syscall_state.fs_lock_ready = true;
     spinlock_init(&Syscall_state.vm_lock);
     Syscall_state.vm_lock_ready = true;
 
@@ -4184,6 +5412,8 @@ void Syscall_init(void)
 
     enable_syscall_ext();
     DRM_init();
+    NET_socket_init();
+    NET_tcp_init();
 }
 
 void Syscall_on_timer_tick(uint32_t cpu_index)
@@ -4319,9 +5549,6 @@ uint64_t Syscall_interrupt_handler(uint64_t syscall_num, syscall_frame_t* frame,
     {
         case SYS_FS_MKDIR:
         {
-            if (!Syscall_state.fs_lock_ready)
-                return (uint64_t) -1;
-
             char path[SYSCALL_USER_CSTR_MAX];
             if (!Syscall_read_user_cstr(path, sizeof(path), (const char*) frame->rdi))
                 return (uint64_t) -1;
@@ -4330,10 +5557,7 @@ uint64_t Syscall_interrupt_handler(uint64_t syscall_num, syscall_frame_t* frame,
             if (!Syscall_normalize_write_path(path, normalized, sizeof(normalized)))
                 return (uint64_t) -1;
 
-            spin_lock(&Syscall_state.fs_lock);
-            ext4_fs_t* fs = ext4_get_active();
-            bool ok = fs && ext4_create_dir(fs, normalized);
-            spin_unlock(&Syscall_state.fs_lock);
+            bool ok = VFS_mkdir(normalized);
             return ok ? 0 : (uint64_t) -1;
         }
 
@@ -4440,6 +5664,7 @@ uint64_t Syscall_interrupt_handler(uint64_t syscall_num, syscall_frame_t* frame,
                 out->pid = proc->pid;
                 out->ppid = proc->ppid;
                 out->owner_pid = proc->owner_pid;
+                out->domain = proc->domain;
                 out->flags = 0;
                 if (proc->is_thread)
                     out->flags |= SYS_PROC_FLAG_THREAD;
@@ -4447,6 +5672,8 @@ uint64_t Syscall_interrupt_handler(uint64_t syscall_num, syscall_frame_t* frame,
                     out->flags |= SYS_PROC_FLAG_EXITING;
                 if (proc->terminated_by_signal)
                     out->flags |= SYS_PROC_FLAG_TERMINATED_BY_SIGNAL;
+                if (proc->domain == SYS_PROC_DOMAIN_DRIVERLAND)
+                    out->flags |= SYS_PROC_FLAG_DRIVERLAND;
                 out->current_cpu = running_cpu[i];
                 out->term_signal = proc->terminated_by_signal ? (uint32_t) proc->term_signal : 0U;
                 out->exit_status = proc->exit_status;
@@ -4492,12 +5719,13 @@ uint64_t Syscall_interrupt_handler(uint64_t syscall_num, syscall_frame_t* frame,
                 return (uint64_t) -1;
             }
 
+            uint32_t owner_pid = Syscall_proc_current_pid(cpu_index, frame);
+            bool write_tty = !Syscall_proc_owner_is_driverland(owner_pid);
             for (size_t i = 0; i < len; i++)
             {
-                putc(kernel_buf[i]);
-#if defined(THEOS_ENABLE_KDEBUG)
+                if (write_tty)
+                    putc(kernel_buf[i]);
                 kdebug_putc(kernel_buf[i]);
-#endif
             }
 
             kfree(kernel_buf);
@@ -4577,6 +5805,7 @@ uint64_t Syscall_interrupt_handler(uint64_t syscall_num, syscall_frame_t* frame,
             child->pid = child_pid;
             child->ppid = parent_pid;
             child->owner_pid = child_pid;
+            child->domain = parent->domain;
             child->exit_status = 0;
             child->thread_exit_value = 0;
             child->term_signal = 0;
@@ -4613,6 +5842,7 @@ uint64_t Syscall_interrupt_handler(uint64_t syscall_num, syscall_frame_t* frame,
             char path[SYSCALL_USER_CSTR_MAX];
             if (!Syscall_read_user_cstr(path, sizeof(path), (const char*) frame->rdi))
                 return (uint64_t) -1;
+            uint32_t exec_domain = Syscall_process_domain_from_exec_path(path);
 
             if (Syscall_state.proc_lock_ready)
             {
@@ -4698,6 +5928,7 @@ uint64_t Syscall_interrupt_handler(uint64_t syscall_num, syscall_frame_t* frame,
                     proc->owns_cr3 = true;
                     proc->is_thread = false;
                     proc->owner_pid = proc->pid;
+                    proc->domain = exec_domain;
                     proc->exiting = false;
                     proc->terminated_by_signal = false;
                     proc->exit_status = 0;
@@ -5222,30 +6453,48 @@ mprotect_out:
         case SYS_IOCTL:
             return Syscall_handle_ioctl(cpu_index, frame);
 
+        case SYS_SOCKET:
+            return Syscall_handle_socket(cpu_index, frame);
+
+        case SYS_BIND:
+            return Syscall_handle_bind(cpu_index, frame);
+
+        case SYS_CONNECT:
+            return Syscall_handle_connect(cpu_index, frame);
+
+        case SYS_LISTEN:
+            return Syscall_handle_listen(cpu_index, frame);
+
+        case SYS_ACCEPT:
+            return Syscall_handle_accept(cpu_index, frame);
+
+        case SYS_SENDTO:
+            return Syscall_handle_sendto(cpu_index, frame);
+
+        case SYS_RECVFROM:
+            return Syscall_handle_recvfrom(cpu_index, frame);
+
+        case SYS_GETSOCKNAME:
+            return Syscall_handle_getsockname(cpu_index, frame);
+
+        case SYS_GETPEERNAME:
+            return Syscall_handle_getpeername(cpu_index, frame);
+
         case SYS_KBD_GET_SCANCODE:
             return (uint64_t) Keyboard_get_scancode();
 
         case SYS_FS_ISDIR:
         {
-            if (!Syscall_state.fs_lock_ready)
-                return (uint64_t) -1;
-
             char path[SYSCALL_USER_CSTR_MAX];
             if (!Syscall_read_user_cstr(path, sizeof(path), (const char*) frame->rdi))
                 return (uint64_t) -1;
 
-            spin_lock(&Syscall_state.fs_lock);
-            ext4_fs_t* fs = ext4_get_active();
-            bool is_dir = (fs && ext4_path_is_dir(fs, path));
-            spin_unlock(&Syscall_state.fs_lock);
+            bool is_dir = VFS_path_is_dir(path);
             return is_dir ? 1ULL : 0ULL;
         }
 
         case SYS_FS_READDIR:
         {
-            if (!Syscall_state.fs_lock_ready)
-                return (uint64_t) -1;
-
             char path[SYSCALL_USER_CSTR_MAX];
             if (!Syscall_read_user_cstr(path, sizeof(path), (const char*) frame->rdi))
                 return (uint64_t) -1;
@@ -5255,13 +6504,10 @@ mprotect_out:
             if (!user_out)
                 return (uint64_t) -1;
 
-            ext4_dirent_info_t info;
+            vfs_dirent_info_t info;
             memset(&info, 0, sizeof(info));
 
-            spin_lock(&Syscall_state.fs_lock);
-            ext4_fs_t* fs = ext4_get_active();
-            bool ok = (fs && ext4_read_dirent_at(fs, path, index, &info));
-            spin_unlock(&Syscall_state.fs_lock);
+            bool ok = VFS_read_dirent_at(path, index, &info);
 
             if (!ok)
                 return 0;
@@ -5269,7 +6515,7 @@ mprotect_out:
             syscall_dirent_t out;
             memset(&out, 0, sizeof(out));
             out.d_ino = info.inode;
-            out.d_type = Syscall_dirent_type_from_ext4(info.file_type);
+            out.d_type = info.type;
             size_t name_len = strlen(info.name);
             if (name_len > SYS_DIRENT_NAME_MAX)
                 name_len = SYS_DIRENT_NAME_MAX;
@@ -5499,6 +6745,7 @@ mprotect_out:
             thread->pid = tid;
             thread->ppid = parent->ppid;
             thread->owner_pid = parent->owner_pid;
+            thread->domain = parent->domain;
             thread->exit_status = 0;
             thread->thread_exit_value = 0;
             thread->term_signal = 0;
@@ -5668,7 +6915,42 @@ mprotect_out:
         }
 
         default:
+        {
+            if (Syscall_state.proc_lock_ready)
+            {
+                uint32_t pid = 0;
+                bool delivered = false;
+
+                uint64_t lock_flags = spin_lock_irqsave(&Syscall_state.proc_lock);
+                int32_t slot = Syscall_proc_ensure_current_locked(cpu_index, frame);
+                if (slot >= 0)
+                {
+                    syscall_process_t* proc = &Syscall_state.procs[slot];
+                    pid = proc->pid;
+
+                    delivered = Syscall_signal_terminate_owner_locked(proc->owner_pid, SYS_SIGSYS);
+                    if (!delivered)
+                    {
+                        proc->exiting = true;
+                        proc->terminated_by_signal = true;
+                        proc->term_signal = SYS_SIGSYS;
+                        proc->exit_status = 128 + SYS_SIGSYS;
+                        proc->thread_exit_value = 0;
+                        delivered = true;
+                    }
+                }
+                spin_unlock_irqrestore(&Syscall_state.proc_lock, lock_flags);
+
+                if (delivered)
+                {
+                    kdebug_printf("[USER] pid=%u killed by SIGSYS (unknown syscall=%llu)\n",
+                                  (unsigned int) pid,
+                                  (unsigned long long) syscall_num);
+                }
+            }
+
             return (uint64_t) -1;
+        }
     }
 }
 

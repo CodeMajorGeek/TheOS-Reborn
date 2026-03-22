@@ -160,6 +160,63 @@ int sys_ioctl(int fd, unsigned long request, void* arg)
     return (int) syscall(SYS_IOCTL, (long) fd, (long) request, (long) arg, 0, 0, 0);
 }
 
+int sys_socket(int domain, int type, int protocol)
+{
+    return (int) syscall(SYS_SOCKET, (long) domain, (long) type, (long) protocol, 0, 0, 0);
+}
+
+int sys_bind(int fd, const void* addr, size_t addrlen)
+{
+    return (int) syscall(SYS_BIND, (long) fd, (long) addr, (long) addrlen, 0, 0, 0);
+}
+
+int sys_sendto(int fd, const void* buf, size_t len, int flags, const void* dest_addr, size_t addrlen)
+{
+    return (int) syscall(SYS_SENDTO,
+                         (long) fd,
+                         (long) buf,
+                         (long) len,
+                         (long) flags,
+                         (long) dest_addr,
+                         (long) addrlen);
+}
+
+int sys_recvfrom(int fd, void* buf, size_t len, int flags, void* src_addr, void* addrlen_ptr)
+{
+    return (int) syscall(SYS_RECVFROM,
+                         (long) fd,
+                         (long) buf,
+                         (long) len,
+                         (long) flags,
+                         (long) src_addr,
+                         (long) addrlen_ptr);
+}
+
+int sys_connect(int fd, const void* addr, size_t addrlen)
+{
+    return (int) syscall(SYS_CONNECT, (long) fd, (long) addr, (long) addrlen, 0, 0, 0);
+}
+
+int sys_getsockname(int fd, void* addr, void* addrlen_ptr)
+{
+    return (int) syscall(SYS_GETSOCKNAME, (long) fd, (long) addr, (long) addrlen_ptr, 0, 0, 0);
+}
+
+int sys_getpeername(int fd, void* addr, void* addrlen_ptr)
+{
+    return (int) syscall(SYS_GETPEERNAME, (long) fd, (long) addr, (long) addrlen_ptr, 0, 0, 0);
+}
+
+int sys_listen(int fd, int backlog)
+{
+    return (int) syscall(SYS_LISTEN, (long) fd, (long) backlog, 0, 0, 0, 0);
+}
+
+int sys_accept(int fd, void* addr, void* addrlen_ptr)
+{
+    return (int) syscall(SYS_ACCEPT, (long) fd, (long) addr, (long) addrlen_ptr, 0, 0, 0);
+}
+
 int sys_kbd_get_scancode(void)
 {
     return (int) syscall(SYS_KBD_GET_SCANCODE, 0, 0, 0, 0, 0, 0);

@@ -4,6 +4,7 @@
 #include <CPU/IO.h>
 #include <Debug/Assert.h>
 #include <Debug/KDebug.h>
+#include <Device/E1000.h>
 #include <Device/HDA.h>
 #include <Memory/VMM.h>
 #include <Storage/AHCI.h>
@@ -375,6 +376,9 @@ static void PCI_try_attach(uint8_t bus, uint8_t slot, uint8_t function, uint16_t
         case PCI_DEV_CLASS_BRIDGE:
             PCI_attach_storage_dev(bus, slot, function, vendor, device);
             break;
+        case PCI_DEV_CLASS_NETWORK:
+            PCI_attach_network_dev(bus, slot, function, vendor, device);
+            break;
         case PCI_DEV_CLASS_MULTIMEDIA:
             PCI_attach_audio_dev(bus, slot, function, vendor, device);
             break;
@@ -386,6 +390,15 @@ static void PCI_try_attach(uint8_t bus, uint8_t slot, uint8_t function, uint16_t
 static void PCI_attach_storage_dev(uint8_t bus, uint8_t slot, uint8_t function, uint16_t vendor, uint16_t device)
 {
     AHCI_try_setup_device(bus, slot, function, vendor, device);
+}
+
+static void PCI_attach_network_dev(uint8_t bus, uint8_t slot, uint8_t function, uint16_t vendor, uint16_t device)
+{
+    uint8_t sub_class = PCI_config_readb(bus, slot, function, PCI_SUBCLASS_REG);
+    if (sub_class != PCI_DEV_SUBCLASS_ETHERNET)
+        return;
+
+    E1000_try_setup_device(bus, slot, function, vendor, device);
 }
 
 static void PCI_attach_audio_dev(uint8_t bus, uint8_t slot, uint8_t function, uint16_t vendor, uint16_t device)
