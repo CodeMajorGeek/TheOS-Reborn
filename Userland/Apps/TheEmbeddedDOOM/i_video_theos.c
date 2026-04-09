@@ -42,6 +42,99 @@ static doom_drm_state_t DoomDRM = {
     .dmabuf_fd = -1
 };
 
+typedef struct doom_video_prof_state
+{
+    uint64_t tick_hz;
+    uint64_t window_start_tick;
+    uint64_t last_frame_tick;
+    uint64_t frames;
+    uint64_t present_ticks_total;
+    uint64_t present_ticks_max;
+    uint64_t frame_gap_ticks_max;
+    uint64_t slow_frames;
+    uint64_t atomic_failures;
+} doom_video_prof_state_t;
+
+static doom_video_prof_state_t DoomVideoProf = {
+    .tick_hz = 100U
+};
+
+static uint64_t doom_video_tick_hz(void)
+{
+    if (DoomVideoProf.tick_hz != 0U)
+        return DoomVideoProf.tick_hz;
+
+    syscall_cpu_info_t info;
+    if (sys_cpu_info_get(&info) == 0 && info.tick_hz != 0U)
+        DoomVideoProf.tick_hz = info.tick_hz;
+    else
+        DoomVideoProf.tick_hz = 100U;
+
+    return DoomVideoProf.tick_hz;
+}
+
+static uint64_t doom_ticks_to_ms(uint64_t ticks, uint64_t hz)
+{
+    if (hz == 0U)
+        hz = 100U;
+    return (ticks * 1000ULL) / hz;
+}
+
+static uint64_t doom_ticks_to_ms_x10(uint64_t ticks, uint64_t hz)
+{
+    if (hz == 0U)
+        hz = 100U;
+    return (ticks * 10000ULL) / hz;
+}
+
+static void doom_video_prof_reset_window(uint64_t now_tick)
+{
+    DoomVideoProf.window_start_tick = now_tick;
+    DoomVideoProf.frames = 0;
+    DoomVideoProf.present_ticks_total = 0;
+    DoomVideoProf.present_ticks_max = 0;
+    DoomVideoProf.frame_gap_ticks_max = 0;
+    DoomVideoProf.slow_frames = 0;
+    DoomVideoProf.atomic_failures = 0;
+}
+
+static void doom_video_prof_maybe_report(uint64_t now_tick)
+{
+    uint64_t hz = doom_video_tick_hz();
+
+    if (DoomVideoProf.window_start_tick == 0ULL)
+    {
+        doom_video_prof_reset_window(now_tick);
+        return;
+    }
+
+    uint64_t elapsed_ticks = now_tick - DoomVideoProf.window_start_tick;
+    if (elapsed_ticks < hz)
+        return;
+
+    if (elapsed_ticks == 0ULL)
+        elapsed_ticks = 1ULL;
+
+    uint64_t fps_x10 = (DoomVideoProf.frames * hz * 10ULL) / elapsed_ticks;
+    uint64_t present_avg_ms_x10 = (DoomVideoProf.frames == 0ULL)
+                                      ? 0ULL
+                                      : doom_ticks_to_ms_x10(DoomVideoProf.present_ticks_total, hz) / DoomVideoProf.frames;
+    uint64_t present_max_ms = doom_ticks_to_ms(DoomVideoProf.present_ticks_max, hz);
+    uint64_t frame_gap_max_ms = doom_ticks_to_ms(DoomVideoProf.frame_gap_ticks_max, hz);
+
+    printf("[DOOM-PROF][VIDEO] win_ticks=%llu frames=%llu fps_x10=%llu present_avg_ms_x10=%llu present_max_ms=%llu frame_gap_max_ms=%llu slow_frames=%llu atomic_fail=%llu\n",
+           (unsigned long long) elapsed_ticks,
+           (unsigned long long) DoomVideoProf.frames,
+           (unsigned long long) fps_x10,
+           (unsigned long long) present_avg_ms_x10,
+           (unsigned long long) present_max_ms,
+           (unsigned long long) frame_gap_max_ms,
+           (unsigned long long) DoomVideoProf.slow_frames,
+           (unsigned long long) DoomVideoProf.atomic_failures);
+
+    doom_video_prof_reset_window(now_tick);
+}
+
 static bool doom_pick_current_mode(int card_fd,
                                    uint32_t connector_id,
                                    uint32_t crtc_id,
@@ -469,6 +562,12 @@ void I_UpdateNoBlit(void)
 
 void I_InitGraphics(void)
 {
+    DoomVideoProf.tick_hz = doom_video_tick_hz();
+    DoomVideoProf.last_frame_tick = 0ULL;
+    doom_video_prof_reset_window(sys_tick_get());
+    printf("[DOOM-PROF][VIDEO] start tick_hz=%llu\n",
+           (unsigned long long) DoomVideoProf.tick_hz);
+
     (void) doom_drm_init();
 }
 
@@ -488,6 +587,15 @@ void I_StartFrame(void)
 
 void I_ShutdownGraphics(void)
 {
+    if (DoomVideoProf.window_start_tick != 0ULL)
+    {
+        uint64_t now_tick = sys_tick_get();
+        uint64_t hz = doom_video_tick_hz();
+        if ((now_tick - DoomVideoProf.window_start_tick) < hz)
+            now_tick = DoomVideoProf.window_start_tick + hz;
+        doom_video_prof_maybe_report(now_tick);
+    }
+
     doom_drm_destroy();
 }
 
@@ -495,6 +603,14 @@ void I_FinishUpdate(void)
 {
     if (!DoomDRM.ready || !DoomDRM.frame_map)
         return;
+
+    uint64_t frame_start_tick = sys_tick_get();
+    if (DoomVideoProf.last_frame_tick != 0ULL)
+    {
+        uint64_t frame_gap = frame_start_tick - DoomVideoProf.last_frame_tick;
+        if (frame_gap > DoomVideoProf.frame_gap_ticks_max)
+            DoomVideoProf.frame_gap_ticks_max = frame_gap;
+    }
 
     for (uint32_t y = 0; y < (uint32_t) SCREENHEIGHT; y++)
     {
@@ -515,6 +631,24 @@ void I_FinishUpdate(void)
     if (ioctl(DoomDRM.card_fd, DRM_IOCTL_MODE_ATOMIC, &DoomDRM.atomic_req) < 0)
     {
         printf("[DOOM] DRM atomic commit failed errno=%d\n", errno);
+        DoomVideoProf.atomic_failures++;
         DoomDRM.ready = false;
     }
+
+    uint64_t frame_end_tick = sys_tick_get();
+    uint64_t frame_ticks = frame_end_tick - frame_start_tick;
+    DoomVideoProf.frames++;
+    DoomVideoProf.present_ticks_total += frame_ticks;
+    if (frame_ticks > DoomVideoProf.present_ticks_max)
+        DoomVideoProf.present_ticks_max = frame_ticks;
+
+    uint64_t hz = doom_video_tick_hz();
+    uint64_t slow_threshold_ticks = (hz + 49ULL) / 50ULL;
+    if (slow_threshold_ticks == 0ULL)
+        slow_threshold_ticks = 1ULL;
+    if (frame_ticks >= slow_threshold_ticks)
+        DoomVideoProf.slow_frames++;
+
+    DoomVideoProf.last_frame_tick = frame_start_tick;
+    doom_video_prof_maybe_report(frame_end_tick);
 }

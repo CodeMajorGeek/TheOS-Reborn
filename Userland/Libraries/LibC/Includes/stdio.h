@@ -45,6 +45,8 @@ int sprintf(char*, const char* __restrict, ...);
 int vsnprintf(char*, size_t, const char* __restrict, va_list);
 int snprintf(char*, size_t, const char* __restrict, ...);
 
+void stdio_set_console_silent(int enabled);
+
 char* itoa(int, char*, size_t, unsigned int);
 char* lltoa(unsigned long long, char*, size_t, unsigned int);
 

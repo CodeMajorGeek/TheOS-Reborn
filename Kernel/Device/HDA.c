@@ -2,6 +2,7 @@
 #include <Device/HDA_private.h>
 
 #include <CPU/PCI.h>
+#include <CPU/ISR.h>
 #include <Debug/KDebug.h>
 #include <Memory/PMM.h>
 #include <Memory/VMM.h>
@@ -47,6 +48,13 @@ static uint32_t HDA_min_u32(uint32_t a, uint32_t b)
     return (a < b) ? a : b;
 }
 
+static uint64_t HDA_stream_bytes_per_second_from_params(uint32_t sample_rate, uint8_t channels, uint32_t oss_format)
+{
+    uint64_t bytes_per_sample = (oss_format == AFMT_U8) ? 1ULL : 2ULL;
+    uint64_t stream_channels = (channels == 0U) ? 1ULL : (uint64_t) channels;
+    return (uint64_t) sample_rate * bytes_per_sample * stream_channels;
+}
+
 static uint16_t HDA_clamp_fragment_shift(uint16_t shift)
 {
     if (shift < HDA_MIN_FRAGMENT_SHIFT)
@@ -79,6 +87,33 @@ static void HDA_stream_apply_fragment_config_locked(uint16_t shift, uint16_t cou
     if (queue_limit >= HDA_STREAM_BUFFER_BYTES)
         queue_limit = HDA_STREAM_BUFFER_BYTES - 1U;
 
+    uint64_t stream_bps = HDA_stream_bytes_per_second_from_params(HDA_state.sample_rate,
+                                                                   HDA_state.channels,
+                                                                   HDA_state.oss_format);
+    uint64_t queue_floor = (uint64_t) HDA_QUEUE_FLOOR_BYTES;
+    if (stream_bps != 0ULL)
+    {
+        uint64_t queue_floor_from_ms =
+            ((stream_bps * (uint64_t) HDA_QUEUE_FLOOR_MS) + 999ULL) / 1000ULL;
+        if (queue_floor_from_ms > queue_floor)
+            queue_floor = queue_floor_from_ms;
+    }
+
+    if (queue_floor >= (uint64_t) HDA_STREAM_BUFFER_BYTES)
+        queue_floor = (uint64_t) HDA_STREAM_BUFFER_BYTES - 1ULL;
+
+    if ((uint64_t) queue_limit < queue_floor)
+    {
+        uint64_t aligned_floor =
+            ((queue_floor + (uint64_t) fragment_bytes - 1ULL) / (uint64_t) fragment_bytes) *
+            (uint64_t) fragment_bytes;
+        if (aligned_floor == 0ULL)
+            aligned_floor = (uint64_t) fragment_bytes;
+        if (aligned_floor >= (uint64_t) HDA_STREAM_BUFFER_BYTES)
+            aligned_floor = (uint64_t) HDA_STREAM_BUFFER_BYTES - 1ULL;
+        queue_limit = (uint32_t) aligned_floor;
+    }
+
     HDA_state.fragment_shift = applied_shift;
     HDA_state.fragment_count = (uint16_t) applied_count;
     HDA_state.fragment_bytes = fragment_bytes;
@@ -89,6 +124,99 @@ static void HDA_stream_set_default_fragments_locked(void)
 {
     HDA_stream_apply_fragment_config_locked(HDA_DEFAULT_FRAGMENT_SHIFT,
                                             HDA_DEFAULT_FRAGMENT_COUNT);
+}
+
+static uint32_t HDA_profile_tick_hz(void)
+{
+    uint32_t hz = ISR_get_tick_hz();
+    return (hz == 0U) ? 100U : hz;
+}
+
+static uint64_t HDA_stream_bytes_per_second_locked(void)
+{
+    return HDA_stream_bytes_per_second_from_params(HDA_state.sample_rate,
+                                                   HDA_state.channels,
+                                                   HDA_state.oss_format);
+}
+
+static void HDA_profile_reset_window_locked(uint64_t now_ticks)
+{
+    HDA_state.prof_window_start_ticks = now_ticks;
+    HDA_state.prof_write_calls = 0;
+    HDA_state.prof_write_bytes = 0;
+    HDA_state.prof_write_short_calls = 0;
+    HDA_state.prof_write_zero_calls = 0;
+    HDA_state.prof_stalled_calls = 0;
+    HDA_state.prof_stall_sleeps = 0;
+    HDA_state.prof_stall_sleeps_max = 0;
+    HDA_state.prof_buffered_peak = 0;
+    HDA_state.prof_sync_calls = 0;
+    HDA_state.prof_sync_wait_rounds = 0;
+    HDA_state.prof_sync_wait_rounds_max = 0;
+}
+
+static void HDA_profile_maybe_emit_locked(uint64_t now_ticks)
+{
+    if (HDA_state.prof_window_start_ticks == 0ULL)
+    {
+        HDA_profile_reset_window_locked(now_ticks);
+        HDA_state.prof_last_report_ticks = now_ticks;
+        return;
+    }
+
+    uint64_t hz = (uint64_t) HDA_profile_tick_hz();
+    uint64_t period_ticks = hz;
+    uint64_t elapsed_ticks = now_ticks - HDA_state.prof_window_start_ticks;
+    if (elapsed_ticks < period_ticks)
+        return;
+
+    if (elapsed_ticks == 0ULL)
+        elapsed_ticks = 1ULL;
+
+    uint64_t write_calls = HDA_state.prof_write_calls;
+    uint64_t write_bytes = HDA_state.prof_write_bytes;
+    uint64_t bytes_per_sec = (write_bytes * hz) / elapsed_ticks;
+    uint64_t calls_per_sec = (write_calls * hz) / elapsed_ticks;
+    uint64_t avg_write = (write_calls == 0ULL) ? 0ULL : (write_bytes / write_calls);
+    uint64_t avg_stall = (HDA_state.prof_stalled_calls == 0ULL)
+                             ? 0ULL
+                             : (HDA_state.prof_stall_sleeps / HDA_state.prof_stalled_calls);
+    uint64_t stream_bps = HDA_stream_bytes_per_second_locked();
+    uint64_t queue_ms = (stream_bps == 0ULL)
+                            ? 0ULL
+                            : (((uint64_t) HDA_state.queue_limit_bytes * 1000ULL) / stream_bps);
+    uint64_t peak_ms = (stream_bps == 0ULL)
+                           ? 0ULL
+                           : (((uint64_t) HDA_state.prof_buffered_peak * 1000ULL) / stream_bps);
+
+    if (write_calls != 0ULL ||
+        HDA_state.prof_stall_sleeps != 0ULL ||
+        HDA_state.prof_sync_calls != 0ULL)
+    {
+        kdebug_printf("[HDA-PROF] win_ticks=%llu calls=%llu calls_s=%llu bytes=%llu bytes_s=%llu avg_write=%llu short=%llu zero=%llu stalled_calls=%llu stall_total_ms=%llu stall_avg_ms=%llu stall_max_ms=%u sync_calls=%llu sync_total_ms=%llu sync_max_ms=%u buffered_peak=%u buffered_peak_ms=%llu queue_limit=%u queue_ms=%llu\n",
+                      (unsigned long long) elapsed_ticks,
+                      (unsigned long long) write_calls,
+                      (unsigned long long) calls_per_sec,
+                      (unsigned long long) write_bytes,
+                      (unsigned long long) bytes_per_sec,
+                      (unsigned long long) avg_write,
+                      (unsigned long long) HDA_state.prof_write_short_calls,
+                      (unsigned long long) HDA_state.prof_write_zero_calls,
+                      (unsigned long long) HDA_state.prof_stalled_calls,
+                      (unsigned long long) HDA_state.prof_stall_sleeps,
+                      (unsigned long long) avg_stall,
+                      (unsigned) HDA_state.prof_stall_sleeps_max,
+                      (unsigned long long) HDA_state.prof_sync_calls,
+                      (unsigned long long) HDA_state.prof_sync_wait_rounds,
+                      (unsigned) HDA_state.prof_sync_wait_rounds_max,
+                      (unsigned) HDA_state.prof_buffered_peak,
+                      (unsigned long long) peak_ms,
+                      (unsigned) HDA_state.queue_limit_bytes,
+                      (unsigned long long) queue_ms);
+    }
+
+    HDA_profile_reset_window_locked(now_ticks);
+    HDA_state.prof_last_report_ticks = now_ticks;
 }
 
 static void HDA_cpu_relax(void)
@@ -734,16 +862,20 @@ bool HDA_dsp_open(uint32_t owner_pid)
         HDA_stream_set_default_fragments_locked();
         HDA_stream_stop_locked();
         (void) HDA_stream_prepare_locked();
+        uint64_t now_ticks = ISR_get_timer_ticks();
+        HDA_profile_reset_window_locked(now_ticks);
+        HDA_state.prof_last_report_ticks = now_ticks;
         if (!HDA_log_open_once)
         {
             HDA_log_open_once = true;
-            kdebug_printf("[HDA] /dev/dsp opened owner=%u rate=%u ch=%u fmt=0x%X frag=%u/%u\n",
+            kdebug_printf("[HDA] /dev/dsp opened owner=%u rate=%u ch=%u fmt=0x%X frag=%u/%u queue=%u\n",
                           (unsigned) owner_pid,
                           (unsigned) HDA_state.sample_rate,
                           (unsigned) HDA_state.channels,
                           (unsigned) HDA_state.oss_format,
                           (unsigned) HDA_state.fragment_count,
-                          (unsigned) HDA_state.fragment_bytes);
+                          (unsigned) HDA_state.fragment_bytes,
+                          (unsigned) HDA_state.queue_limit_bytes);
         }
         spin_unlock(&HDA_state.lock);
         return true;
@@ -792,8 +924,11 @@ size_t HDA_dsp_write(const void* data, size_t len)
         return 0;
 
     const uint8_t* src = (const uint8_t*) data;
+    size_t requested = len;
     size_t written = 0;
     uint32_t stalls = 0;
+    uint32_t stalls_this_call = 0;
+    uint32_t buffered_peak_call = 0;
 
     while (written < len)
     {
@@ -815,6 +950,8 @@ size_t HDA_dsp_write(const void* data, size_t len)
         }
 
         HDA_stream_refresh_consumed_locked();
+        if (HDA_state.stream_buffered_bytes > buffered_peak_call)
+            buffered_peak_call = HDA_state.stream_buffered_bytes;
 
         uint32_t queue_limit = HDA_state.queue_limit_bytes;
         if (queue_limit == 0U || queue_limit >= HDA_STREAM_BUFFER_BYTES)
@@ -828,6 +965,7 @@ size_t HDA_dsp_write(const void* data, size_t len)
         {
             spin_unlock(&HDA_state.lock);
             stalls++;
+            stalls_this_call++;
             if (stalls >= HDA_WRITE_STALL_LIMIT && !HDA_log_stall_once)
             {
                 HDA_log_stall_once = true;
@@ -848,6 +986,8 @@ size_t HDA_dsp_write(const void* data, size_t len)
 
         HDA_state.stream_write_pos = (HDA_state.stream_write_pos + chunk) % HDA_STREAM_BUFFER_BYTES;
         HDA_state.stream_buffered_bytes += chunk;
+        if (HDA_state.stream_buffered_bytes > buffered_peak_call)
+            buffered_peak_call = HDA_state.stream_buffered_bytes;
 
         spin_unlock(&HDA_state.lock);
 
@@ -859,6 +999,29 @@ size_t HDA_dsp_write(const void* data, size_t len)
             kdebug_printf("[HDA] first pcm write bytes=%u\n", (unsigned) chunk);
         }
     }
+
+    spin_lock(&HDA_state.lock);
+    if (HDA_state.available && HDA_state.dsp_open)
+    {
+        HDA_state.prof_write_calls++;
+        HDA_state.prof_write_bytes += (uint64_t) written;
+        if (written < requested)
+            HDA_state.prof_write_short_calls++;
+        if (written == 0U)
+            HDA_state.prof_write_zero_calls++;
+        if (stalls_this_call != 0U)
+        {
+            HDA_state.prof_stalled_calls++;
+            HDA_state.prof_stall_sleeps += (uint64_t) stalls_this_call;
+            if (stalls_this_call > HDA_state.prof_stall_sleeps_max)
+                HDA_state.prof_stall_sleeps_max = stalls_this_call;
+        }
+        if (buffered_peak_call > HDA_state.prof_buffered_peak)
+            HDA_state.prof_buffered_peak = buffered_peak_call;
+
+        HDA_profile_maybe_emit_locked(ISR_get_timer_ticks());
+    }
+    spin_unlock(&HDA_state.lock);
 
     return written;
 }
@@ -905,6 +1068,12 @@ bool HDA_dsp_ioctl(unsigned long request, int32_t* inout_value)
                 spin_lock(&HDA_state.lock);
             }
 
+            HDA_state.prof_sync_calls++;
+            HDA_state.prof_sync_wait_rounds += (uint64_t) wait_rounds;
+            if (wait_rounds > HDA_state.prof_sync_wait_rounds_max)
+                HDA_state.prof_sync_wait_rounds_max = wait_rounds;
+            HDA_profile_maybe_emit_locked(ISR_get_timer_ticks());
+
             HDA_stream_stop_locked();
             spin_unlock(&HDA_state.lock);
             return true;
@@ -942,7 +1111,9 @@ bool HDA_dsp_ioctl(unsigned long request, int32_t* inout_value)
 
             *inout_value = (int32_t) ((((uint32_t) HDA_state.fragment_count) << 16) |
                                       ((uint32_t) HDA_state.fragment_shift));
-            kdebug_printf("[HDA] ioctl SETFRAGMENT -> count=%u bytes=%u limit=%u\n",
+            kdebug_printf("[HDA] ioctl SETFRAGMENT req_count=%u req_shift=%u -> count=%u bytes=%u limit=%u\n",
+                          (unsigned) requested_count,
+                          (unsigned) requested_shift,
                           (unsigned) HDA_state.fragment_count,
                           (unsigned) HDA_state.fragment_bytes,
                           (unsigned) HDA_state.queue_limit_bytes);
@@ -968,6 +1139,8 @@ bool HDA_dsp_ioctl(unsigned long request, int32_t* inout_value)
 
             HDA_state.sample_rate = new_rate;
             HDA_state.stream_format = new_fmt;
+            HDA_stream_apply_fragment_config_locked(HDA_state.fragment_shift,
+                                                    HDA_state.fragment_count);
 
             HDA_stream_stop_locked();
             if (!HDA_stream_prepare_locked())
@@ -1000,6 +1173,8 @@ bool HDA_dsp_ioctl(unsigned long request, int32_t* inout_value)
 
             HDA_state.channels = new_channels;
             HDA_state.stream_format = new_fmt;
+            HDA_stream_apply_fragment_config_locked(HDA_state.fragment_shift,
+                                                    HDA_state.fragment_count);
 
             HDA_stream_stop_locked();
             if (!HDA_stream_prepare_locked())
@@ -1046,6 +1221,8 @@ bool HDA_dsp_ioctl(unsigned long request, int32_t* inout_value)
 
             HDA_state.oss_format = new_oss_fmt;
             HDA_state.stream_format = new_fmt;
+            HDA_stream_apply_fragment_config_locked(HDA_state.fragment_shift,
+                                                    HDA_state.fragment_count);
 
             HDA_stream_stop_locked();
             if (!HDA_stream_prepare_locked())

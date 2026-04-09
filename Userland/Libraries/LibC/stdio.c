@@ -29,6 +29,10 @@ FILE* stdout = &stdio_stdout_stream;
 FILE* stderr = &stdio_stderr_stream;
 
 #if !defined(__THEOS_KERNEL)
+static bool stdio_console_silent = false;
+#endif
+
+#if !defined(__THEOS_KERNEL)
 typedef struct stdio_open_mode
 {
     int flags;
@@ -172,6 +176,8 @@ int putc(int c)
     return (char) c;
 #else
     char ch = (char) c;
+    if (stdio_console_silent)
+        return (unsigned char) ch;
     if (sys_console_write(&ch, 1) < 0)
         return EOF;
     return (unsigned char) ch;
@@ -189,6 +195,8 @@ int puts(const char *s)
 
     size_t len = strlen(s);
     if (len == 0)
+        return 1;
+    if (stdio_console_silent)
         return 1;
 
     return sys_console_write(s, len) < 0 ? EOF : 1;
@@ -1194,6 +1202,11 @@ int __printf(char* buff, size_t buff_len, const char* __restrict format, va_list
 
 int printf(const char* __restrict format, ...)
 {
+#if !defined(__THEOS_KERNEL)
+    if (stdio_console_silent)
+        return 0;
+#endif
+
     int result = EOF;
     /* TODO: find an algorithm to determine the ideal buffer length. */
     size_t len = 255;
@@ -1224,6 +1237,11 @@ int vfprintf(FILE* stream, const char* __restrict format, va_list ap)
 {
     if (!stream || !format)
         return EOF;
+
+#if !defined(__THEOS_KERNEL)
+    if (stdio_console_silent && (stream == stdout || stream == stderr))
+        return 0;
+#endif
 
     size_t len = 512U;
     char buf[512];
@@ -1291,6 +1309,15 @@ int snprintf(char* str, size_t size, const char* __restrict format, ...)
     va_end(parameters);
 
     return result;
+}
+
+void stdio_set_console_silent(int enabled)
+{
+#if defined(__THEOS_KERNEL)
+    (void) enabled;
+#else
+    stdio_console_silent = (enabled != 0);
+#endif
 }
 
 char* itoa(int value, char* buf, size_t length, unsigned int base)

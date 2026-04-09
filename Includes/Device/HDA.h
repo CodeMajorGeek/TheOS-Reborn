@@ -24,6 +24,8 @@
 #define HDA_DEFAULT_FRAGMENT_COUNT      4U
 #define HDA_MIN_FRAGMENT_SHIFT          8U
 #define HDA_MAX_FRAGMENT_SHIFT          16U
+#define HDA_QUEUE_FLOOR_MS              128U
+#define HDA_QUEUE_FLOOR_BYTES           4096U
 
 #define HDA_REG_GCAP                    0x00U
 #define HDA_REG_GCTL                    0x08U
@@ -169,6 +171,20 @@ typedef struct hda_runtime_state
     uint32_t stream_write_pos;
     uint32_t stream_hw_pos;
     uint32_t stream_buffered_bytes;
+
+    uint64_t prof_window_start_ticks;
+    uint64_t prof_last_report_ticks;
+    uint64_t prof_write_calls;
+    uint64_t prof_write_bytes;
+    uint64_t prof_write_short_calls;
+    uint64_t prof_write_zero_calls;
+    uint64_t prof_stalled_calls;
+    uint64_t prof_stall_sleeps;
+    uint32_t prof_stall_sleeps_max;
+    uint32_t prof_buffered_peak;
+    uint64_t prof_sync_calls;
+    uint64_t prof_sync_wait_rounds;
+    uint32_t prof_sync_wait_rounds_max;
 
     spinlock_t lock;
 } hda_runtime_state_t;
