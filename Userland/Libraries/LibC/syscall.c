@@ -83,6 +83,26 @@ int sys_console_write(const void* buf, size_t len)
     return (int) syscall(SYS_CONSOLE_WRITE, (long) buf, (long) len, 0, 0, 0, 0);
 }
 
+int sys_console_route_set(uint32_t flags)
+{
+    return (int) syscall(SYS_CONSOLE_ROUTE_SET, (long) flags, 0, 0, 0, 0, 0);
+}
+
+int sys_console_route_read(void* buf, size_t len)
+{
+    return (int) syscall(SYS_CONSOLE_ROUTE_READ, (long) buf, (long) len, 0, 0, 0, 0);
+}
+
+int sys_console_route_set_sid(uint32_t console_sid, uint32_t flags)
+{
+    return (int) syscall(SYS_CONSOLE_ROUTE_SET_SID, (long) console_sid, (long) flags, 0, 0, 0, 0);
+}
+
+int sys_console_route_read_sid(uint32_t console_sid, void* buf, size_t len)
+{
+    return (int) syscall(SYS_CONSOLE_ROUTE_READ_SID, (long) console_sid, (long) buf, (long) len, 0, 0, 0);
+}
+
 __attribute__((__noreturn__)) void sys_exit(int status)
 {
     (void) syscall(SYS_EXIT, (long) status, 0, 0, 0, 0, 0);
@@ -220,6 +240,21 @@ int sys_accept(int fd, void* addr, void* addrlen_ptr)
 int sys_kbd_get_scancode(void)
 {
     return (int) syscall(SYS_KBD_GET_SCANCODE, 0, 0, 0, 0, 0, 0);
+}
+
+int sys_kbd_inject_scancode(uint32_t target_pid, uint8_t scancode)
+{
+    return (int) syscall(SYS_KBD_INJECT_SCANCODE, (long) target_pid, (long) scancode, 0, 0, 0, 0);
+}
+
+int sys_mouse_get_event(syscall_mouse_event_t* out_event)
+{
+    return (int) syscall(SYS_MOUSE_GET_EVENT, (long) out_event, 0, 0, 0, 0, 0);
+}
+
+int sys_mouse_debug_info_get(syscall_mouse_debug_info_t* out_info)
+{
+    return (int) syscall(SYS_MOUSE_DEBUG_INFO_GET, (long) out_info, 0, 0, 0, 0, 0);
 }
 
 int sys_waitpid(int pid, int* out_status, int* out_signal)

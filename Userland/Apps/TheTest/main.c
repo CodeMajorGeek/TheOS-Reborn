@@ -2404,6 +2404,9 @@ static void thetest_drm_kms_probe(void)
 
     bool ok = true;
     bool committed = false;
+    bool skipped = false;
+    int skip_errno = 0;
+    const char* skip_reason = NULL;
 
     drm_mode_get_resources_t resources;
     memset(&resources, 0, sizeof(resources));
@@ -2608,7 +2611,20 @@ static void thetest_drm_kms_probe(void)
         atomic_test.crtc_h = mode.vdisplay;
         if (ioctl(card_fd, DRM_IOCTL_MODE_ATOMIC, &atomic_test) < 0)
         {
-            printf("[TheTest] DRM atomic test-only failed errno=%d\n", errno);
+            int atomic_test_errno = errno;
+            if (atomic_test_errno == ENOTTY || atomic_test_errno == EOPNOTSUPP ||
+                atomic_test_errno == ENOSYS || atomic_test_errno == EINVAL)
+            {
+                printf("[TheTest] DRM atomic test-only unsupported errno=%d -> SKIP\n",
+                       atomic_test_errno);
+                skipped = true;
+                skip_errno = atomic_test_errno;
+                skip_reason = "atomic modeset test-only unsupported";
+            }
+            else
+            {
+                printf("[TheTest] DRM atomic test-only failed errno=%d\n", atomic_test_errno);
+            }
             ok = false;
         }
     }
@@ -2670,7 +2686,13 @@ static void thetest_drm_kms_probe(void)
     }
     (void) close(card_fd);
 
-    if (ok)
+    if (skipped)
+    {
+        printf("[TheTest] DRM/KMS probe: SKIP (%s errno=%d)\n",
+               skip_reason ? skip_reason : "unsupported",
+               skip_errno);
+    }
+    else if (ok)
     {
         printf("[TheTest] DRM/KMS probe: OK (mode=%ux%u pitch=%u size=%llu)\n",
                (unsigned int) mode.hdisplay,

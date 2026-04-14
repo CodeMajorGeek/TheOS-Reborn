@@ -26,7 +26,7 @@
 #define TASK_STEAL_BATCH_MAX 4U
 #define TASK_STEAL_BACKOFF_MIN 64U
 #define TASK_STEAL_BACKOFF_MAX 4096U
-#define TASK_STATS_LOG_INTERVAL 100U
+#define TASK_STATS_LOG_INTERVAL 250000U
 #define TASK_WAIT_TIMEOUT_INFINITE ((uint64_t) -1)
 
 
@@ -184,6 +184,7 @@ bool task_sleep_ms(uint32_t ms);
 uint32_t task_runqueue_depth(void);
 uint32_t task_runqueue_depth_cpu(uint32_t cpu_index);
 uint32_t task_runqueue_depth_total(void);
+void task_get_activity_counters(uint64_t* out_exec_total, uint64_t* out_idle_hlt_sum);
 __attribute__((__noreturn__)) void task_idle_loop(void);
 
 #endif

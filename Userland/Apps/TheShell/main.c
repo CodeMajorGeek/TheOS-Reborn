@@ -9,8 +9,10 @@
 #include <string.h>
 #include <strings.h>
 #include <sys/stat.h>
+#include <syscall.h>
 #include <sys/wait.h>
 #include <unistd.h>
+#include "shell_core.h"
 
 #define SHELL_LINE_MAX           256U
 #define SHELL_PATH_MAX           256U
@@ -28,6 +30,9 @@ static const char* shell_known_binaries[] =
     "TheTest",
     "ThePowerManager",
     "TheSystemMonitor",
+    "TheSystemMonitorGUI",
+    "TheWindowServer",
+    "TheShellGUI",
     "TheMicroPython",
     "MicroPython"
 };
@@ -40,7 +45,8 @@ typedef struct shell_command_alias
 
 static const shell_command_alias_t shell_command_aliases[] =
 {
-    { "doom", "embeddedDOOM" }
+    { "doom", "embeddedDOOM" },
+    { "windowserver", "TheWindowServer" }
 };
 
 static const char* shell_builtin_commands[] =
@@ -56,6 +62,34 @@ static const char* shell_builtin_commands[] =
     "help",
     "exit"
 };
+
+static void shell_debug_emit(const char* run_id,
+                             const char* hypothesis_id,
+                             const char* location,
+                             const char* message,
+                             unsigned long long v1,
+                             unsigned long long v2,
+                             unsigned long long v3)
+{
+    FILE* file = fopen("/home/alternant/TheOS-Reborn/.cursor/debug-f2d0c7.log", "a");
+    if (!file)
+        return;
+
+    unsigned long long timestamp = (unsigned long long) sys_tick_get();
+    // #region agent log
+    fprintf(file,
+            "{\"sessionId\":\"f2d0c7\",\"runId\":\"%s\",\"hypothesisId\":\"%s\",\"location\":\"%s\",\"message\":\"%s\",\"data\":{\"v1\":%llu,\"v2\":%llu,\"v3\":%llu},\"timestamp\":%llu}\n",
+            run_id,
+            hypothesis_id,
+            location,
+            message,
+            v1,
+            v2,
+            v3,
+            timestamp);
+    // #endregion
+    fclose(file);
+}
 
 static char* shell_trim(char* str)
 {
@@ -1041,6 +1075,14 @@ static bool shell_read_line(const char* prompt,
     size_t cursor = 0U;
     out_line[0] = '\0';
     size_t prev_len = 0U;
+    static unsigned long long debug_eof_count = 0ULL;
+    static unsigned long long debug_key_count = 0ULL;
+    static unsigned long long debug_log_epoch = 0ULL;
+    static unsigned long long debug_key_gap_max = 0ULL;
+    static unsigned long long debug_key_gap_over_20 = 0ULL;
+    static unsigned long long debug_last_key_tick = 0ULL;
+    static unsigned long long debug_last_key_value = 0ULL;
+    static unsigned long long debug_enter_count = 0ULL;
 
     if (history)
     {
@@ -1052,6 +1094,55 @@ static bool shell_read_line(const char* prompt,
     for (;;)
     {
         int key = getchar();
+        unsigned long long now_tick = (unsigned long long) sys_tick_get();
+        if (key == EOF)
+        {
+            debug_eof_count++;
+            (void) usleep(2000U);
+        }
+        else
+        {
+            debug_key_count++;
+            debug_last_key_value = (unsigned long long) (uint32_t) key;
+            if (key == '\r' || key == '\n')
+                debug_enter_count++;
+            if (debug_last_key_tick != 0ULL && now_tick > debug_last_key_tick)
+            {
+                unsigned long long key_gap = now_tick - debug_last_key_tick;
+                if (key_gap > debug_key_gap_max)
+                    debug_key_gap_max = key_gap;
+                if (key_gap > 20ULL)
+                    debug_key_gap_over_20++;
+            }
+            debug_last_key_tick = now_tick;
+        }
+        unsigned long long epoch = now_tick / 500ULL;
+        if (epoch != 0ULL && epoch > debug_log_epoch)
+        {
+            debug_log_epoch = epoch;
+            // #region agent log
+            shell_debug_emit("run-2", "H17", "TheShell/main.c:shell_read_line", "input_loop", debug_eof_count, debug_key_count, now_tick);
+            printf("[AGENTDBG H17 SHELL_INPUT] tick=%llu eof=%llu key=%llu\n",
+                   now_tick,
+                   debug_eof_count,
+                   debug_key_count);
+            shell_debug_emit("run-3",
+                             "H24",
+                             "TheShell/main.c:shell_read_line",
+                             "stdin_key_gap",
+                             debug_key_gap_max,
+                             debug_key_gap_over_20,
+                             debug_key_count);
+            printf("[AGENTDBG H24 SHELL_KEY_GAP] max_ticks=%llu over20=%llu key=%llu\n",
+                   debug_key_gap_max,
+                   debug_key_gap_over_20,
+                   debug_key_count);
+            printf("[AGENTDBG H40 SHELL_KEY_VALUES] last_key=%llu enter=%llu\n",
+                   debug_last_key_value,
+                   debug_enter_count);
+            // #endregion
+        }
+
         if (key == EOF)
             continue;
 
@@ -1452,6 +1543,20 @@ static void shell_print_help(void)
     printf("  exit\n");
 }
 
+static void shell_frontend_write(void* opaque, const char* text, size_t len)
+{
+    (void) opaque;
+    if (!text || len == 0U)
+        return;
+    (void) write(STDOUT_FILENO, text, len);
+}
+
+static void shell_frontend_clear(void* opaque)
+{
+    (void) opaque;
+    (void) clear_screen();
+}
+
 int main(int argc, char** argv, char** envp)
 {
     (void) argc;
@@ -1461,8 +1566,14 @@ int main(int argc, char** argv, char** envp)
     if (keyboard_load_config("/system/keyboard.conf") != 0)
         printf("[TheShell] keyboard config unavailable, fallback=qwerty\n");
 
-    char cwd[SHELL_PATH_MAX];
-    strcpy(cwd, "/");
+    theshell_io_t io = {
+        .write = shell_frontend_write,
+        .clear = shell_frontend_clear,
+        .opaque = NULL
+    };
+    theshell_core_t core;
+    theshell_core_init(&core, &io);
+
     shell_history_t history;
     shell_history_load(&history);
 
@@ -1472,13 +1583,13 @@ int main(int argc, char** argv, char** envp)
     for (;;)
     {
         char prompt[SHELL_PATH_MAX + 16U];
-        int prompt_len = snprintf(prompt, sizeof(prompt), "TheShell:%s$ ", cwd);
+        int prompt_len = snprintf(prompt, sizeof(prompt), "TheShell:%s$ ", theshell_core_cwd(&core));
         if (prompt_len <= 0 || (size_t) prompt_len >= sizeof(prompt))
             strcpy(prompt, "TheShell:/$ ");
         (void) write(STDOUT_FILENO, prompt, strlen(prompt));
 
         char line[SHELL_LINE_MAX];
-        if (!shell_read_line(prompt, cwd, line, sizeof(line), &history))
+        if (!shell_read_line(prompt, theshell_core_cwd(&core), line, sizeof(line), &history))
             continue;
 
         char* command = shell_trim(line);
@@ -1488,46 +1599,9 @@ int main(int argc, char** argv, char** envp)
         shell_history_add(&history, command);
         shell_history_save_append(command);
 
-        char* arg = NULL;
-        size_t cmd_len = 0;
-        while (command[cmd_len] != '\0' && command[cmd_len] != ' ' && command[cmd_len] != '\t')
-            cmd_len++;
-        if (command[cmd_len] != '\0')
-        {
-            command[cmd_len] = '\0';
-            arg = shell_trim(command + cmd_len + 1U);
-        }
-
-        if (strcmp(command, "pwd") == 0)
-            shell_cmd_pwd(cwd);
-        else if (strcmp(command, "cd") == 0)
-            shell_cmd_cd(cwd, arg);
-        else if (strcmp(command, "ls") == 0)
-            shell_cmd_ls(cwd, arg);
-        else if (strcmp(command, "cat") == 0)
-            shell_cmd_cat(cwd, arg);
-        else if (strcmp(command, "touch") == 0)
-            shell_cmd_touch(cwd, arg);
-        else if (strcmp(command, "mkdir") == 0)
-            shell_cmd_mkdir(cwd, arg);
-        else if (strcmp(command, "echo") == 0)
-            shell_cmd_echo(cwd, arg);
-        else if (strcmp(command, "clear") == 0)
-            shell_cmd_clear();
-        else if (strcmp(command, "help") == 0)
-            shell_print_help();
-        else if (strcmp(command, "exit") == 0)
-        {
-            printf("Bye !\n");
+        bool should_exit = false;
+        (void) theshell_core_execute_line(&core, command, &should_exit);
+        if (should_exit)
             _exit(0);
-        }
-        else
-        {
-            char exec_command[SHELL_PATH_MAX];
-            if (shell_resolve_exec_command(cwd, command, exec_command, sizeof(exec_command)))
-                shell_cmd_exec_path(cwd, exec_command, arg);
-            else
-                printf("unknown command: %s\n", command);
-        }
     }
 }

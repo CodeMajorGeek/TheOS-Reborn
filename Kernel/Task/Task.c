@@ -21,6 +21,10 @@ static task_scheduler_state_t task_scheduler_state;
 static task_t kernel_task;
 static task_t* current_task;
 static task_t* next_task;
+static uint64_t task_debug_tick_with_rq = 0;
+static uint64_t task_debug_need_resched_already_set = 0;
+static uint64_t task_debug_need_resched_set = 0;
+static uint64_t task_debug_log_epoch = 0;
 
 static inline void task_copy_work_item(task_work_item_t* dst, const task_work_item_t* src)
 {
@@ -46,6 +50,10 @@ static inline bool task_interrupts_enabled(void)
 
 static void task_maybe_log_cpu_stats(uint64_t total_runs_trigger)
 {
+#if !defined(THEOS_ENABLE_KDEBUG)
+    (void) total_runs_trigger;
+    return;
+#else
     if (total_runs_trigger == 0 || (total_runs_trigger % TASK_STATS_LOG_INTERVAL) != 0)
         return;
 
@@ -111,6 +119,30 @@ static void task_maybe_log_cpu_stats(uint64_t total_runs_trigger)
         }
 
         return;
+    }
+#endif
+}
+
+void task_get_activity_counters(uint64_t* out_exec_total, uint64_t* out_idle_hlt_sum)
+{
+    if (out_exec_total)
+    {
+        *out_exec_total =
+            __atomic_load_n(&task_scheduler_state.stats.exec_runs_total, __ATOMIC_RELAXED);
+    }
+
+    if (out_idle_hlt_sum)
+    {
+        uint64_t sum = 0;
+        for (uint32_t i = 0; i < TASK_MAX_CPUS; i++)
+        {
+            if (!task_cpu_is_online(i))
+                continue;
+
+            sum += __atomic_load_n(&task_scheduler_state.stats.idle_hlt_runs[i], __ATOMIC_RELAXED);
+        }
+
+        *out_idle_hlt_sum = sum;
     }
 }
 
@@ -956,11 +988,36 @@ void task_scheduler_on_tick(void)
     if (cpu_index >= TASK_MAX_CPUS)
         return;
 
-    if (__atomic_load_n(&task_scheduler_state.runqueues[cpu_index].count, __ATOMIC_RELAXED) == 0)
-        return;
+    uint64_t now_ticks = ISR_get_timer_ticks();
+    uint32_t rq_depth = __atomic_load_n(&task_scheduler_state.runqueues[cpu_index].count, __ATOMIC_RELAXED);
+    if (rq_depth != 0)
+    {
+        task_debug_tick_with_rq++;
+        if (__atomic_load_n(&task_scheduler_state.control.need_resched[cpu_index], __ATOMIC_RELAXED) != 0)
+            task_debug_need_resched_already_set++;
 
-    __atomic_store_n(&task_scheduler_state.control.need_resched[cpu_index], 1, __ATOMIC_RELEASE);
-    __atomic_add_fetch(&task_scheduler_state.stats.sched_tick_kicks, 1, __ATOMIC_RELAXED);
+        __atomic_store_n(&task_scheduler_state.control.need_resched[cpu_index], 1, __ATOMIC_RELEASE);
+        task_debug_need_resched_set++;
+        __atomic_add_fetch(&task_scheduler_state.stats.sched_tick_kicks, 1, __ATOMIC_RELAXED);
+    }
+
+    uint64_t epoch = now_ticks / 2000ULL;
+    if (epoch != 0ULL &&
+        epoch > task_debug_log_epoch &&
+        __atomic_exchange_n(&task_debug_log_epoch, epoch, __ATOMIC_ACQ_REL) < epoch)
+    {
+        // #region agent log
+        kdebug_printf("[AGENTDBG H6 SCHED] tick=%llu cpu=%u rq_local=%u rq_total=%u preempt=%u with_rq=%llu set=%llu already=%llu\n",
+                      (unsigned long long) now_ticks,
+                      cpu_index,
+                      rq_depth,
+                      task_runqueue_depth_total(),
+                      task_get_preempt_count_cpu(cpu_index),
+                      (unsigned long long) task_debug_tick_with_rq,
+                      (unsigned long long) task_debug_need_resched_set,
+                      (unsigned long long) task_debug_need_resched_already_set);
+        // #endregion
+    }
 }
 
 void task_set_push_balance(bool enabled)

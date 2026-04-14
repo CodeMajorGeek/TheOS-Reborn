@@ -22,6 +22,7 @@ typedef struct doom_drm_state
 {
     bool ready;
     bool e0_prefix;
+    bool master_acquired;
     int card_fd;
     int dmabuf_fd;
     uint32_t connector_id;
@@ -386,6 +387,12 @@ static void doom_drm_destroy(void)
 {
     if (DoomDRM.card_fd >= 0)
     {
+        if (DoomDRM.master_acquired)
+        {
+            (void) ioctl(DoomDRM.card_fd, DRM_IOCTL_DROP_MASTER, NULL);
+            DoomDRM.master_acquired = false;
+        }
+
         if (DoomDRM.mode_blob_id != 0)
         {
             drm_mode_destroy_blob_t destroy_blob = { .blob_id = DoomDRM.mode_blob_id };
@@ -430,6 +437,13 @@ static bool doom_drm_init(void)
         printf("[DOOM] DRM open failed path=%s errno=%d\n", DRM_NODE_PATH, errno);
         return false;
     }
+    if (ioctl(DoomDRM.card_fd, DRM_IOCTL_SET_MASTER, NULL) < 0)
+    {
+        printf("[DOOM] DRM set master failed errno=%d\n", errno);
+        doom_drm_destroy();
+        return false;
+    }
+    DoomDRM.master_acquired = true;
 
     drm_mode_get_resources_t resources;
     memset(&resources, 0, sizeof(resources));

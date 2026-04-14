@@ -23,6 +23,11 @@ fi
 
 applied_count=0
 already_count=0
+skipped_count=0
+
+is_dirty() {
+	git -C "${THEOS_EMBEDDEDDOOM_SUBMODULE}" status --porcelain | grep -q .
+}
 
 for patch in "${patches[@]}"; do
 	patch_name="$(basename "${patch}")"
@@ -40,6 +45,12 @@ for patch in "${patches[@]}"; do
 		continue
 	fi
 
+	if is_dirty; then
+		echo "[embeddeddoom] patch skipped (dirty worktree): ${patch_name}" >&2
+		skipped_count=$((skipped_count + 1))
+		continue
+	fi
+
 	echo "[embeddeddoom] failed to apply patch '${patch_name}'." >&2
 	echo "[embeddeddoom] submodule may have diverged; inspect with:" >&2
 	echo "  git -C ${THEOS_EMBEDDEDDOOM_SUBMODULE} status --short" >&2
@@ -47,5 +58,4 @@ for patch in "${patches[@]}"; do
 	exit 1
 done
 
-echo "[embeddeddoom] patch sync done (applied=${applied_count}, already=${already_count})"
-
+echo "[embeddeddoom] patch sync done (applied=${applied_count}, already=${already_count}, skipped=${skipped_count})"

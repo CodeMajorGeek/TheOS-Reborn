@@ -11,6 +11,9 @@ set -euo pipefail
 [ -z "${THEOS_USERLAND_TEST:-}" ] && THEOS_USERLAND_TEST="Userland/Apps/TheTest/TheTest"
 [ -z "${THEOS_USERLAND_POWERMANAGER:-}" ] && THEOS_USERLAND_POWERMANAGER="Userland/Apps/ThePowerManager/ThePowerManager"
 [ -z "${THEOS_USERLAND_SYSTEMMONITOR:-}" ] && THEOS_USERLAND_SYSTEMMONITOR="Userland/Apps/TheSystemMonitor/TheSystemMonitor"
+[ -z "${THEOS_USERLAND_SYSTEMMONITORGUI:-}" ] && THEOS_USERLAND_SYSTEMMONITORGUI="Userland/Apps/TheSystemMonitorGUI/TheSystemMonitorGUI"
+[ -z "${THEOS_USERLAND_WINDOWSERVER:-}" ] && THEOS_USERLAND_WINDOWSERVER="Userland/Apps/TheWindowServer/TheWindowServer"
+[ -z "${THEOS_USERLAND_SHELLGUI:-}" ] && THEOS_USERLAND_SHELLGUI="Userland/Apps/TheShellGUI/TheShellGUI"
 [ -z "${THEOS_DRIVERLAND_DHCPD:-}" ] && THEOS_DRIVERLAND_DHCPD="Driverland/Daemons/TheDHCPd/TheDHCPd"
 [ -z "${THEOS_USERLAND_MICROPY:-}" ] && THEOS_USERLAND_MICROPY="Userland/Apps/TheMicroPython/TheMicroPython"
 [ -z "${THEOS_USERLAND_EMBEDDEDDOOM:-}" ] && THEOS_USERLAND_EMBEDDEDDOOM="Userland/Apps/TheEmbeddedDOOM/embeddedDOOM"
@@ -36,6 +39,15 @@ if [ ! -f "$THEOS_USERLAND_POWERMANAGER" ] && [ -f "Build/Userland/Apps/ThePower
 fi
 if [ ! -f "$THEOS_USERLAND_SYSTEMMONITOR" ] && [ -f "Build/Userland/Apps/TheSystemMonitor/TheSystemMonitor" ]; then
 	THEOS_USERLAND_SYSTEMMONITOR="Build/Userland/Apps/TheSystemMonitor/TheSystemMonitor"
+fi
+if [ ! -f "$THEOS_USERLAND_SYSTEMMONITORGUI" ] && [ -f "Build/Userland/Apps/TheSystemMonitorGUI/TheSystemMonitorGUI" ]; then
+	THEOS_USERLAND_SYSTEMMONITORGUI="Build/Userland/Apps/TheSystemMonitorGUI/TheSystemMonitorGUI"
+fi
+if [ ! -f "$THEOS_USERLAND_WINDOWSERVER" ] && [ -f "Build/Userland/Apps/TheWindowServer/TheWindowServer" ]; then
+	THEOS_USERLAND_WINDOWSERVER="Build/Userland/Apps/TheWindowServer/TheWindowServer"
+fi
+if [ ! -f "$THEOS_USERLAND_SHELLGUI" ] && [ -f "Build/Userland/Apps/TheShellGUI/TheShellGUI" ]; then
+	THEOS_USERLAND_SHELLGUI="Build/Userland/Apps/TheShellGUI/TheShellGUI"
 fi
 if [ ! -f "$THEOS_DRIVERLAND_DHCPD" ] && [ -f "Build/Driverland/Daemons/TheDHCPd/TheDHCPd" ]; then
 	THEOS_DRIVERLAND_DHCPD="Build/Driverland/Daemons/TheDHCPd/TheDHCPd"
@@ -107,6 +119,27 @@ if [ -f "$THEOS_USERLAND_SYSTEMMONITOR" ]; then
 	cp "$THEOS_USERLAND_SYSTEMMONITOR" "$STAGE_DIR/bin/TheSystemMonitor"
 else
 	echo "[disk] warning: TheSystemMonitor binary not found at '$THEOS_USERLAND_SYSTEMMONITOR'"
+fi
+
+if [ -f "$THEOS_USERLAND_SYSTEMMONITORGUI" ]; then
+	echo "[disk] install TheSystemMonitorGUI -> /bin/TheSystemMonitorGUI from '$THEOS_USERLAND_SYSTEMMONITORGUI'"
+	cp "$THEOS_USERLAND_SYSTEMMONITORGUI" "$STAGE_DIR/bin/TheSystemMonitorGUI"
+else
+	echo "[disk] warning: TheSystemMonitorGUI binary not found at '$THEOS_USERLAND_SYSTEMMONITORGUI'"
+fi
+
+if [ -f "$THEOS_USERLAND_WINDOWSERVER" ]; then
+	echo "[disk] install TheWindowServer -> /bin/TheWindowServer from '$THEOS_USERLAND_WINDOWSERVER'"
+	cp "$THEOS_USERLAND_WINDOWSERVER" "$STAGE_DIR/bin/TheWindowServer"
+else
+	echo "[disk] warning: TheWindowServer binary not found at '$THEOS_USERLAND_WINDOWSERVER'"
+fi
+
+if [ -f "$THEOS_USERLAND_SHELLGUI" ]; then
+	echo "[disk] install TheShellGUI -> /bin/TheShellGUI from '$THEOS_USERLAND_SHELLGUI'"
+	cp "$THEOS_USERLAND_SHELLGUI" "$STAGE_DIR/bin/TheShellGUI"
+else
+	echo "[disk] warning: TheShellGUI binary not found at '$THEOS_USERLAND_SHELLGUI'"
 fi
 
 if [ -f "$THEOS_DRIVERLAND_DHCPD" ]; then

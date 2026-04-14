@@ -17,6 +17,8 @@ set(LIBC_SOURCES
     syscall.c
     tls.c
     unistd.c
+    window.c
+    window_client.c
 )
 
 set(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} -DTHEOS_LIBC_BUILD")

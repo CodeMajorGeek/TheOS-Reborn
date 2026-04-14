@@ -39,6 +39,8 @@
 #define DRM_IOCTL_MODE_CREATE_BLOB       (DRM_IOCTL_BASE + 8U)
 #define DRM_IOCTL_MODE_DESTROY_BLOB      (DRM_IOCTL_BASE + 9U)
 #define DRM_IOCTL_MODE_ATOMIC            (DRM_IOCTL_BASE + 10U)
+#define DRM_IOCTL_SET_MASTER             (DRM_IOCTL_BASE + 11U)
+#define DRM_IOCTL_DROP_MASTER            (DRM_IOCTL_BASE + 12U)
 
 #ifndef __ASSEMBLER__
 typedef struct drm_mode_modeinfo

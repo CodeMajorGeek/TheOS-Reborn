@@ -17,7 +17,7 @@ void PIT_init(void)
 
     if (APIC_is_enabled())
     {
-        APIC_register_GSI_vector(TICK_VECTOR, 2, FALSE);
+        APIC_register_GSI_vector(TICK_VECTOR, 2, FALSE, -1);
         kdebug_puts("[PIT] IOAPIC route GSI2 -> vec 0x20 (calibration path)\n");
     }
 }
@@ -31,7 +31,7 @@ void PIT_stop(void)
 
     if (APIC_is_enabled())
     {
-        APIC_register_GSI_vector(TICK_VECTOR, 2, TRUE);
+        APIC_register_GSI_vector(TICK_VECTOR, 2, TRUE, -1);
         kdebug_puts("[PIT] IOAPIC route GSI2 masked\n");
     }
 }

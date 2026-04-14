@@ -163,7 +163,8 @@ uint8_t APIC_get_bsp_lapic_id(void);
 uint8_t APIC_get_core_count(void);
 uint8_t APIC_get_core_id(uint8_t index);
 void APIC_register_IRQ_vector(int vec, int irq, bool disable);
-void APIC_register_GSI_vector(int vec, uint32_t gsi, bool disable);
+/* isa_irq_slot: ISA PIC index 0-15 when routing a legacy IRQ; use -1 if unknown (e.g. ad-hoc GSI). */
+void APIC_register_GSI_vector(int vec, uint32_t gsi, bool disable, int isa_irq_slot);
 bool APIC_send_ipi(uint8_t apic_id, uint8_t vector);
 bool APIC_startup_ap(uint8_t apic_id, uint8_t startup_vector);
 void APIC_send_EOI(void);

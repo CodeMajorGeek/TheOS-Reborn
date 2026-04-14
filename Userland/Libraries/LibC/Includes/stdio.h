@@ -3,6 +3,7 @@
 
 #include <stddef.h>
 #include <stdarg.h>
+#include <stdint.h>
 
 #define EOF         (-1)
 
@@ -36,6 +37,7 @@ int puts(const char* s);
 int getchar(void);
 char* fgets(char* str, int size);
 int keyboard_load_config(const char* config_path);
+int keyboard_decode_scancode(uint8_t raw_scancode, int* out_key);
 
 int __printf(char*, size_t, const char* __restrict, va_list);
 int printf(const char* __restrict, ...);

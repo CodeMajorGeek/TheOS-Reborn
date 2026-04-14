@@ -60,6 +60,7 @@ set(KERNEL_DEVICES_SOURCES
     Device/HPET.c
     Device/PIT.c
     Device/Keyboard.c
+    Device/Mouse.c
     Device/CMOS.c
     Device/RTC.c
 )

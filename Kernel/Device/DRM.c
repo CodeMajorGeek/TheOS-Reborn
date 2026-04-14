@@ -201,6 +201,54 @@ static void DRM_store_fb_pixel(const TTYFB_runtime_state_t* fb, uint8_t* target,
     }
 }
 
+static bool DRM_fb_is_xrgb8888_native(const TTYFB_runtime_state_t* fb)
+{
+    if (!fb)
+        return false;
+
+    return fb->bytes_per_pixel == 4U &&
+           fb->red_pos == 16U &&
+           fb->red_size == 8U &&
+           fb->green_pos == 8U &&
+           fb->green_size == 8U &&
+           fb->blue_pos == 0U &&
+           fb->blue_size == 8U;
+}
+
+static bool DRM_buffer_copy_bytes(const drm_buffer_t* buffer, uint64_t src_offset, void* dst, size_t byte_count)
+{
+    if (!buffer || !buffer->used || !buffer->page_phys || !dst)
+        return false;
+    if (byte_count == 0U)
+        return true;
+
+    uint64_t end_offset = src_offset + (uint64_t) byte_count;
+    if (end_offset < src_offset || end_offset > buffer->size)
+        return false;
+
+    uint8_t* out = (uint8_t*) dst;
+    size_t remaining = byte_count;
+    while (remaining != 0U)
+    {
+        uint32_t page_index = (uint32_t) (src_offset / PHYS_PAGE_SIZE);
+        uint32_t page_off = (uint32_t) (src_offset % PHYS_PAGE_SIZE);
+        if (page_index >= buffer->page_count)
+            return false;
+
+        size_t chunk = PHYS_PAGE_SIZE - page_off;
+        if (chunk > remaining)
+            chunk = remaining;
+
+        uint8_t* src = (uint8_t*) P2V(buffer->page_phys[page_index]) + page_off;
+        memcpy(out, src, chunk);
+        out += chunk;
+        src_offset += (uint64_t) chunk;
+        remaining -= chunk;
+    }
+
+    return true;
+}
+
 static bool DRM_bochs_id_supported(uint16_t id)
 {
     switch (id)
@@ -638,18 +686,21 @@ static bool DRM_buffer_read_xrgb8888(const drm_buffer_t* buffer, uint32_t x, uin
     if (offset + 4ULL > buffer->size)
         return false;
 
-    uint8_t pixel_bytes[4] = { 0, 0, 0, 0 };
-    for (uint32_t i = 0; i < 4U; i++)
-    {
-        uint64_t byte_offset = offset + i;
-        uint32_t page_index = (uint32_t) (byte_offset / PHYS_PAGE_SIZE);
-        uint32_t page_off = (uint32_t) (byte_offset % PHYS_PAGE_SIZE);
-        if (page_index >= buffer->page_count)
-            return false;
+    uint32_t page_index = (uint32_t) (offset / PHYS_PAGE_SIZE);
+    uint32_t page_off = (uint32_t) (offset % PHYS_PAGE_SIZE);
+    if (page_index >= buffer->page_count)
+        return false;
 
-        uint8_t* page = (uint8_t*) P2V(buffer->page_phys[page_index]);
-        pixel_bytes[i] = page[page_off];
+    uint8_t* page = (uint8_t*) P2V(buffer->page_phys[page_index]);
+    if (page_off <= (PHYS_PAGE_SIZE - 4U))
+    {
+        *out_pixel = *(uint32_t*) (page + page_off);
+        return true;
     }
+
+    uint8_t pixel_bytes[4] = { 0, 0, 0, 0 };
+    if (!DRM_buffer_copy_bytes(buffer, offset, pixel_bytes, sizeof(pixel_bytes)))
+        return false;
 
     *out_pixel = ((uint32_t) pixel_bytes[0]) |
                  ((uint32_t) pixel_bytes[1] << 8) |
@@ -709,6 +760,31 @@ static bool DRM_present_buffer_locked(const drm_buffer_t* buffer,
         return false;
     if ((uint64_t) dst_y + dst_h > fb.height)
         return false;
+
+    bool one_to_one = (src_w == dst_w && src_h == dst_h);
+    if (one_to_one &&
+        buffer->bpp == 32U &&
+        DRM_fb_is_xrgb8888_native(&fb))
+    {
+        uint32_t row_bytes = src_w * 4U;
+        for (uint32_t dy = 0; dy < dst_h; dy++)
+        {
+            uint32_t sy = src_y + dy;
+            uint32_t fy = dst_y + dy;
+            uint64_t src_offset = ((uint64_t) sy * (uint64_t) buffer->pitch) + ((uint64_t) src_x * 4ULL);
+            uint8_t* front_row = fb.front + ((size_t) fy * fb.pitch) + ((size_t) dst_x * 4U);
+            if (!DRM_buffer_copy_bytes(buffer, src_offset, front_row, row_bytes))
+                return false;
+
+            if (fb.double_buffer && fb.back)
+            {
+                uint8_t* back_row = fb.back + ((size_t) fy * fb.pitch) + ((size_t) dst_x * 4U);
+                memcpy(back_row, front_row, row_bytes);
+            }
+        }
+
+        return true;
+    }
 
     for (uint32_t dy = 0; dy < dst_h; dy++)
     {
@@ -807,7 +883,7 @@ void DRM_close_file(uint32_t file_id)
         return;
     }
 
-    bool disable_scanout = false;
+    bool disable_scanout = (DRM_state.crtc.owner_file_id == file_id);
     for (uint32_t i = 0; i < DRM_MAX_FILE_HANDLES; i++)
     {
         drm_file_handle_t* file_handle = &file->handles[i];
@@ -823,6 +899,12 @@ void DRM_close_file(uint32_t file_id)
             buffer->handle_refs--;
 
         memset(file_handle, 0, sizeof(*file_handle));
+    }
+
+    if (DRM_state.master_file_id == file_id)
+    {
+        DRM_state.master_file_id = 0;
+        disable_scanout = true;
     }
 
     if (disable_scanout)
@@ -848,6 +930,75 @@ void DRM_close_file(uint32_t file_id)
     }
 
     spin_unlock(&DRM_state.lock);
+}
+
+bool DRM_set_master(uint32_t file_id)
+{
+    if (file_id == 0 || !DRM_state.lock_ready)
+        return false;
+
+    spin_lock(&DRM_state.lock);
+    if (!DRM_file_find_locked(file_id))
+    {
+        spin_unlock(&DRM_state.lock);
+        return false;
+    }
+
+    if (DRM_state.master_file_id != 0 && DRM_state.master_file_id != file_id)
+    {
+        spin_unlock(&DRM_state.lock);
+        return false;
+    }
+
+    DRM_state.master_file_id = file_id;
+    spin_unlock(&DRM_state.lock);
+    return true;
+}
+
+bool DRM_drop_master(uint32_t file_id)
+{
+    if (file_id == 0 || !DRM_state.lock_ready)
+        return false;
+
+    spin_lock(&DRM_state.lock);
+    if (!DRM_file_find_locked(file_id) || DRM_state.master_file_id != file_id)
+    {
+        spin_unlock(&DRM_state.lock);
+        return false;
+    }
+
+    DRM_state.master_file_id = 0;
+
+    if (DRM_state.crtc.owner_file_id == file_id)
+    {
+        DRM_state.connector.crtc_id = 0;
+        DRM_state.crtc.active = false;
+        DRM_state.crtc.fb_handle = 0;
+        DRM_state.crtc.fb_buffer_id = 0;
+        DRM_state.crtc.owner_file_id = 0;
+        DRM_state.plane.fb_handle = 0;
+        DRM_state.plane.fb_buffer_id = 0;
+    }
+
+    if (!DRM_state.crtc.active && DRM_state.tty_disabled)
+    {
+        TTY_set_output_enabled(true);
+        DRM_state.tty_disabled = false;
+    }
+
+    spin_unlock(&DRM_state.lock);
+    return true;
+}
+
+bool DRM_is_master(uint32_t file_id)
+{
+    if (file_id == 0 || !DRM_state.lock_ready)
+        return false;
+
+    spin_lock(&DRM_state.lock);
+    bool is_master = (DRM_state.master_file_id == file_id);
+    spin_unlock(&DRM_state.lock);
+    return is_master;
 }
 
 bool DRM_get_resources(uint32_t file_id, drm_mode_get_resources_t* io)
@@ -1316,6 +1467,12 @@ bool DRM_atomic_commit(uint32_t file_id, const drm_mode_atomic_req_t* req)
     spin_lock(&DRM_state.lock);
     drm_file_t* file = DRM_file_find_locked(file_id);
     if (!file)
+    {
+        spin_unlock(&DRM_state.lock);
+        return false;
+    }
+
+    if (DRM_state.master_file_id != file_id)
     {
         spin_unlock(&DRM_state.lock);
         return false;

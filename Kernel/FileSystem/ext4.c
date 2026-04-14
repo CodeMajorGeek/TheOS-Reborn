@@ -851,9 +851,18 @@ bool ext4_read_file(ext4_fs_t* fs, const char* name, uint8_t** out_buf, size_t* 
     uint32_t block_index = 0;
     while (read < size)
     {
+        size_t to_copy = fs->block_size;
+        if (size - read < to_copy)
+            to_copy = size - read;
+
         uint32_t phys = 0;
         if (!ext4_inode_get_block(fs, &inode, block_index, &phys))
-            break;
+        {
+            memset(buf + read, 0, to_copy);
+            read += to_copy;
+            block_index++;
+            continue;
+        }
 
         uint8_t* block = (uint8_t*) kmalloc(fs->block_size);
         if (!block)
@@ -864,9 +873,6 @@ bool ext4_read_file(ext4_fs_t* fs, const char* name, uint8_t** out_buf, size_t* 
             break;
         }
 
-        size_t to_copy = fs->block_size;
-        if (size - read < to_copy)
-            to_copy = size - read;
         memcpy(buf + read, block, to_copy);
         kfree(block);
 

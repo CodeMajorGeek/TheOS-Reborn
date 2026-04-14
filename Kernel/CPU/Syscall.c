@@ -8,6 +8,7 @@
 #include <CPU/SMP.h>
 #include <Device/HPET.h>
 #include <Device/Keyboard.h>
+#include <Device/Mouse.h>
 #include <Device/DRM.h>
 #include <Device/E1000.h>
 #include <Device/HDA.h>
@@ -36,6 +37,138 @@ static syscall_runtime_state_t Syscall_state = {
     .next_pid = 1U
 };
 static uint32_t Syscall_bootstrap_domain = SYS_PROC_DOMAIN_USERLAND;
+static uint64_t Syscall_debug_tick_calls = 0;
+static uint64_t Syscall_debug_tick_runnable_le1 = 0;
+static uint64_t Syscall_debug_need_resched_set = 0;
+static uint64_t Syscall_debug_preempt_attempts = 0;
+static uint64_t Syscall_debug_preempt_success = 0;
+static uint64_t Syscall_debug_preempt_no_flag = 0;
+static uint64_t Syscall_debug_preempt_no_current = 0;
+static uint64_t Syscall_debug_preempt_same_slot = 0;
+static uint64_t Syscall_debug_preempt_invalid_next = 0;
+static uint64_t Syscall_debug_log_epoch = 0;
+static uint64_t Syscall_debug_post_calls = 0;
+static uint64_t Syscall_debug_post_pick_next = 0;
+static uint64_t Syscall_debug_post_switch = 0;
+static uint64_t Syscall_debug_post_log_epoch = 0;
+static uint64_t Syscall_debug_need_resched_set_cpu[4] = { 0, 0, 0, 0 };
+static uint64_t Syscall_debug_preempt_attempt_cpu[4] = { 0, 0, 0, 0 };
+static uint64_t Syscall_debug_preempt_success_cpu[4] = { 0, 0, 0, 0 };
+static uint64_t Syscall_debug_preempt_no_flag_cpu[4] = { 0, 0, 0, 0 };
+static uint64_t Syscall_debug_irq_calls_cpu[4] = { 0, 0, 0, 0 };
+static uint64_t Syscall_debug_post_calls_cpu[4] = { 0, 0, 0, 0 };
+static uint64_t Syscall_debug_post_switch_cpu[4] = { 0, 0, 0, 0 };
+static uint64_t Syscall_debug_nr_read = 0;
+static uint64_t Syscall_debug_nr_write = 0;
+static uint64_t Syscall_debug_nr_sleep = 0;
+static uint64_t Syscall_debug_nr_other = 0;
+static uint64_t Syscall_debug_flag_consume_timer_cpu[4] = { 0, 0, 0, 0 };
+static uint64_t Syscall_debug_flag_consume_post_cpu[4] = { 0, 0, 0, 0 };
+static uint64_t Syscall_debug_flag_set_sleep_cpu[4] = { 0, 0, 0, 0 };
+
+#define SYSCALL_KBD_INJECT_QUEUE_CAP 256U
+typedef struct syscall_kbd_inject_entry
+{
+    uint32_t pid;
+    uint8_t scancode;
+} syscall_kbd_inject_entry_t;
+static syscall_kbd_inject_entry_t Syscall_kbd_inject_queue[SYSCALL_KBD_INJECT_QUEUE_CAP];
+static uint32_t Syscall_kbd_inject_count = 0U;
+static spinlock_t Syscall_kbd_inject_lock;
+static bool Syscall_kbd_inject_lock_ready = false;
+static uint64_t Syscall_kbd_inject_push_ok = 0ULL;
+static uint64_t Syscall_kbd_inject_push_drop = 0ULL;
+static uint64_t Syscall_kbd_inject_pop_ok = 0ULL;
+static uint32_t Syscall_kbd_inject_targets[32] = { 0U };
+static uint64_t Syscall_kbd_inject_target_hits = 0ULL;
+
+static void Syscall_kbd_inject_register_target(uint32_t pid)
+{
+    if (!Syscall_kbd_inject_lock_ready || pid == 0U)
+        return;
+
+    uint64_t flags = spin_lock_irqsave(&Syscall_kbd_inject_lock);
+    for (uint32_t i = 0U; i < 32U; i++)
+    {
+        if (Syscall_kbd_inject_targets[i] == pid)
+        {
+            spin_unlock_irqrestore(&Syscall_kbd_inject_lock, flags);
+            return;
+        }
+    }
+    for (uint32_t i = 0U; i < 32U; i++)
+    {
+        if (Syscall_kbd_inject_targets[i] == 0U)
+        {
+            Syscall_kbd_inject_targets[i] = pid;
+            spin_unlock_irqrestore(&Syscall_kbd_inject_lock, flags);
+            return;
+        }
+    }
+    spin_unlock_irqrestore(&Syscall_kbd_inject_lock, flags);
+}
+
+static bool Syscall_kbd_inject_is_target(uint32_t pid)
+{
+    if (!Syscall_kbd_inject_lock_ready || pid == 0U)
+        return false;
+    bool found = false;
+    uint64_t flags = spin_lock_irqsave(&Syscall_kbd_inject_lock);
+    for (uint32_t i = 0U; i < 32U; i++)
+    {
+        if (Syscall_kbd_inject_targets[i] == pid)
+        {
+            found = true;
+            break;
+        }
+    }
+    spin_unlock_irqrestore(&Syscall_kbd_inject_lock, flags);
+    return found;
+}
+
+static bool Syscall_kbd_inject_push(uint32_t pid, uint8_t scancode)
+{
+    if (!Syscall_kbd_inject_lock_ready || pid == 0U)
+        return false;
+
+    uint64_t flags = spin_lock_irqsave(&Syscall_kbd_inject_lock);
+    if (Syscall_kbd_inject_count >= SYSCALL_KBD_INJECT_QUEUE_CAP)
+    {
+        Syscall_kbd_inject_push_drop++;
+        spin_unlock_irqrestore(&Syscall_kbd_inject_lock, flags);
+        return false;
+    }
+
+    Syscall_kbd_inject_queue[Syscall_kbd_inject_count].pid = pid;
+    Syscall_kbd_inject_queue[Syscall_kbd_inject_count].scancode = scancode;
+    Syscall_kbd_inject_count++;
+    Syscall_kbd_inject_push_ok++;
+    spin_unlock_irqrestore(&Syscall_kbd_inject_lock, flags);
+    return true;
+}
+
+static bool Syscall_kbd_inject_pop_for_pid(uint32_t pid, uint8_t* out_scancode)
+{
+    if (!Syscall_kbd_inject_lock_ready || pid == 0U || !out_scancode)
+        return false;
+
+    uint64_t flags = spin_lock_irqsave(&Syscall_kbd_inject_lock);
+    for (uint32_t i = 0U; i < Syscall_kbd_inject_count; i++)
+    {
+        if (Syscall_kbd_inject_queue[i].pid != pid)
+            continue;
+
+        *out_scancode = Syscall_kbd_inject_queue[i].scancode;
+        for (uint32_t j = i + 1U; j < Syscall_kbd_inject_count; j++)
+            Syscall_kbd_inject_queue[j - 1U] = Syscall_kbd_inject_queue[j];
+        Syscall_kbd_inject_count--;
+        Syscall_kbd_inject_pop_ok++;
+        spin_unlock_irqrestore(&Syscall_kbd_inject_lock, flags);
+        return true;
+    }
+    spin_unlock_irqrestore(&Syscall_kbd_inject_lock, flags);
+    return false;
+}
 
 static inline uintptr_t Syscall_align_up_page(uintptr_t value)
 {
@@ -1039,6 +1172,7 @@ static uint64_t Syscall_handle_accept(uint32_t cpu_index, const syscall_frame_t*
         return (uint64_t) -1;
 
     uint32_t listener_socket_id = 0U;
+    bool listener_non_blocking = false;
     spin_lock(&Syscall_state.fd_lock);
     syscall_file_desc_t* entry = &Syscall_state.fds[(uint32_t) fd];
     if (!entry->used || entry->owner_pid != owner_pid || entry->type != SYSCALL_FD_TYPE_NET_TCP_SOCKET || !entry->can_read || entry->io_busy)
@@ -1048,6 +1182,7 @@ static uint64_t Syscall_handle_accept(uint32_t cpu_index, const syscall_frame_t*
     }
     entry->io_busy = true;
     listener_socket_id = entry->net_socket_id;
+    listener_non_blocking = entry->non_blocking;
     spin_unlock(&Syscall_state.fd_lock);
 
     uint32_t child_socket_id = 0U;
@@ -1055,7 +1190,7 @@ static uint64_t Syscall_handle_accept(uint32_t cpu_index, const syscall_frame_t*
     bool accepted = NET_tcp_accept(owner_pid,
                                    listener_socket_id,
                                    &child_socket_id,
-                                   false,
+                                   listener_non_blocking,
                                    &would_block);
 
     spin_lock(&Syscall_state.fd_lock);
@@ -1087,6 +1222,7 @@ static uint64_t Syscall_handle_accept(uint32_t cpu_index, const syscall_frame_t*
     accepted_entry->owner_pid = owner_pid;
     accepted_entry->can_read = true;
     accepted_entry->can_write = true;
+    accepted_entry->non_blocking = listener_non_blocking;
     accepted_entry->net_socket_id = child_socket_id;
     spin_unlock(&Syscall_state.fd_lock);
 
@@ -1171,8 +1307,8 @@ static uint64_t Syscall_handle_sendto(uint32_t cpu_index, const syscall_frame_t*
     socket_id = entry->net_socket_id;
     spin_unlock(&Syscall_state.fd_lock);
 
-    size_t payload_cap = (fd_type == SYSCALL_FD_TYPE_NET_TCP_SOCKET) ? NET_TCP_MAX_PAYLOAD : NET_SOCKET_UDP_MAX_PAYLOAD;
-    if (len > payload_cap)
+    size_t payload_cap = NET_SOCKET_UDP_MAX_PAYLOAD;
+    if (fd_type == SYSCALL_FD_TYPE_NET_UDP_SOCKET && len > payload_cap)
     {
         spin_lock(&Syscall_state.fd_lock);
         entry = &Syscall_state.fds[(uint32_t) fd];
@@ -1183,15 +1319,6 @@ static uint64_t Syscall_handle_sendto(uint32_t cpu_index, const syscall_frame_t*
     }
 
     uint8_t payload[NET_SOCKET_UDP_MAX_PAYLOAD];
-    if (len != 0U && !Syscall_copy_from_user(payload, user_buf, len))
-    {
-        spin_lock(&Syscall_state.fd_lock);
-        entry = &Syscall_state.fds[(uint32_t) fd];
-        if (entry->used && entry->owner_pid == owner_pid && entry->type == fd_type)
-            entry->io_busy = false;
-        spin_unlock(&Syscall_state.fd_lock);
-        return (uint64_t) -1;
-    }
 
     size_t sent = 0U;
     bool ok = false;
@@ -1208,17 +1335,17 @@ static uint64_t Syscall_handle_sendto(uint32_t cpu_index, const syscall_frame_t*
         }
         else
         {
-            if (use_connected_peer)
+            if (len != 0U && !Syscall_copy_from_user(payload, user_buf, len))
+            {
+                ok = false;
+            }
+            else if (use_connected_peer)
             {
                 bool connected = false;
                 if (!NET_socket_getpeername_udp(owner_pid, socket_id, &connected, &dst_addr_be, &dst_port) || !connected)
-                {
                     ok = false;
-                }
                 else
-                {
                     ok = NET_socket_sendto_udp(owner_pid, socket_id, dst_addr_be, dst_port, payload, len, &sent);
-                }
             }
             else
             {
@@ -1234,13 +1361,47 @@ static uint64_t Syscall_handle_sendto(uint32_t cpu_index, const syscall_frame_t*
         }
         else
         {
-            ok = NET_tcp_send(owner_pid,
-                              socket_id,
-                              payload,
-                              len,
-                              &sent,
-                              (flags & NET_SOCKET_MSG_DONTWAIT) != 0U,
-                              &would_block);
+            ok = true;
+            const uint8_t* user_payload = (const uint8_t*) user_buf;
+            bool force_non_blocking = (flags & NET_SOCKET_MSG_DONTWAIT) != 0U;
+            while (sent < len)
+            {
+                size_t chunk_len = len - sent;
+                if (chunk_len > NET_TCP_MAX_PAYLOAD)
+                    chunk_len = NET_TCP_MAX_PAYLOAD;
+                if (chunk_len > sizeof(payload))
+                    chunk_len = sizeof(payload);
+
+                if (!Syscall_copy_from_user(payload, user_payload + sent, chunk_len))
+                {
+                    ok = false;
+                    break;
+                }
+
+                size_t chunk_sent = 0U;
+                bool chunk_would_block = false;
+                if (!NET_tcp_send(owner_pid,
+                                  socket_id,
+                                  payload,
+                                  chunk_len,
+                                  &chunk_sent,
+                                  force_non_blocking,
+                                  &chunk_would_block))
+                {
+                    ok = false;
+                    break;
+                }
+
+                sent += chunk_sent;
+                if (chunk_would_block)
+                {
+                    would_block = true;
+                    break;
+                }
+
+                if (chunk_sent == 0U)
+                    break;
+            }
         }
     }
 
@@ -1251,8 +1412,12 @@ static uint64_t Syscall_handle_sendto(uint32_t cpu_index, const syscall_frame_t*
     spin_unlock(&Syscall_state.fd_lock);
 
     if (!ok)
+    {
+        if (sent != 0U)
+            return (uint64_t) sent;
         return (uint64_t) -1;
-    if (would_block)
+    }
+    if (would_block && sent == 0U)
         return (uint64_t) -2;
 
     return (uint64_t) sent;
@@ -2791,6 +2956,12 @@ static uint64_t Syscall_handle_ioctl(uint32_t cpu_index, const syscall_frame_t* 
 
             return DRM_atomic_commit(drm_file_id, &io) ? 0 : (uint64_t) -1;
         }
+
+        case DRM_IOCTL_SET_MASTER:
+            return DRM_set_master(drm_file_id) ? 0 : (uint64_t) -1;
+
+        case DRM_IOCTL_DROP_MASTER:
+            return DRM_drop_master(drm_file_id) ? 0 : (uint64_t) -1;
 
         default:
             return (uint64_t) -1;
@@ -4821,6 +4992,7 @@ static int32_t Syscall_proc_ensure_current_locked(uint32_t cpu_index, const sysc
     proc->pid = Syscall_state.next_pid++;
     proc->ppid = 0;
     proc->owner_pid = proc->pid;
+    proc->console_sid = proc->pid;
     proc->domain = (proc->pid == 1U) ? Syscall_bootstrap_domain : SYS_PROC_DOMAIN_USERLAND;
     proc->cr3_phys = current_cr3;
     proc->fs_base = current_fs_base;
@@ -4858,6 +5030,144 @@ static uint32_t Syscall_proc_current_pid(uint32_t cpu_index, const syscall_frame
     uint32_t pid = (slot >= 0) ? Syscall_state.procs[slot].owner_pid : 0;
     spin_unlock_irqrestore(&Syscall_state.proc_lock, flags);
     return pid;
+}
+
+static uint32_t Syscall_proc_current_console_sid(uint32_t cpu_index, const syscall_frame_t* frame)
+{
+    if (!Syscall_state.proc_lock_ready)
+        return 0;
+
+    uint64_t flags = spin_lock_irqsave(&Syscall_state.proc_lock);
+    int32_t slot = Syscall_proc_ensure_current_locked(cpu_index, frame);
+    uint32_t sid = (slot >= 0) ? Syscall_state.procs[slot].console_sid : 0;
+    spin_unlock_irqrestore(&Syscall_state.proc_lock, flags);
+    return sid;
+}
+
+static bool Syscall_console_sid_has_other_live_locked(uint32_t console_sid, int32_t exclude_slot)
+{
+    if (console_sid == 0)
+        return false;
+
+    for (uint32_t i = 0; i < SYSCALL_MAX_PROCS; i++)
+    {
+        if ((int32_t) i == exclude_slot)
+            continue;
+        if (!Syscall_state.procs[i].used)
+            continue;
+        if (Syscall_state.procs[i].console_sid != console_sid)
+            continue;
+        return true;
+    }
+
+    return false;
+}
+
+static int32_t Syscall_console_route_find_locked(uint32_t console_sid)
+{
+    if (console_sid == 0)
+        return -1;
+
+    for (uint32_t i = 0; i < SYSCALL_MAX_CONSOLE_ROUTES; i++)
+    {
+        if (!Syscall_state.console_routes[i].used)
+            continue;
+        if (Syscall_state.console_routes[i].console_sid == console_sid)
+            return (int32_t) i;
+    }
+
+    return -1;
+}
+
+static int32_t Syscall_console_route_alloc_locked(uint32_t owner_pid, uint32_t console_sid)
+{
+    if (owner_pid == 0U || console_sid == 0U)
+        return -1;
+
+    for (uint32_t i = 0; i < SYSCALL_MAX_CONSOLE_ROUTES; i++)
+    {
+        if (Syscall_state.console_routes[i].used)
+            continue;
+        memset(&Syscall_state.console_routes[i], 0, sizeof(Syscall_state.console_routes[i]));
+        Syscall_state.console_routes[i].used = true;
+        Syscall_state.console_routes[i].owner_pid = owner_pid;
+        Syscall_state.console_routes[i].console_sid = console_sid;
+        return (int32_t) i;
+    }
+
+    return -1;
+}
+
+static void Syscall_console_route_clear_sid(uint32_t console_sid)
+{
+    if (!Syscall_state.console_lock_ready || console_sid == 0)
+        return;
+
+    uint64_t flags = spin_lock_irqsave(&Syscall_state.console_lock);
+    int32_t slot = Syscall_console_route_find_locked(console_sid);
+    if (slot >= 0)
+        memset(&Syscall_state.console_routes[(uint32_t) slot], 0, sizeof(syscall_console_route_t));
+    spin_unlock_irqrestore(&Syscall_state.console_lock, flags);
+}
+
+static bool Syscall_console_sid_manageable_by(uint32_t caller_pid, uint32_t console_sid)
+{
+    if (!Syscall_state.proc_lock_ready || caller_pid == 0U || console_sid == 0U)
+        return false;
+
+    bool manageable = false;
+    uint64_t flags = spin_lock_irqsave(&Syscall_state.proc_lock);
+    for (uint32_t i = 0; i < SYSCALL_MAX_PROCS; i++)
+    {
+        const syscall_process_t* proc = &Syscall_state.procs[i];
+        if (!proc->used)
+            continue;
+        if (proc->console_sid != console_sid)
+            continue;
+        if (proc->pid == caller_pid || proc->ppid == caller_pid || proc->owner_pid == caller_pid)
+            manageable = true;
+        break;
+    }
+    spin_unlock_irqrestore(&Syscall_state.proc_lock, flags);
+    return manageable;
+}
+
+static void Syscall_console_route_push_locked(syscall_console_route_t* route, const char* data, size_t len)
+{
+    if (!route || !data || len == 0U || (route->flags & SYS_CONSOLE_ROUTE_FLAG_CAPTURE) == 0U)
+        return;
+
+    for (size_t i = 0; i < len; i++)
+    {
+        route->buffer[route->head] = data[i];
+        route->head = (route->head + 1U) % SYSCALL_CONSOLE_CAPTURE_SIZE;
+        if (route->count == SYSCALL_CONSOLE_CAPTURE_SIZE)
+            route->tail = (route->tail + 1U) % SYSCALL_CONSOLE_CAPTURE_SIZE;
+        else
+            route->count++;
+    }
+}
+
+static size_t Syscall_console_route_pop_locked(syscall_console_route_t* route, char* out, size_t out_size)
+{
+    if (!route || !out || out_size == 0U || route->count == 0U)
+        return 0U;
+
+    size_t copied = 0U;
+    while (copied < out_size && route->count > 0U)
+    {
+        out[copied++] = route->buffer[route->tail];
+        route->tail = (route->tail + 1U) % SYSCALL_CONSOLE_CAPTURE_SIZE;
+        route->count--;
+    }
+
+    if (route->count == 0U)
+    {
+        route->head = 0U;
+        route->tail = 0U;
+    }
+
+    return copied;
 }
 
 static int32_t Syscall_proc_pick_next_locked(int32_t current_slot)
@@ -5392,6 +5702,7 @@ void Syscall_init(void)
     Syscall_state.vm_lock_ready = true;
 
     memset(Syscall_state.procs, 0, sizeof(Syscall_state.procs));
+    memset(Syscall_state.console_routes, 0, sizeof(Syscall_state.console_routes));
     memset(Syscall_state.exit_events, 0, sizeof(Syscall_state.exit_events));
     memset(Syscall_state.thread_exit_events, 0, sizeof(Syscall_state.thread_exit_events));
     memset(Syscall_state.cow_refs, 0, sizeof(Syscall_state.cow_refs));
@@ -5399,13 +5710,18 @@ void Syscall_init(void)
     {
         Syscall_state.cpu_current_proc[i] = SYSCALL_PROC_NONE;
         Syscall_state.cpu_need_resched[i] = 0;
+        Syscall_state.cpu_need_timer_preempt[i] = 0;
         Syscall_state.cpu_slice_ticks[i] = 0;
     }
     Syscall_state.next_pid = 1U;
     spinlock_init(&Syscall_state.proc_lock);
     Syscall_state.proc_lock_ready = true;
+    spinlock_init(&Syscall_state.console_lock);
+    Syscall_state.console_lock_ready = true;
     spinlock_init(&Syscall_state.cow_lock);
     Syscall_state.cow_lock_ready = true;
+    spinlock_init(&Syscall_kbd_inject_lock);
+    Syscall_kbd_inject_lock_ready = true;
 
     MSR_set(IA32_LSTAR, (uint64_t) &syscall_handler_stub);
     MSR_set(IA32_FMASK, SYSCALL_FMASK_TF_BIT | SYSCALL_FMASK_DF_BIT);
@@ -5420,6 +5736,7 @@ void Syscall_on_timer_tick(uint32_t cpu_index)
 {
     if (!Syscall_state.proc_lock_ready || cpu_index >= 256)
         return;
+    Syscall_debug_tick_calls++;
 
     uint32_t runnable = 0;
     uint64_t flags = spin_lock_irqsave(&Syscall_state.proc_lock);
@@ -5433,13 +5750,69 @@ void Syscall_on_timer_tick(uint32_t cpu_index)
     if (runnable <= 1U)
     {
         Syscall_state.cpu_slice_ticks[cpu_index] = 0;
+        Syscall_debug_tick_runnable_le1++;
         return;
     }
 
     uint8_t slice = (uint8_t) (Syscall_state.cpu_slice_ticks[cpu_index] + 1U);
     Syscall_state.cpu_slice_ticks[cpu_index] = slice;
     if (slice >= SYSCALL_PREEMPT_QUANTUM_TICKS)
-        __atomic_store_n(&Syscall_state.cpu_need_resched[cpu_index], 1, __ATOMIC_RELEASE);
+    {
+        __atomic_store_n(&Syscall_state.cpu_need_timer_preempt[cpu_index], 1, __ATOMIC_RELEASE);
+        Syscall_debug_need_resched_set++;
+        Syscall_debug_need_resched_set_cpu[cpu_index & 0x3U]++;
+    }
+
+    uint64_t now_ticks = ISR_get_timer_ticks();
+    uint64_t epoch = now_ticks / 2000ULL;
+    if (epoch != 0ULL &&
+        epoch > Syscall_debug_post_log_epoch &&
+        __atomic_exchange_n(&Syscall_debug_post_log_epoch, epoch, __ATOMIC_ACQ_REL) < epoch)
+    {
+        // #region agent log
+        kdebug_printf("[AGENTDBG H7 PREEMPT] tick=%llu calls=%llu runnable_le1=%llu need_resched_set=%llu attempts=%llu success=%llu fail_flag=%llu fail_no_current=%llu fail_same=%llu fail_next=%llu\n",
+                      (unsigned long long) now_ticks,
+                      (unsigned long long) Syscall_debug_tick_calls,
+                      (unsigned long long) Syscall_debug_tick_runnable_le1,
+                      (unsigned long long) Syscall_debug_need_resched_set,
+                      (unsigned long long) Syscall_debug_preempt_attempts,
+                      (unsigned long long) Syscall_debug_preempt_success,
+                      (unsigned long long) Syscall_debug_preempt_no_flag,
+                      (unsigned long long) Syscall_debug_preempt_no_current,
+                      (unsigned long long) Syscall_debug_preempt_same_slot,
+                      (unsigned long long) Syscall_debug_preempt_invalid_next);
+        kdebug_printf("[AGENTDBG H9 PREEMPT_CPU] set=[%llu,%llu,%llu,%llu] attempts=[%llu,%llu,%llu,%llu] success=[%llu,%llu,%llu,%llu] fail_flag=[%llu,%llu,%llu,%llu]\n",
+                      (unsigned long long) Syscall_debug_need_resched_set_cpu[0],
+                      (unsigned long long) Syscall_debug_need_resched_set_cpu[1],
+                      (unsigned long long) Syscall_debug_need_resched_set_cpu[2],
+                      (unsigned long long) Syscall_debug_need_resched_set_cpu[3],
+                      (unsigned long long) Syscall_debug_preempt_attempt_cpu[0],
+                      (unsigned long long) Syscall_debug_preempt_attempt_cpu[1],
+                      (unsigned long long) Syscall_debug_preempt_attempt_cpu[2],
+                      (unsigned long long) Syscall_debug_preempt_attempt_cpu[3],
+                      (unsigned long long) Syscall_debug_preempt_success_cpu[0],
+                      (unsigned long long) Syscall_debug_preempt_success_cpu[1],
+                      (unsigned long long) Syscall_debug_preempt_success_cpu[2],
+                      (unsigned long long) Syscall_debug_preempt_success_cpu[3],
+                      (unsigned long long) Syscall_debug_preempt_no_flag_cpu[0],
+                      (unsigned long long) Syscall_debug_preempt_no_flag_cpu[1],
+                      (unsigned long long) Syscall_debug_preempt_no_flag_cpu[2],
+                      (unsigned long long) Syscall_debug_preempt_no_flag_cpu[3]);
+        kdebug_printf("[AGENTDBG H13 FLAG_FLOW] timer_consume=[%llu,%llu,%llu,%llu] post_consume=[%llu,%llu,%llu,%llu] set_sleep=[%llu,%llu,%llu,%llu]\n",
+                      (unsigned long long) Syscall_debug_flag_consume_timer_cpu[0],
+                      (unsigned long long) Syscall_debug_flag_consume_timer_cpu[1],
+                      (unsigned long long) Syscall_debug_flag_consume_timer_cpu[2],
+                      (unsigned long long) Syscall_debug_flag_consume_timer_cpu[3],
+                      (unsigned long long) Syscall_debug_flag_consume_post_cpu[0],
+                      (unsigned long long) Syscall_debug_flag_consume_post_cpu[1],
+                      (unsigned long long) Syscall_debug_flag_consume_post_cpu[2],
+                      (unsigned long long) Syscall_debug_flag_consume_post_cpu[3],
+                      (unsigned long long) Syscall_debug_flag_set_sleep_cpu[0],
+                      (unsigned long long) Syscall_debug_flag_set_sleep_cpu[1],
+                      (unsigned long long) Syscall_debug_flag_set_sleep_cpu[2],
+                      (unsigned long long) Syscall_debug_flag_set_sleep_cpu[3]);
+        // #endregion
+    }
 }
 
 bool Syscall_handle_timer_preempt(interrupt_frame_t* frame, uint32_t cpu_index)
@@ -5450,12 +5823,17 @@ bool Syscall_handle_timer_preempt(interrupt_frame_t* frame, uint32_t cpu_index)
     if ((frame->cs & 0x3ULL) != 0x3ULL)
         return false;
 
+    Syscall_debug_preempt_attempts++;
+    Syscall_debug_preempt_attempt_cpu[cpu_index & 0x3U]++;
     uint64_t lock_flags = spin_lock_irqsave(&Syscall_state.proc_lock);
-    if (__atomic_exchange_n(&Syscall_state.cpu_need_resched[cpu_index], 0, __ATOMIC_ACQ_REL) == 0)
+    if (__atomic_exchange_n(&Syscall_state.cpu_need_timer_preempt[cpu_index], 0, __ATOMIC_ACQ_REL) == 0)
     {
+        Syscall_debug_preempt_no_flag++;
+        Syscall_debug_preempt_no_flag_cpu[cpu_index & 0x3U]++;
         spin_unlock_irqrestore(&Syscall_state.proc_lock, lock_flags);
         return false;
     }
+    Syscall_debug_flag_consume_timer_cpu[cpu_index & 0x3U]++;
 
     int32_t current_slot = Syscall_proc_get_current_slot_locked(cpu_index);
     if (current_slot < 0)
@@ -5480,6 +5858,7 @@ bool Syscall_handle_timer_preempt(interrupt_frame_t* frame, uint32_t cpu_index)
         current_slot = Syscall_proc_ensure_current_locked(cpu_index, &bootstrap_frame);
         if (current_slot < 0)
         {
+            Syscall_debug_preempt_no_current++;
             spin_unlock_irqrestore(&Syscall_state.proc_lock, lock_flags);
             return false;
         }
@@ -5500,6 +5879,7 @@ bool Syscall_handle_timer_preempt(interrupt_frame_t* frame, uint32_t cpu_index)
     int32_t next_slot = Syscall_proc_pick_next_locked(current_slot);
     if (next_slot < 0 || next_slot == current_slot)
     {
+        Syscall_debug_preempt_same_slot++;
         Syscall_state.cpu_slice_ticks[cpu_index] = 0;
         spin_unlock_irqrestore(&Syscall_state.proc_lock, lock_flags);
         return false;
@@ -5508,6 +5888,7 @@ bool Syscall_handle_timer_preempt(interrupt_frame_t* frame, uint32_t cpu_index)
     syscall_process_t* next = &Syscall_state.procs[(uint32_t) next_slot];
     if (!next->used || next->exiting || next->cr3_phys == 0)
     {
+        Syscall_debug_preempt_invalid_next++;
         Syscall_state.cpu_slice_ticks[cpu_index] = 0;
         spin_unlock_irqrestore(&Syscall_state.proc_lock, lock_flags);
         return false;
@@ -5525,6 +5906,8 @@ bool Syscall_handle_timer_preempt(interrupt_frame_t* frame, uint32_t cpu_index)
     if (next_fs_base != current_fs_base)
         Syscall_write_fs_base(next_fs_base);
 
+    Syscall_debug_preempt_success++;
+    Syscall_debug_preempt_success_cpu[cpu_index & 0x3U]++;
     return true;
 }
 
@@ -5541,9 +5924,19 @@ uint64_t Syscall_interrupt_handler(uint64_t syscall_num, syscall_frame_t* frame,
     if (cpu_index >= 256)
         cpu_index = apic_id;
 
+    Syscall_debug_irq_calls_cpu[cpu_index & 0x3U]++;
     uint64_t count = __atomic_add_fetch(&Syscall_state.count_per_cpu[cpu_index], 1, __ATOMIC_RELAXED);
     if (cpu_local)
         __atomic_store_n(&cpu_local->syscall_count, count, __ATOMIC_RELAXED);
+
+    if (syscall_num == SYS_READ)
+        Syscall_debug_nr_read++;
+    else if (syscall_num == SYS_WRITE)
+        Syscall_debug_nr_write++;
+    else if (syscall_num == SYS_SLEEP_MS)
+        Syscall_debug_nr_sleep++;
+    else
+        Syscall_debug_nr_other++;
 
     switch (syscall_num)
     {
@@ -5565,7 +5958,10 @@ uint64_t Syscall_interrupt_handler(uint64_t syscall_num, syscall_frame_t* frame,
         {
             bool sleep_ok = HPET_sleep_ms((uint32_t) frame->rdi);
             if (sleep_ok && cpu_index < 256)
+            {
                 __atomic_store_n(&Syscall_state.cpu_need_resched[cpu_index], 1, __ATOMIC_RELEASE);
+                Syscall_debug_flag_set_sleep_cpu[cpu_index & 0x3U]++;
+            }
             return sleep_ok ? 0 : (uint64_t) -1;
         }
 
@@ -5582,6 +5978,7 @@ uint64_t Syscall_interrupt_handler(uint64_t syscall_num, syscall_frame_t* frame,
             info.online_cpus = SMP_get_online_cpu_count();
             info.tick_hz = ISR_get_tick_hz();
             info.ticks = ISR_get_timer_ticks();
+            task_get_activity_counters(&info.sched_exec_total, &info.sched_idle_hlt_total);
             return Syscall_copy_to_user((void*) frame->rdi, &info, sizeof(info)) ? 0 : (uint64_t) -1;
         }
 
@@ -5720,16 +6117,261 @@ uint64_t Syscall_interrupt_handler(uint64_t syscall_num, syscall_frame_t* frame,
             }
 
             uint32_t owner_pid = Syscall_proc_current_pid(cpu_index, frame);
-            bool write_tty = !Syscall_proc_owner_is_driverland(owner_pid);
+            bool owner_is_driverland = Syscall_proc_owner_is_driverland(owner_pid);
+            bool write_tty = !owner_is_driverland;
+            bool mirror_kdebug = true;
+            uint32_t console_sid = Syscall_proc_current_console_sid(cpu_index, frame);
+            if (Syscall_state.console_lock_ready && console_sid != 0U)
+            {
+                uint64_t lock_flags = spin_lock_irqsave(&Syscall_state.console_lock);
+                int32_t route_slot = Syscall_console_route_find_locked(console_sid);
+                if (route_slot >= 0)
+                {
+                    syscall_console_route_t* route = &Syscall_state.console_routes[(uint32_t) route_slot];
+                    uint32_t route_flags = route->flags;
+                    write_tty = (route_flags & SYS_CONSOLE_ROUTE_FLAG_TTY) != 0U;
+                    if (!owner_is_driverland &&
+                        (route_flags & SYS_CONSOLE_ROUTE_FLAG_CAPTURE) != 0U &&
+                        (route_flags & SYS_CONSOLE_ROUTE_FLAG_TTY) == 0U)
+                    {
+                        /* Capture-only routes (GUI bridges) should not flood kdebug/serial. */
+                        mirror_kdebug = false;
+                    }
+                    Syscall_console_route_push_locked(route, kernel_buf, len);
+                }
+                spin_unlock_irqrestore(&Syscall_state.console_lock, lock_flags);
+            }
+
             for (size_t i = 0; i < len; i++)
             {
                 if (write_tty)
                     putc(kernel_buf[i]);
-                kdebug_putc(kernel_buf[i]);
+                if (mirror_kdebug)
+                    kdebug_putc(kernel_buf[i]);
             }
 
             kfree(kernel_buf);
             return (uint64_t) len;
+        }
+
+        case SYS_CONSOLE_ROUTE_SET:
+        {
+            uint32_t flags = (uint32_t) frame->rdi;
+            uint32_t allowed = SYS_CONSOLE_ROUTE_FLAG_CAPTURE | SYS_CONSOLE_ROUTE_FLAG_TTY;
+            if ((flags & ~allowed) != 0U)
+                return (uint64_t) -1;
+
+            if (!Syscall_state.console_lock_ready)
+                return (uint64_t) -1;
+
+            uint32_t console_sid = Syscall_proc_current_console_sid(cpu_index, frame);
+            if (console_sid == 0U)
+                return (uint64_t) -1;
+            uint32_t owner_pid = Syscall_proc_current_pid(cpu_index, frame);
+            if (owner_pid == 0U)
+                return (uint64_t) -1;
+
+            uint64_t lock_flags = spin_lock_irqsave(&Syscall_state.console_lock);
+            int32_t route_slot = Syscall_console_route_find_locked(console_sid);
+            if (flags == 0U)
+            {
+                if (route_slot >= 0)
+                    memset(&Syscall_state.console_routes[(uint32_t) route_slot], 0, sizeof(syscall_console_route_t));
+                spin_unlock_irqrestore(&Syscall_state.console_lock, lock_flags);
+                return 0ULL;
+            }
+
+            if (route_slot < 0)
+            {
+                route_slot = Syscall_console_route_alloc_locked(owner_pid, console_sid);
+                if (route_slot < 0)
+                {
+                    spin_unlock_irqrestore(&Syscall_state.console_lock, lock_flags);
+                    return (uint64_t) -1;
+                }
+            }
+
+            syscall_console_route_t* route = &Syscall_state.console_routes[(uint32_t) route_slot];
+            if (route->owner_pid != owner_pid)
+            {
+                spin_unlock_irqrestore(&Syscall_state.console_lock, lock_flags);
+                return (uint64_t) -1;
+            }
+            route->flags = flags;
+            if ((flags & SYS_CONSOLE_ROUTE_FLAG_CAPTURE) == 0U)
+            {
+                route->head = 0U;
+                route->tail = 0U;
+                route->count = 0U;
+            }
+            spin_unlock_irqrestore(&Syscall_state.console_lock, lock_flags);
+            return 0ULL;
+        }
+
+        case SYS_CONSOLE_ROUTE_READ:
+        {
+            char* user_buf = (char*) frame->rdi;
+            size_t cap = (size_t) frame->rsi;
+            if (!user_buf || cap == 0U)
+                return 0ULL;
+
+            if (cap > SYSCALL_CONSOLE_MAX_WRITE)
+                cap = SYSCALL_CONSOLE_MAX_WRITE;
+
+            if (!Syscall_state.console_lock_ready)
+                return 0ULL;
+
+            uint32_t console_sid = Syscall_proc_current_console_sid(cpu_index, frame);
+            if (console_sid == 0U)
+                return 0ULL;
+            uint32_t owner_pid = Syscall_proc_current_pid(cpu_index, frame);
+            if (owner_pid == 0U)
+                return 0ULL;
+
+            char* kernel_buf = (char*) kmalloc(cap);
+            if (!kernel_buf)
+                return (uint64_t) -1;
+
+            size_t copied = 0U;
+            uint64_t lock_flags = spin_lock_irqsave(&Syscall_state.console_lock);
+            int32_t route_slot = Syscall_console_route_find_locked(console_sid);
+            if (route_slot >= 0)
+            {
+                syscall_console_route_t* route = &Syscall_state.console_routes[(uint32_t) route_slot];
+                if (route->owner_pid == owner_pid &&
+                    (route->flags & SYS_CONSOLE_ROUTE_FLAG_CAPTURE) != 0U)
+                {
+                    copied = Syscall_console_route_pop_locked(route, kernel_buf, cap);
+                }
+            }
+            spin_unlock_irqrestore(&Syscall_state.console_lock, lock_flags);
+
+            if (copied == 0U)
+            {
+                kfree(kernel_buf);
+                return 0ULL;
+            }
+
+            if (!Syscall_copy_to_user(user_buf, kernel_buf, copied))
+            {
+                kfree(kernel_buf);
+                return (uint64_t) -1;
+            }
+
+            kfree(kernel_buf);
+            return (uint64_t) copied;
+        }
+
+        case SYS_CONSOLE_ROUTE_SET_SID:
+        {
+            uint32_t console_sid = (uint32_t) frame->rdi;
+            uint32_t flags = (uint32_t) frame->rsi;
+            uint32_t allowed = SYS_CONSOLE_ROUTE_FLAG_CAPTURE | SYS_CONSOLE_ROUTE_FLAG_TTY;
+            if (console_sid == 0U || (flags & ~allowed) != 0U)
+                return (uint64_t) -1;
+
+            if (!Syscall_state.console_lock_ready)
+                return (uint64_t) -1;
+
+            uint32_t caller_owner_pid = Syscall_proc_current_pid(cpu_index, frame);
+            if (caller_owner_pid == 0U)
+                return (uint64_t) -1;
+
+            uint64_t lock_flags = spin_lock_irqsave(&Syscall_state.console_lock);
+            int32_t route_slot = Syscall_console_route_find_locked(console_sid);
+            if (flags == 0U)
+            {
+                if (route_slot >= 0 &&
+                    Syscall_state.console_routes[(uint32_t) route_slot].owner_pid == caller_owner_pid)
+                {
+                    memset(&Syscall_state.console_routes[(uint32_t) route_slot], 0, sizeof(syscall_console_route_t));
+                }
+                spin_unlock_irqrestore(&Syscall_state.console_lock, lock_flags);
+                return 0ULL;
+            }
+
+            if (route_slot < 0)
+            {
+                spin_unlock_irqrestore(&Syscall_state.console_lock, lock_flags);
+                if (!Syscall_console_sid_manageable_by(caller_owner_pid, console_sid))
+                    return (uint64_t) -1;
+
+                lock_flags = spin_lock_irqsave(&Syscall_state.console_lock);
+                route_slot = Syscall_console_route_alloc_locked(caller_owner_pid, console_sid);
+                if (route_slot < 0)
+                {
+                    spin_unlock_irqrestore(&Syscall_state.console_lock, lock_flags);
+                    return (uint64_t) -1;
+                }
+            }
+
+            syscall_console_route_t* route = &Syscall_state.console_routes[(uint32_t) route_slot];
+            if (route->owner_pid != caller_owner_pid)
+            {
+                spin_unlock_irqrestore(&Syscall_state.console_lock, lock_flags);
+                return (uint64_t) -1;
+            }
+            route->flags = flags;
+            if ((flags & SYS_CONSOLE_ROUTE_FLAG_CAPTURE) == 0U)
+            {
+                route->head = 0U;
+                route->tail = 0U;
+                route->count = 0U;
+            }
+            spin_unlock_irqrestore(&Syscall_state.console_lock, lock_flags);
+            return 0ULL;
+        }
+
+        case SYS_CONSOLE_ROUTE_READ_SID:
+        {
+            uint32_t console_sid = (uint32_t) frame->rdi;
+            char* user_buf = (char*) frame->rsi;
+            size_t cap = (size_t) frame->rdx;
+            if (console_sid == 0U || !user_buf || cap == 0U)
+                return 0ULL;
+
+            if (cap > SYSCALL_CONSOLE_MAX_WRITE)
+                cap = SYSCALL_CONSOLE_MAX_WRITE;
+
+            if (!Syscall_state.console_lock_ready)
+                return 0ULL;
+
+            uint32_t caller_owner_pid = Syscall_proc_current_pid(cpu_index, frame);
+            if (caller_owner_pid == 0U)
+                return 0ULL;
+
+            char* kernel_buf = (char*) kmalloc(cap);
+            if (!kernel_buf)
+                return (uint64_t) -1;
+
+            size_t copied = 0U;
+            uint64_t lock_flags = spin_lock_irqsave(&Syscall_state.console_lock);
+            int32_t route_slot = Syscall_console_route_find_locked(console_sid);
+            if (route_slot >= 0)
+            {
+                syscall_console_route_t* route = &Syscall_state.console_routes[(uint32_t) route_slot];
+                if (route->owner_pid == caller_owner_pid &&
+                    (route->flags & SYS_CONSOLE_ROUTE_FLAG_CAPTURE) != 0U)
+                {
+                    copied = Syscall_console_route_pop_locked(route, kernel_buf, cap);
+                }
+            }
+            spin_unlock_irqrestore(&Syscall_state.console_lock, lock_flags);
+
+            if (copied == 0U)
+            {
+                kfree(kernel_buf);
+                return 0ULL;
+            }
+
+            if (!Syscall_copy_to_user(user_buf, kernel_buf, copied))
+            {
+                kfree(kernel_buf);
+                return (uint64_t) -1;
+            }
+
+            kfree(kernel_buf);
+            return (uint64_t) copied;
         }
 
         case SYS_EXIT:
@@ -5805,6 +6447,7 @@ uint64_t Syscall_interrupt_handler(uint64_t syscall_num, syscall_frame_t* frame,
             child->pid = child_pid;
             child->ppid = parent_pid;
             child->owner_pid = child_pid;
+            child->console_sid = child_pid;
             child->domain = parent->domain;
             child->exit_status = 0;
             child->thread_exit_value = 0;
@@ -6481,7 +7124,59 @@ mprotect_out:
             return Syscall_handle_getpeername(cpu_index, frame);
 
         case SYS_KBD_GET_SCANCODE:
+        {
+            uint32_t caller_pid = Syscall_proc_current_pid(cpu_index, frame);
+            uint8_t injected = 0U;
+            if (caller_pid != 0U && Syscall_kbd_inject_pop_for_pid(caller_pid, &injected))
+                return (uint64_t) injected;
+            if (caller_pid != 0U && Syscall_kbd_inject_is_target(caller_pid))
+            {
+                Syscall_kbd_inject_target_hits++;
+                return 0ULL;
+            }
             return (uint64_t) Keyboard_get_scancode();
+        }
+
+        case SYS_KBD_INJECT_SCANCODE:
+        {
+            uint32_t target_pid = (uint32_t) frame->rdi;
+            uint8_t scancode = (uint8_t) (frame->rsi & 0xFFU);
+            Syscall_kbd_inject_register_target(target_pid);
+            if (!Syscall_kbd_inject_push(target_pid, scancode))
+                return (uint64_t) -1;
+            return 0ULL;
+        }
+
+        case SYS_MOUSE_GET_EVENT:
+        {
+            syscall_mouse_event_t* user_event = (syscall_mouse_event_t*) frame->rdi;
+            if (!user_event)
+                return (uint64_t) -1;
+
+            syscall_mouse_event_t event;
+            if (!Mouse_get_event(&event))
+                return 0ULL;
+
+            if (!Syscall_copy_to_user(user_event, &event, sizeof(event)))
+                return (uint64_t) -1;
+
+            return 1ULL;
+        }
+
+        case SYS_MOUSE_DEBUG_INFO_GET:
+        {
+            syscall_mouse_debug_info_t* user_info = (syscall_mouse_debug_info_t*) frame->rdi;
+            if (!user_info)
+                return (uint64_t) -1;
+
+            syscall_mouse_debug_info_t info;
+            memset(&info, 0, sizeof(info));
+            if (!Mouse_get_debug_info(&info))
+                return (uint64_t) -1;
+            if (!Syscall_copy_to_user(user_info, &info, sizeof(info)))
+                return (uint64_t) -1;
+            return 0ULL;
+        }
 
         case SYS_FS_ISDIR:
         {
@@ -6745,6 +7440,7 @@ mprotect_out:
             thread->pid = tid;
             thread->ppid = parent->ppid;
             thread->owner_pid = parent->owner_pid;
+            thread->console_sid = parent->console_sid;
             thread->domain = parent->domain;
             thread->exit_status = 0;
             thread->thread_exit_value = 0;
@@ -6963,6 +7659,8 @@ uint64_t Syscall_post_handler(uint64_t syscall_ret, syscall_frame_t* frame, uint
 {
     if (!frame || !Syscall_state.proc_lock_ready)
         return syscall_ret;
+    Syscall_debug_post_calls++;
+    Syscall_debug_post_calls_cpu[cpu_index & 0x3U]++;
 
     if (cpu_index >= 256)
         cpu_index = 0;
@@ -6973,12 +7671,14 @@ uint64_t Syscall_post_handler(uint64_t syscall_ret, syscall_frame_t* frame, uint
     uint32_t cleanup_pid = 0;
     uint32_t cleanup_ppid = 0;
     uint32_t cleanup_owner_pid = 0;
+    uint32_t cleanup_console_sid = 0;
     uint32_t cleanup_tid = 0;
     int64_t cleanup_status = 0;
     int32_t cleanup_signal = 0;
     uint64_t cleanup_thread_value = 0;
     bool queue_exit_event = false;
     bool queue_thread_exit_event = false;
+    bool cleanup_console_route = false;
     uint64_t ret_for_next = syscall_ret;
     uintptr_t next_cr3 = Syscall_read_cr3_phys();
     uintptr_t next_fs_base = Syscall_read_fs_base();
@@ -7028,6 +7728,7 @@ uint64_t Syscall_post_handler(uint64_t syscall_ret, syscall_frame_t* frame, uint
         cleanup_pid = current->owner_pid;
         cleanup_ppid = current->ppid;
         cleanup_owner_pid = current->owner_pid;
+        cleanup_console_sid = current->console_sid;
         cleanup_tid = current->pid;
         cleanup_status = current->exit_status;
         cleanup_signal = current->terminated_by_signal ? current->term_signal : 0;
@@ -7035,6 +7736,7 @@ uint64_t Syscall_post_handler(uint64_t syscall_ret, syscall_frame_t* frame, uint
         queue_thread_exit_event = current->is_thread && cleanup_owner_pid != 0 && cleanup_tid != 0;
         queue_exit_event = (!owner_has_other_live && cleanup_ppid != 0 && cleanup_pid != 0);
         cleanup_fds = !owner_has_other_live;
+        cleanup_console_route = false;
         memset(current, 0, sizeof(*current));
         Syscall_state.cpu_current_proc[cpu_index] = SYSCALL_PROC_NONE;
         current_slot = -1;
@@ -7042,7 +7744,12 @@ uint64_t Syscall_post_handler(uint64_t syscall_ret, syscall_frame_t* frame, uint
 
     bool pick_next = (current_slot < 0);
     if (__atomic_exchange_n(&Syscall_state.cpu_need_resched[cpu_index], 0, __ATOMIC_ACQ_REL) != 0)
+    {
         pick_next = true;
+        Syscall_debug_flag_consume_post_cpu[cpu_index & 0x3U]++;
+    }
+    if (pick_next)
+        Syscall_debug_post_pick_next++;
 
     int32_t next_slot = current_slot;
     if (pick_next)
@@ -7057,6 +7764,11 @@ uint64_t Syscall_post_handler(uint64_t syscall_ret, syscall_frame_t* frame, uint
     }
 
     Syscall_state.cpu_current_proc[cpu_index] = (uint32_t) next_slot;
+    if (current_slot >= 0 && next_slot != current_slot)
+    {
+        Syscall_debug_post_switch++;
+        Syscall_debug_post_switch_cpu[cpu_index & 0x3U]++;
+    }
     Syscall_state.cpu_slice_ticks[cpu_index] = 0;
     syscall_process_t* next = &Syscall_state.procs[next_slot];
     frame->rdi = next->rdi;
@@ -7089,8 +7801,49 @@ uint64_t Syscall_post_handler(uint64_t syscall_ret, syscall_frame_t* frame, uint
         Syscall_write_fs_base(next_fs_base);
     if (cleanup_fds)
         Syscall_fd_cleanup_owner(cleanup_pid);
+    if (cleanup_console_route)
+        Syscall_console_route_clear_sid(cleanup_console_sid);
     if (free_old_cr3 && old_cr3_to_free != next_cr3)
         Syscall_free_address_space(old_cr3_to_free);
+
+    uint64_t now_ticks = ISR_get_timer_ticks();
+    uint64_t epoch = now_ticks / 2000ULL;
+    uint32_t debug_task_cpu = task_get_current_cpu_index();
+    uint32_t debug_apic_cpu = (uint32_t) APIC_get_current_lapic_id();
+    if (epoch != 0ULL &&
+        epoch > Syscall_debug_post_log_epoch &&
+        __atomic_exchange_n(&Syscall_debug_post_log_epoch, epoch, __ATOMIC_ACQ_REL) < epoch)
+    {
+        // #region agent log
+        kdebug_printf("[AGENTDBG H8 POST] tick=%llu post_calls=%llu pick_next=%llu switches=%llu cpu=%u task_cpu=%u apic=%u current=%d next=%d\n",
+                      (unsigned long long) now_ticks,
+                      (unsigned long long) Syscall_debug_post_calls,
+                      (unsigned long long) Syscall_debug_post_pick_next,
+                      (unsigned long long) Syscall_debug_post_switch,
+                      cpu_index,
+                      debug_task_cpu,
+                      debug_apic_cpu,
+                      current_slot,
+                      next_slot);
+        kdebug_printf("[AGENTDBG H12 SYSCALL_MIX] irq_cpu=[%llu,%llu,%llu,%llu] post_cpu=[%llu,%llu,%llu,%llu] sw_cpu=[%llu,%llu,%llu,%llu] read=%llu write=%llu sleep=%llu other=%llu\n",
+                      (unsigned long long) Syscall_debug_irq_calls_cpu[0],
+                      (unsigned long long) Syscall_debug_irq_calls_cpu[1],
+                      (unsigned long long) Syscall_debug_irq_calls_cpu[2],
+                      (unsigned long long) Syscall_debug_irq_calls_cpu[3],
+                      (unsigned long long) Syscall_debug_post_calls_cpu[0],
+                      (unsigned long long) Syscall_debug_post_calls_cpu[1],
+                      (unsigned long long) Syscall_debug_post_calls_cpu[2],
+                      (unsigned long long) Syscall_debug_post_calls_cpu[3],
+                      (unsigned long long) Syscall_debug_post_switch_cpu[0],
+                      (unsigned long long) Syscall_debug_post_switch_cpu[1],
+                      (unsigned long long) Syscall_debug_post_switch_cpu[2],
+                      (unsigned long long) Syscall_debug_post_switch_cpu[3],
+                      (unsigned long long) Syscall_debug_nr_read,
+                      (unsigned long long) Syscall_debug_nr_write,
+                      (unsigned long long) Syscall_debug_nr_sleep,
+                      (unsigned long long) Syscall_debug_nr_other);
+        // #endregion
+    }
 
     return ret_for_next;
 }

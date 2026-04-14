@@ -49,6 +49,16 @@
 #define SYS_GETPEERNAME       42
 #define SYS_LISTEN            43
 #define SYS_ACCEPT            44
+#define SYS_MOUSE_GET_EVENT   45
+#define SYS_CONSOLE_ROUTE_SET 46
+#define SYS_CONSOLE_ROUTE_READ 47
+#define SYS_CONSOLE_ROUTE_SET_SID 48
+#define SYS_CONSOLE_ROUTE_READ_SID 49
+#define SYS_MOUSE_DEBUG_INFO_GET 50
+#define SYS_KBD_INJECT_SCANCODE 51
+
+#define SYS_CONSOLE_ROUTE_FLAG_CAPTURE (1U << 0)
+#define SYS_CONSOLE_ROUTE_FLAG_TTY     (1U << 1)
 
 #define SYS_PROT_READ    (1ULL << 0)
 #define SYS_PROT_WRITE   (1ULL << 1)
@@ -140,6 +150,8 @@ typedef struct syscall_cpu_info
     uint32_t online_cpus;
     uint32_t tick_hz;
     uint64_t ticks;
+    uint64_t sched_exec_total;
+    uint64_t sched_idle_hlt_total;
 } syscall_cpu_info_t;
 
 typedef struct syscall_sched_info
@@ -185,6 +197,45 @@ typedef struct syscall_proc_info
     uint32_t term_signal;
     int64_t exit_status;
 } syscall_proc_info_t;
+
+typedef struct syscall_mouse_event
+{
+    int16_t dx;
+    int16_t dy;
+    uint8_t buttons;
+    uint8_t reserved0;
+    uint8_t reserved1;
+    uint8_t reserved2;
+} syscall_mouse_event_t;
+
+typedef struct syscall_mouse_debug_info
+{
+    uint64_t irq12_callbacks;
+    uint64_t irq12_bytes_total;
+    uint64_t irq12_aux_bytes;
+    uint64_t irq12_non_aux_bytes;
+    uint64_t irq12_drain_budget_hits;
+    uint64_t irq1_aux_bytes;
+    uint64_t poll_cycles;
+    uint64_t poll_bytes_total;
+    uint64_t poll_aux_bytes;
+    uint64_t poll_non_aux_bytes;
+    uint64_t events_pushed;
+    uint64_t events_dropped_full;
+    uint64_t events_popped;
+    uint64_t get_event_empty;
+    uint64_t packet_sync_drops;
+    uint64_t packet_overflow_drops;
+    uint16_t queue_count;
+    uint16_t queue_write_pos;
+    uint16_t queue_read_pos;
+    uint8_t packet_index;
+    uint8_t ready;
+    uint8_t reserved[2];
+    uint64_t forced_request_attempts;
+    uint64_t forced_request_success;
+    uint64_t forced_request_fail;
+} syscall_mouse_debug_info_t;
 #endif
 
 #endif

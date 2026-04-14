@@ -16,6 +16,12 @@
 #include <string.h>
 
 static APIC_runtime_state_t APIC_runtime_state;
+static uint64_t APIC_debug_tick_cpu_mismatch = 0;
+static uint64_t APIC_debug_tick_log_epoch = 0;
+static uint64_t APIC_debug_tick_user_cpu[4] = { 0, 0, 0, 0 };
+static uint64_t APIC_debug_tick_kernel_cpu[4] = { 0, 0, 0, 0 };
+static uint64_t APIC_debug_last_kernel_tick_rip = 0;
+static uint64_t APIC_debug_same_kernel_tick_rip = 0;
 
 static inline void APIC_cpuid_leaf1(uint32_t* eax,
                                     uint32_t* ebx,
@@ -439,10 +445,10 @@ void APIC_register_IRQ_vector(int vec, int irq, bool disable)
     if (irq < 0 || (size_t) irq >= irq_override_count)
         return;
 
-    APIC_register_GSI_vector(vec, APIC_runtime_state.topology.irq_overrides[irq], disable);
+    APIC_register_GSI_vector(vec, APIC_runtime_state.topology.irq_overrides[irq], disable, irq);
 }
 
-void APIC_register_GSI_vector(int vec, uint32_t gsi, bool disable)
+void APIC_register_GSI_vector(int vec, uint32_t gsi, bool disable, int isa_irq_slot)
 {
     if (APIC_runtime_state.topology.ioapic_count == 0)
         return;
@@ -527,6 +533,15 @@ void APIC_register_GSI_vector(int vec, uint32_t gsi, bool disable)
 
     if (!is_isa && (polarity == APIC_MADT_INTI_POLARITY_CONFORMS || trigger == APIC_MADT_INTI_TRIGGER_CONFORMS))
         kdebug_printf("[APIC] warning: GSI %u uses 'conforms' on non-ISA source bus, keeping high/edge defaults\n", gsi);
+
+    /* ISA IRQ12 = PS/2 auxiliary (mouse). ACPI/VM tables often mark it level-low; the i8042 line is
+     * effectively edge-like. Level+low on IOAPIC + LAPIC EOI ordering caused IRQ12 storms after the first
+     * packet (tiny cursor move, then hang right after the first IOAPIC-delivery log on vec 0x2C). */
+    if (isa_irq_slot == 12)
+    {
+        active_low = false;
+        level_triggered = false;
+    }
 
     if (active_low)
         IO_lo |= APIC_IORED_POLARITY_LOW;
@@ -761,9 +776,53 @@ static void APIC_timer_callback(interrupt_frame_t* frame)
 
     task_scheduler_on_tick();
     uint32_t cpu_slot = (uint32_t) APIC_get_current_lapic_id() & 0xFFU;
+    uint32_t cpu_task = task_get_current_cpu_index();
+    uint32_t cpu_bin = cpu_slot & 0x3U;
+    if ((frame->cs & 0x3ULL) == 0x3ULL)
+        APIC_debug_tick_user_cpu[cpu_bin]++;
+    else
+    {
+        APIC_debug_tick_kernel_cpu[cpu_bin]++;
+        uint64_t rip = frame->rip;
+        if (rip == APIC_debug_last_kernel_tick_rip)
+            APIC_debug_same_kernel_tick_rip++;
+        else
+            APIC_debug_same_kernel_tick_rip = 1;
+        APIC_debug_last_kernel_tick_rip = rip;
+    }
+    if ((cpu_task & 0xFFU) != cpu_slot)
+        APIC_debug_tick_cpu_mismatch++;
     (void) Syscall_handle_timer_preempt(frame, cpu_slot);
     APIC_send_EOI();
     task_irq_exit();
+
+    uint64_t now_ticks = ISR_get_timer_ticks();
+    uint64_t epoch = now_ticks / 2000ULL;
+    if (epoch != 0ULL &&
+        epoch > APIC_debug_tick_log_epoch &&
+        __atomic_exchange_n(&APIC_debug_tick_log_epoch, epoch, __ATOMIC_ACQ_REL) < epoch)
+    {
+        // #region agent log
+        kdebug_printf("[AGENTDBG H10 APIC] tick=%llu cpu_slot=%u cpu_task=%u mismatch=%llu\n",
+                      (unsigned long long) now_ticks,
+                      cpu_slot,
+                      cpu_task,
+                      (unsigned long long) APIC_debug_tick_cpu_mismatch);
+        kdebug_printf("[AGENTDBG H11 TICK_CS] user=[%llu,%llu,%llu,%llu] kernel=[%llu,%llu,%llu,%llu]\n",
+                      (unsigned long long) APIC_debug_tick_user_cpu[0],
+                      (unsigned long long) APIC_debug_tick_user_cpu[1],
+                      (unsigned long long) APIC_debug_tick_user_cpu[2],
+                      (unsigned long long) APIC_debug_tick_user_cpu[3],
+                      (unsigned long long) APIC_debug_tick_kernel_cpu[0],
+                      (unsigned long long) APIC_debug_tick_kernel_cpu[1],
+                      (unsigned long long) APIC_debug_tick_kernel_cpu[2],
+                      (unsigned long long) APIC_debug_tick_kernel_cpu[3]);
+        kdebug_printf("[AGENTDBG H14 KRIP] rip=0x%llX same=%llu cs=0x%llX\n",
+                      (unsigned long long) APIC_debug_last_kernel_tick_rip,
+                      (unsigned long long) APIC_debug_same_kernel_tick_rip,
+                      (unsigned long long) frame->cs);
+        // #endregion
+    }
 }
 
 static bool APIC_wait_icr_idle(uint32_t spin_limit)

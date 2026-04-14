@@ -15,6 +15,10 @@ static ISR_runtime_state_t ISR_state = {
     .tick_source = TICK_SOURCE_PIT_IOAPIC,
     .tick_hz = 1000
 };
+static uint64_t ISR_debug_last_total_tick = 0;
+static uint64_t ISR_debug_tick_gap_max = 0;
+static uint64_t ISR_debug_tick_gap_over1 = 0;
+static uint64_t ISR_debug_tick_log_epoch = 0;
 
 static void ISR_serial_puts_unsafe(const char* str)
 {
@@ -290,7 +294,38 @@ void IRQ_handler(interrupt_frame_t *frame)
         else
             total_ticks = __atomic_load_n(&ISR_state.timer_ticks, __ATOMIC_RELAXED);
 
+        if (contributes_to_wall_clock)
+        {
+            uint64_t previous_total = ISR_debug_last_total_tick;
+            if (previous_total != 0 && total_ticks > previous_total)
+            {
+                uint64_t gap = total_ticks - previous_total;
+                if (gap > ISR_debug_tick_gap_max)
+                    ISR_debug_tick_gap_max = gap;
+                if (gap > 1ULL)
+                    ISR_debug_tick_gap_over1++;
+            }
+            ISR_debug_last_total_tick = total_ticks;
+        }
+
         Syscall_on_timer_tick(tick_cpu_slot);
+
+        uint64_t epoch = total_ticks / 2000ULL;
+        if (contributes_to_wall_clock &&
+            epoch != 0ULL &&
+            epoch > ISR_debug_tick_log_epoch &&
+            __atomic_exchange_n(&ISR_debug_tick_log_epoch, epoch, __ATOMIC_ACQ_REL) < epoch)
+        {
+            // #region agent log
+            kdebug_printf("[AGENTDBG H5 ISR] tick_src=%s hz=%u total=%llu gap_max=%llu gap_over1=%llu bsp_cpu_slot=%u\n",
+                          ISR_tick_source_name(source),
+                          ISR_get_tick_hz(),
+                          (unsigned long long) total_ticks,
+                          (unsigned long long) ISR_debug_tick_gap_max,
+                          (unsigned long long) ISR_debug_tick_gap_over1,
+                          (unsigned) tick_cpu_slot);
+            // #endregion
+        }
 
         if ((cpu_ticks % TICK_LOG_PERIOD) == 0)
         {
@@ -309,6 +344,11 @@ void IRQ_handler(interrupt_frame_t *frame)
 
     if (APIC_is_enabled())
     {
+        /* LAPIC EOI before any slow serial diagnostics: delaying EOI on level-triggered IOAPIC lines can
+         * wedge the BSP (especially IRQ12 / PS/2) while kdebug_printf holds the UART. */
+        if ((uint8_t) vector != TICK_VECTOR)
+            APIC_send_EOI();
+
         if ((uint8_t) vector != TICK_VECTOR &&
             __atomic_exchange_n(&ISR_state.ioapic_vector_seen[irq], 1, __ATOMIC_ACQ_REL) == 0)
         {
@@ -347,10 +387,6 @@ void IRQ_handler(interrupt_frame_t *frame)
                               (unsigned long long) pic_hits,
                               (unsigned long long) range_hits);
         }
-
-        // Vector 0x20 acknowledges LAPIC EOI in the active tick callback (PIT during calibration or LAPIC timer).
-        if ((uint8_t) vector != TICK_VECTOR)
-            APIC_send_EOI();
     }
     else
         PIC_send_EOI((uint8_t) irq);

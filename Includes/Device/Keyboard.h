@@ -2,6 +2,7 @@
 #define _KEYBOARD_H
 
 #include <CPU/ISR.h>
+#include <Debug/Spinlock.h>
 
 #include <stdbool.h>
 #include <stdint.h>
@@ -13,7 +14,7 @@
 
 #define PS2_ACK                 0xFA
 
-#define SCANCODE_BUFFER_SIZE    8
+#define SCANCODE_BUFFER_SIZE    128
 
 typedef struct Keyboard_runtime_state
 {
@@ -21,7 +22,7 @@ typedef struct Keyboard_runtime_state
     uint8_t scancode_buffer_length;
     uint8_t write_pos;
     uint8_t read_pos;
-    volatile uint32_t lock;
+    spinlock_t lock;
     bool is_shifting;
     bool is_caplocked;
     bool is_vernum;
@@ -31,6 +32,7 @@ void Keyboard_init(void);
 
 void Keyboard_wait_ack(void);
 void Keyboard_update_leds(uint8_t);
+void Keyboard_enqueue_scancode_from_poll(uint8_t scancode);
 
 uint8_t Keyboard_get_scancode(void);
 bool Keyboard_is_uppercase(void);

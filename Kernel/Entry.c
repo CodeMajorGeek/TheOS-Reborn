@@ -2,6 +2,7 @@
 #include <Boot/EntryConfig.h>
 
 #include <Device/Keyboard.h>
+#include <Device/Mouse.h>
 #include <FileSystem/ext4.h>
 #include <Debug/Logger.h>
 #include <Debug/KDebug.h>
@@ -47,7 +48,7 @@ extern void* kernel_stack_top;
 extern void* kernel_stack_bottom;
 
 static APIC_MADT_t* MADT = NULL;
-static const uint32_t BSP_TIMER_HZ = 100;
+static const uint32_t BSP_TIMER_HZ = 250;
 static const uint32_t PIT_TIMER_HZ = 1000;
 static uint16_t boot_tty_shadow[VGA_WIDTH * VGA_HEIGHT];
 
@@ -531,6 +532,8 @@ __attribute__((__noreturn__)) void k_entry(void)
 
     Keyboard_init();
     kdebug_puts("[BOOT] keyboard init\n");
+    Mouse_init();
+    kdebug_printf("[BOOT] mouse init ready=%s\n", Mouse_is_ready() ? "yes" : "no");
     Syscall_init();
     kdebug_puts("[BOOT] syscall init\n");
     AHCI_write_guard_disallow_all();

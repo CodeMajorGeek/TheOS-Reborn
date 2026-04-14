@@ -121,6 +121,7 @@ typedef struct drm_runtime_state
     uint32_t next_file_id;
     uint32_t next_buffer_id;
     uint32_t next_blob_id;
+    uint32_t master_file_id;
     spinlock_t lock;
     bool lock_ready;
     drm_file_t files[DRM_MAX_FILES];
@@ -142,6 +143,9 @@ bool DRM_is_available(void);
 
 bool DRM_open_file(uint32_t owner_pid, uint32_t* out_file_id);
 void DRM_close_file(uint32_t file_id);
+bool DRM_set_master(uint32_t file_id);
+bool DRM_drop_master(uint32_t file_id);
+bool DRM_is_master(uint32_t file_id);
 
 bool DRM_get_resources(uint32_t file_id, drm_mode_get_resources_t* io);
 bool DRM_get_connector(uint32_t file_id,

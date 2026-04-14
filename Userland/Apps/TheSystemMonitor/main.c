@@ -13,6 +13,8 @@ typedef struct monitor_options
 {
     bool once;
     bool help;
+    bool no_input;
+    bool no_clear;
     uint32_t interval_ms;
     uint32_t iterations;
 } monitor_options_t;
@@ -40,6 +42,8 @@ static void monitor_print_help(const char* prog)
     printf("  --once                Print one snapshot and exit\n");
     printf("  --interval <ms>       Refresh interval in milliseconds (default: %u)\n", MONITOR_DEFAULT_INTERVAL_MS);
     printf("  --iterations <n>      Number of refresh iterations in live mode (0 = infinite)\n");
+    printf("  --no-input            Do not poll keyboard (ESC disabled)\n");
+    printf("  --no-clear            Do not clear terminal between refresh frames\n");
     printf("  -h, --help            Show this help\n");
     printf("\n");
     printf("Live mode key: press ESC to quit.\n");
@@ -69,6 +73,8 @@ static bool monitor_parse_args(int argc, char** argv, monitor_options_t* out_opt
     monitor_options_t opts;
     opts.once = false;
     opts.help = false;
+    opts.no_input = false;
+    opts.no_clear = false;
     opts.interval_ms = MONITOR_DEFAULT_INTERVAL_MS;
     opts.iterations = 0U;
 
@@ -109,6 +115,18 @@ static bool monitor_parse_args(int argc, char** argv, monitor_options_t* out_opt
 
             opts.iterations = parsed;
             i++;
+            continue;
+        }
+
+        if (strcmp(arg, "--no-input") == 0)
+        {
+            opts.no_input = true;
+            continue;
+        }
+
+        if (strcmp(arg, "--no-clear") == 0)
+        {
+            opts.no_clear = true;
             continue;
         }
 
@@ -194,6 +212,46 @@ static bool monitor_poll_escape(void)
 static void monitor_clear_screen(void)
 {
     (void) clear_screen();
+}
+
+static uint64_t monitor_cpu_prev_exec;
+static uint64_t monitor_cpu_prev_idle;
+static bool monitor_cpu_have_prev;
+
+static void monitor_print_cpu_usage(const syscall_cpu_info_t* cpu)
+{
+    if (!cpu)
+        return;
+
+    uint64_t exec = cpu->sched_exec_total;
+    uint64_t idle = cpu->sched_idle_hlt_total;
+
+    if (!monitor_cpu_have_prev)
+    {
+        monitor_cpu_prev_exec = exec;
+        monitor_cpu_prev_idle = idle;
+        monitor_cpu_have_prev = true;
+        printf("  cpu_usage    : ... (next refresh)\n");
+        return;
+    }
+
+    uint64_t d_exec = exec - monitor_cpu_prev_exec;
+    uint64_t d_idle = idle - monitor_cpu_prev_idle;
+    monitor_cpu_prev_exec = exec;
+    monitor_cpu_prev_idle = idle;
+
+    uint64_t den = d_exec + d_idle;
+    if (den == 0ULL)
+    {
+        printf("  cpu_usage    : n/a\n");
+        return;
+    }
+
+    uint32_t pct = (uint32_t) ((100ULL * d_exec + den / 2ULL) / den);
+    if (pct > 100U)
+        pct = 100U;
+
+    printf("  cpu_usage    : ~%u%% (work vs idle-hlt samples)\n", (unsigned int) pct);
 }
 
 static void monitor_format_uptime(char* out, size_t out_size, uint64_t ticks, uint32_t tick_hz)
@@ -285,6 +343,7 @@ static void monitor_render(const monitor_snapshot_t* snap,
         printf("  cpu_index    : %u\n", snap->cpu.cpu_index);
         printf("  apic_id      : %u\n", snap->cpu.apic_id);
         printf("  online_cpus  : %u\n", snap->cpu.online_cpus);
+        monitor_print_cpu_usage(&snap->cpu);
     }
     else
     {
@@ -355,7 +414,16 @@ static void monitor_render(const monitor_snapshot_t* snap,
     putc('\n');
 
     printf("\n");
-    printf("  PID   PPID  OWN   DOM  TYPE     STATE    CPU  SIG  EXIT\n");
+    printf("  %-5s %-5s %-5s %-4s %-7s %-8s %-5s %-4s %-6s\n",
+           "pid",
+           "ppid",
+           "own",
+           "dom",
+           "type",
+           "state",
+           "cpu",
+           "sig",
+           "exit");
 
     for (uint32_t i = 0; i < snap->proc_copied; i++)
     {
@@ -376,7 +444,7 @@ static void monitor_render(const monitor_snapshot_t* snap,
         else
             snprintf(sig_text, sizeof(sig_text), "-");
 
-        printf("  %-5u %-5u %-5u %-4s %-8s %-8s %-4s %-4s %lld\n",
+        printf("  %-5u %-5u %-5u %-4s %-7s %-8s %-5s %-4s %-6lld\n",
                proc->pid,
                proc->ppid,
                proc->owner_pid,
@@ -409,7 +477,7 @@ int main(int argc, char** argv)
     {
         monitor_snapshot_t snapshot;
         monitor_collect_snapshot(&snapshot);
-        monitor_render(&snapshot, frame, opts.interval_ms, !opts.once);
+        monitor_render(&snapshot, frame, opts.interval_ms, (!opts.once && !opts.no_clear));
         frame++;
 
         if (opts.once)
@@ -420,7 +488,7 @@ int main(int argc, char** argv)
         uint32_t remaining = opts.interval_ms;
         while (remaining > 0U)
         {
-            if (monitor_poll_escape())
+            if (!opts.no_input && monitor_poll_escape())
                 return 0;
 
             uint32_t slice = (remaining > MONITOR_POLL_SLICE_MS) ? MONITOR_POLL_SLICE_MS : remaining;

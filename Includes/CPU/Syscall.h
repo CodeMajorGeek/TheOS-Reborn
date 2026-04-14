@@ -24,6 +24,8 @@
 #define SYSCALL_MAX_PROCS              32U
 #define SYSCALL_MAX_EXIT_EVENTS        64U
 #define SYSCALL_MAX_THREAD_EXIT_EVENTS 64U
+#define SYSCALL_MAX_CONSOLE_ROUTES     16U
+#define SYSCALL_CONSOLE_CAPTURE_SIZE   16384U
 #define SYSCALL_PATH_MAX_COMPONENTS    32U
 #define SYSCALL_PATH_COMPONENT_MAX     255U
 #define SYSCALL_PROC_NONE              0xFFFFFFFFU
@@ -87,7 +89,7 @@
 #define SYSCALL_ELF64_ST_TYPE(info)    ((uint8_t) ((info) & 0x0FU))
 #define SYSCALL_PAGE_FAULT_PRESENT     (1ULL << 0)
 #define SYSCALL_PAGE_FAULT_WRITE       (1ULL << 1)
-#define SYSCALL_PREEMPT_QUANTUM_TICKS  4U
+#define SYSCALL_PREEMPT_QUANTUM_TICKS  2U
 #define SYSCALL_COW_MAX_REFS           32768U
 #define SYSCALL_RFLAGS_IF              (1ULL << 9)
 
@@ -155,6 +157,7 @@ typedef struct syscall_process
     uint32_t pid;
     uint32_t ppid;
     uint32_t owner_pid;
+    uint32_t console_sid;
     uint32_t domain;
     int64_t exit_status;
     uint64_t thread_exit_value;
@@ -181,6 +184,18 @@ typedef struct syscall_process
     uint64_t rsp;
     uint64_t pending_rax;
 } syscall_process_t;
+
+typedef struct syscall_console_route
+{
+    bool used;
+    uint32_t owner_pid;
+    uint32_t console_sid;
+    uint32_t flags;
+    uint32_t head;
+    uint32_t tail;
+    uint32_t count;
+    char buffer[SYSCALL_CONSOLE_CAPTURE_SIZE];
+} syscall_console_route_t;
 
 typedef struct syscall_cow_ref
 {
@@ -273,15 +288,19 @@ typedef struct syscall_runtime_state
     spinlock_t vm_lock;
     bool vm_lock_ready;
     syscall_process_t procs[SYSCALL_MAX_PROCS];
+    syscall_console_route_t console_routes[SYSCALL_MAX_CONSOLE_ROUTES];
     syscall_exit_event_t exit_events[SYSCALL_MAX_EXIT_EVENTS];
     syscall_thread_exit_event_t thread_exit_events[SYSCALL_MAX_THREAD_EXIT_EVENTS];
     syscall_cow_ref_t cow_refs[SYSCALL_COW_MAX_REFS];
     uint32_t cpu_current_proc[256];
     uint8_t cpu_need_resched[256];
+    uint8_t cpu_need_timer_preempt[256];
     uint8_t cpu_slice_ticks[256];
     uint32_t next_pid;
     spinlock_t proc_lock;
     bool proc_lock_ready;
+    spinlock_t console_lock;
+    bool console_lock_ready;
     spinlock_t cow_lock;
     bool cow_lock_ready;
 } syscall_runtime_state_t;

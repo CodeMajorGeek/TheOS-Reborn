@@ -30,6 +30,10 @@ static char* const TheApp_dhcpd_argv[] = {
     NULL
 };
 
+static char* const TheApp_windowserver_argv[] = {
+    (char*) "TheWindowServer",
+    NULL
+};
 static void theapp_prepare_runtime_dirs(void)
 {
     (void) mkdir("/var", 0755U);
@@ -111,6 +115,14 @@ int main(int argc, char** argv, char** envp)
 
     theapp_service_t services[] = {
         {
+            .name = "TheShell",
+            .path = "/bin/TheShell",
+            .argv = TheApp_shell_argv,
+            .respawn = true,
+            .restart_delay_ms = THEAPP_RESTART_DELAY_SHELL_MS,
+            .pid = 0
+        },
+        {
             .name = "TheDHCPd",
             .path = "/drv/TheDHCPd",
             .argv = TheApp_dhcpd_argv,
@@ -119,11 +131,11 @@ int main(int argc, char** argv, char** envp)
             .pid = 0
         },
         {
-            .name = "TheShell",
-            .path = "/bin/TheShell",
-            .argv = TheApp_shell_argv,
-            .respawn = true,
-            .restart_delay_ms = THEAPP_RESTART_DELAY_SHELL_MS,
+            .name = "TheWindowServer",
+            .path = "/bin/TheWindowServer",
+            .argv = TheApp_windowserver_argv,
+            .respawn = false,
+            .restart_delay_ms = 0U,
             .pid = 0
         }
     };

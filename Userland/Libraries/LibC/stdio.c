@@ -209,6 +209,7 @@ static bool stdio_input_capslock = false;
 static bool stdio_input_altgr = false;
 static bool stdio_input_ctrl = false;
 static bool stdio_input_numlock = true;
+static bool stdio_input_extended_prefix = false;
 #define STDIO_KEYMAP_SIZE         128U
 #define STDIO_KBD_CONF_DEFAULT    "/system/keyboard.conf"
 #define STDIO_KBD_BASE_DEFAULT    "/system/qwerty.conf"
@@ -661,109 +662,133 @@ static char stdio_scancode_to_ascii(uint8_t scancode)
     return use_shift ? (shifted ? shifted : base) : base;
 }
 
+int keyboard_decode_scancode(uint8_t raw_scancode, int* out_key)
+{
+    if (!out_key)
+    {
+        errno = EINVAL;
+        return -1;
+    }
+
+    stdio_keyboard_ensure_ready();
+
+    if (raw_scancode == 0xE0U)
+    {
+        stdio_input_extended_prefix = true;
+        return 0;
+    }
+
+    if (stdio_input_extended_prefix)
+    {
+        stdio_input_extended_prefix = false;
+        if (raw_scancode == 0x1DU)
+        {
+            stdio_input_ctrl = true;
+            return 0;
+        }
+        if (raw_scancode == 0x9DU)
+        {
+            stdio_input_ctrl = false;
+            return 0;
+        }
+        if (raw_scancode == 0x38U)
+        {
+            stdio_input_altgr = true;
+            return 0;
+        }
+        if (raw_scancode == 0xB8U)
+        {
+            stdio_input_altgr = false;
+            return 0;
+        }
+        if (raw_scancode == 0x48U)
+        {
+            *out_key = STDIO_KEY_UP;
+            return 1;
+        }
+        if (raw_scancode == 0x50U)
+        {
+            *out_key = STDIO_KEY_DOWN;
+            return 1;
+        }
+        if (raw_scancode == 0x4BU)
+        {
+            *out_key = STDIO_KEY_LEFT;
+            return 1;
+        }
+        if (raw_scancode == 0x4DU)
+        {
+            *out_key = STDIO_KEY_RIGHT;
+            return 1;
+        }
+        if (raw_scancode == 0x53U)
+        {
+            *out_key = STDIO_KEY_DELETE;
+            return 1;
+        }
+    }
+
+    switch (raw_scancode)
+    {
+        case 0x2A:
+        case 0x36:
+            stdio_input_shift = true;
+            return 0;
+        case 0xAA:
+        case 0xB6:
+            stdio_input_shift = false;
+            return 0;
+        case 0x1D:
+            stdio_input_ctrl = true;
+            return 0;
+        case 0x9D:
+            stdio_input_ctrl = false;
+            return 0;
+        case 0x3A:
+            stdio_input_capslock = !stdio_input_capslock;
+            return 0;
+        case 0x45:
+            stdio_input_numlock = !stdio_input_numlock;
+            return 0;
+        default:
+            break;
+    }
+
+    if ((raw_scancode & 0x80U) != 0U)
+        return 0;
+
+    if (raw_scancode == 0x01U)
+    {
+        *out_key = 27;
+        return 1;
+    }
+
+    char c = stdio_scancode_to_ascii(raw_scancode);
+    if (c == 0)
+        return 0;
+
+    if (stdio_input_ctrl)
+        c = stdio_apply_ctrl_modifier(c);
+
+    *out_key = (unsigned char) c;
+    return 1;
+}
+
 static int stdio_read_key(void)
 {
-    stdio_keyboard_ensure_ready();
-    bool extended_prefix = false;
-
     for (;;)
     {
         int code = sys_kbd_get_scancode();
         if (code <= 0)
         {
-            (void) sys_sleep_ms(10);
+            (void) sys_sleep_ms(1);
             continue;
         }
 
-        uint8_t scancode = (uint8_t) code;
-        if (scancode == 0xE0U)
-        {
-            extended_prefix = true;
-            continue;
-        }
-
-        if (extended_prefix)
-        {
-            if (scancode == 0x1DU)
-            {
-                stdio_input_ctrl = true;
-                extended_prefix = false;
-                continue;
-            }
-            if (scancode == 0x9DU)
-            {
-                stdio_input_ctrl = false;
-                extended_prefix = false;
-                continue;
-            }
-            if (scancode == 0x38U)
-            {
-                stdio_input_altgr = true;
-                extended_prefix = false;
-                continue;
-            }
-            if (scancode == 0xB8U)
-            {
-                stdio_input_altgr = false;
-                extended_prefix = false;
-                continue;
-            }
-            if (scancode == 0x48U)
-                return STDIO_KEY_UP;
-            if (scancode == 0x50U)
-                return STDIO_KEY_DOWN;
-            if (scancode == 0x4BU)
-                return STDIO_KEY_LEFT;
-            if (scancode == 0x4DU)
-                return STDIO_KEY_RIGHT;
-            if (scancode == 0x53U)
-                return STDIO_KEY_DELETE;
-        }
-
-        switch (scancode)
-        {
-            case 0x2A:
-            case 0x36:
-                stdio_input_shift = true;
-                extended_prefix = false;
-                continue;
-            case 0xAA:
-            case 0xB6:
-                stdio_input_shift = false;
-                extended_prefix = false;
-                continue;
-            case 0x1D:
-                stdio_input_ctrl = true;
-                extended_prefix = false;
-                continue;
-            case 0x9D:
-                stdio_input_ctrl = false;
-                extended_prefix = false;
-                continue;
-            case 0x3A:
-                stdio_input_capslock = !stdio_input_capslock;
-                extended_prefix = false;
-                continue;
-            case 0x45:
-                stdio_input_numlock = !stdio_input_numlock;
-                extended_prefix = false;
-                continue;
-            default:
-                break;
-        }
-
-        extended_prefix = false;
-        if ((scancode & 0x80U) != 0)
-            continue;
-
-        char c = stdio_scancode_to_ascii(scancode);
-        if (c == 0)
-            continue;
-
-        if (stdio_input_ctrl)
-            c = stdio_apply_ctrl_modifier(c);
-
-        return (unsigned char) c;
+        int key = 0;
+        int rc = keyboard_decode_scancode((uint8_t) code, &key);
+        if (rc > 0)
+            return key;
     }
 }
 #endif
@@ -780,6 +805,7 @@ int keyboard_load_config(const char* config_path)
     stdio_input_altgr = false;
     stdio_input_ctrl = false;
     stdio_input_numlock = true;
+    stdio_input_extended_prefix = false;
 
     bool loaded_base = stdio_keyboard_load_layout_file(STDIO_KBD_BASE_DEFAULT);
 
@@ -964,16 +990,30 @@ int __printf(char* buff, size_t buff_len, const char* __restrict format, va_list
         format++; // Skip '%'
 
         bool zero_pad = false;
+        bool left_align = false;
         size_t width = 0;
         int precision = -1;
         bool is_long = false;
         bool is_long_long = false;
 
-        if (*format == '0')
+        for (;;)
         {
-            zero_pad = true;
-            format++;
+            if (*format == '-')
+            {
+                left_align = true;
+                format++;
+                continue;
+            }
+            if (*format == '0')
+            {
+                zero_pad = true;
+                format++;
+                continue;
+            }
+            break;
         }
+        if (left_align)
+            zero_pad = false;
 
         while (printf_is_digit(*format))
         {
@@ -1020,11 +1060,13 @@ int __printf(char* buff, size_t buff_len, const char* __restrict format, va_list
             char c = (char) va_arg(parameters, int);
             size_t pad = (width > 1U) ? (width - 1U) : 0U;
 
-            if (printf_append_repeat(buff, write_limit, &written, ' ', pad) == EOF)
+            if (!left_align && printf_append_repeat(buff, write_limit, &written, ' ', pad) == EOF)
                 return EOF;
             if (uppercase && c >= 'a' && c <= 'z')
                 c = (char) (c - ('a' - 'A'));
             if (printf_append_char(buff, write_limit, &written, c) == EOF)
+                return EOF;
+            if (left_align && printf_append_repeat(buff, write_limit, &written, ' ', pad) == EOF)
                 return EOF;
         }
         else if (spec == 's' || spec == 'S')
@@ -1039,9 +1081,11 @@ int __printf(char* buff, size_t buff_len, const char* __restrict format, va_list
                 len = (size_t) precision;
             size_t pad = (width > len) ? (width - len) : 0U;
 
-            if (printf_append_repeat(buff, write_limit, &written, ' ', pad) == EOF)
+            if (!left_align && printf_append_repeat(buff, write_limit, &written, ' ', pad) == EOF)
                 return EOF;
             if (printf_append_string(buff, write_limit, &written, str, len, uppercase) == EOF)
+                return EOF;
+            if (left_align && printf_append_repeat(buff, write_limit, &written, ' ', pad) == EOF)
                 return EOF;
         }
         else if (spec == 'd' || spec == 'i')
@@ -1070,23 +1114,28 @@ int __printf(char* buff, size_t buff_len, const char* __restrict format, va_list
                 digits_zero_pad = (size_t) precision - len;
             if (precision >= 0)
                 zero_pad = false;
+            if (left_align)
+                zero_pad = false;
             size_t prefix = negative ? 1U : 0U;
             size_t total = prefix + digits_zero_pad + len;
             size_t pad = (width > total) ? (width - total) : 0U;
 
-            if (!zero_pad && printf_append_repeat(buff, write_limit, &written, ' ', pad) == EOF)
+            if (!left_align && !zero_pad && printf_append_repeat(buff, write_limit, &written, ' ', pad) == EOF)
                 return EOF;
 
             if (negative && printf_append_char(buff, write_limit, &written, '-') == EOF)
                 return EOF;
 
-            if (zero_pad && printf_append_repeat(buff, write_limit, &written, '0', pad) == EOF)
+            if (!left_align && zero_pad && printf_append_repeat(buff, write_limit, &written, '0', pad) == EOF)
                 return EOF;
 
             if (printf_append_repeat(buff, write_limit, &written, '0', digits_zero_pad) == EOF)
                 return EOF;
 
             if (len > 0U && printf_append_string(buff, write_limit, &written, digits, len, false) == EOF)
+                return EOF;
+
+            if (left_align && printf_append_repeat(buff, write_limit, &written, ' ', pad) == EOF)
                 return EOF;
         }
         else if (spec == 'u')
@@ -1108,14 +1157,18 @@ int __printf(char* buff, size_t buff_len, const char* __restrict format, va_list
                 digits_zero_pad = (size_t) precision - len;
             if (precision >= 0)
                 zero_pad = false;
+            if (left_align)
+                zero_pad = false;
             size_t total = digits_zero_pad + len;
             size_t pad = (width > total) ? (width - total) : 0U;
 
-            if (printf_append_repeat(buff, write_limit, &written, zero_pad ? '0' : ' ', pad) == EOF)
+            if (!left_align && printf_append_repeat(buff, write_limit, &written, zero_pad ? '0' : ' ', pad) == EOF)
                 return EOF;
             if (printf_append_repeat(buff, write_limit, &written, '0', digits_zero_pad) == EOF)
                 return EOF;
             if (len > 0U && printf_append_string(buff, write_limit, &written, digits, len, false) == EOF)
+                return EOF;
+            if (left_align && printf_append_repeat(buff, write_limit, &written, ' ', pad) == EOF)
                 return EOF;
         }
         else if (spec == 'x' || spec == 'X')
@@ -1138,14 +1191,18 @@ int __printf(char* buff, size_t buff_len, const char* __restrict format, va_list
                 digits_zero_pad = (size_t) precision - len;
             if (precision >= 0)
                 zero_pad = false;
+            if (left_align)
+                zero_pad = false;
             size_t total = digits_zero_pad + len;
             size_t pad = (width > total) ? (width - total) : 0U;
 
-            if (printf_append_repeat(buff, write_limit, &written, zero_pad ? '0' : ' ', pad) == EOF)
+            if (!left_align && printf_append_repeat(buff, write_limit, &written, zero_pad ? '0' : ' ', pad) == EOF)
                 return EOF;
             if (printf_append_repeat(buff, write_limit, &written, '0', digits_zero_pad) == EOF)
                 return EOF;
             if (len > 0U && printf_append_string(buff, write_limit, &written, digits, len, uppercase) == EOF)
+                return EOF;
+            if (left_align && printf_append_repeat(buff, write_limit, &written, ' ', pad) == EOF)
                 return EOF;
         }
         else if (spec == 'p' || spec == 'P')
@@ -1158,15 +1215,20 @@ int __printf(char* buff, size_t buff_len, const char* __restrict format, va_list
             size_t total = 2U + len;
             size_t pad = (width > total) ? (width - total) : 0U;
 
-            if (!zero_pad && printf_append_repeat(buff, write_limit, &written, ' ', pad) == EOF)
+            if (left_align)
+                zero_pad = false;
+
+            if (!left_align && !zero_pad && printf_append_repeat(buff, write_limit, &written, ' ', pad) == EOF)
                 return EOF;
             if (printf_append_char(buff, write_limit, &written, '0') == EOF)
                 return EOF;
             if (printf_append_char(buff, write_limit, &written, uppercase ? 'X' : 'x') == EOF)
                 return EOF;
-            if (zero_pad && printf_append_repeat(buff, write_limit, &written, '0', pad) == EOF)
+            if (!left_align && zero_pad && printf_append_repeat(buff, write_limit, &written, '0', pad) == EOF)
                 return EOF;
             if (printf_append_string(buff, write_limit, &written, digits, len, uppercase) == EOF)
+                return EOF;
+            if (left_align && printf_append_repeat(buff, write_limit, &written, ' ', pad) == EOF)
                 return EOF;
         }
         else if (spec == 'b' || spec == 'B')
@@ -1177,9 +1239,11 @@ int __printf(char* buff, size_t buff_len, const char* __restrict format, va_list
             size_t len = strlen(str);
             size_t pad = (width > len) ? (width - len) : 0U;
 
-            if (printf_append_repeat(buff, write_limit, &written, ' ', pad) == EOF)
+            if (!left_align && printf_append_repeat(buff, write_limit, &written, ' ', pad) == EOF)
                 return EOF;
             if (printf_append_string(buff, write_limit, &written, str, len, uppercase) == EOF)
+                return EOF;
+            if (left_align && printf_append_repeat(buff, write_limit, &written, ' ', pad) == EOF)
                 return EOF;
         }
         else
