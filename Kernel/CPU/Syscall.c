@@ -5502,6 +5502,18 @@ static void Syscall_console_route_clear_sid(uint32_t console_sid)
     spin_unlock_irqrestore(&Syscall_state.console_lock, flags);
 }
 
+static bool Syscall_console_route_exists_for_sid(uint32_t console_sid)
+{
+    if (!Syscall_state.console_lock_ready || console_sid == 0U)
+        return false;
+
+    bool exists = false;
+    uint64_t flags = spin_lock_irqsave(&Syscall_state.console_lock);
+    exists = (Syscall_console_route_find_locked(console_sid) >= 0);
+    spin_unlock_irqrestore(&Syscall_state.console_lock, flags);
+    return exists;
+}
+
 static bool Syscall_console_sid_manageable_by(uint32_t caller_pid, uint32_t console_sid)
 {
     if (!Syscall_state.proc_lock_ready || caller_pid == 0U || console_sid == 0U)
@@ -5522,6 +5534,31 @@ static bool Syscall_console_sid_manageable_by(uint32_t caller_pid, uint32_t cons
     }
     spin_unlock_irqrestore(&Syscall_state.proc_lock, flags);
     return manageable;
+}
+
+static bool Syscall_console_sid_assign_process(uint32_t caller_pid, uint32_t console_sid)
+{
+    if (!Syscall_state.proc_lock_ready || caller_pid == 0U || console_sid == 0U)
+        return false;
+
+    bool assigned = false;
+    uint64_t flags = spin_lock_irqsave(&Syscall_state.proc_lock);
+    for (uint32_t i = 0; i < SYSCALL_MAX_PROCS; i++)
+    {
+        syscall_process_t* proc = &Syscall_state.procs[i];
+        if (!proc->used)
+            continue;
+        if (proc->pid != console_sid)
+            continue;
+        if (proc->pid == caller_pid || proc->ppid == caller_pid || proc->owner_pid == caller_pid)
+        {
+            proc->console_sid = console_sid;
+            assigned = true;
+        }
+        break;
+    }
+    spin_unlock_irqrestore(&Syscall_state.proc_lock, flags);
+    return assigned;
 }
 
 static void Syscall_console_route_push_locked(syscall_console_route_t* route, const char* data, size_t len)
@@ -7539,7 +7576,8 @@ uint64_t Syscall_interrupt_handler(uint64_t syscall_num, syscall_frame_t* frame,
             if (route_slot < 0)
             {
                 spin_unlock_irqrestore(&Syscall_state.console_lock, lock_flags);
-                if (!Syscall_console_sid_manageable_by(caller_owner_pid, console_sid))
+                if (!Syscall_console_sid_manageable_by(caller_owner_pid, console_sid) &&
+                    !Syscall_console_sid_assign_process(caller_owner_pid, console_sid))
                     return (uint64_t) -1;
 
                 lock_flags = spin_lock_irqsave(&Syscall_state.console_lock);
@@ -7754,6 +7792,8 @@ uint64_t Syscall_interrupt_handler(uint64_t syscall_num, syscall_frame_t* frame,
             uint32_t parent_pid = 0;
             uintptr_t parent_cr3 = 0;
             uintptr_t parent_fs_base = 0;
+            uint32_t parent_console_sid = 0;
+            uint32_t parent_domain = SYS_PROC_DOMAIN_USERLAND;
             uint64_t lock_flags = spin_lock_irqsave(&Syscall_state.proc_lock);
             int32_t parent_slot = Syscall_proc_ensure_current_locked(cpu_index, frame);
             if (parent_slot < 0)
@@ -7772,6 +7812,8 @@ uint64_t Syscall_interrupt_handler(uint64_t syscall_num, syscall_frame_t* frame,
             parent_pid = parent->owner_pid;
             parent_cr3 = parent->cr3_phys;
             parent_fs_base = parent->fs_base;
+            parent_console_sid = parent->console_sid;
+            parent_domain = parent->domain;
             spin_unlock_irqrestore(&Syscall_state.proc_lock, lock_flags);
 
             uintptr_t child_cr3 = 0;
@@ -7788,6 +7830,9 @@ uint64_t Syscall_interrupt_handler(uint64_t syscall_num, syscall_frame_t* frame,
             }
 
             uint32_t child_pid = Syscall_state.next_pid++;
+            uint32_t child_console_sid = child_pid;
+            if (Syscall_console_route_exists_for_sid(parent_console_sid))
+                child_console_sid = parent_console_sid;
             syscall_process_t* child = &Syscall_state.procs[child_slot];
             memset(child, 0, sizeof(*child));
             Syscall_idle_claimed_slots[(uint32_t) child_slot] = 0U;
@@ -7799,8 +7844,8 @@ uint64_t Syscall_interrupt_handler(uint64_t syscall_num, syscall_frame_t* frame,
             child->pid = child_pid;
             child->ppid = parent_pid;
             child->owner_pid = child_pid;
-            child->console_sid = child_pid;
-            child->domain = parent->domain;
+            child->console_sid = child_console_sid;
+            child->domain = parent_domain;
             child->exit_status = 0;
             child->thread_exit_value = 0;
             child->term_signal = 0;

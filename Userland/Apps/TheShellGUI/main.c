@@ -485,8 +485,6 @@ int main(void)
 
     if (!shellgui_launch_shell(&state))
         shellgui_push_line(&state, "[failed to start TheShell]");
-    else
-        shellgui_push_line(&state, "[TheShell started - PTY session]");
     state.last_sent_text[0] = '\0';
     (void) shellgui_refresh_window(&state);
     state.text_dirty = false;

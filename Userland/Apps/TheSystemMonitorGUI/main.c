@@ -350,8 +350,6 @@ int main(void)
 
     if (!mongui_launch_monitor(&state))
         mongui_push_line(&state, "[failed to launch TheSystemMonitor]");
-    else
-        mongui_push_line(&state, "[TheSystemMonitor started]");
     state.last_sent_text[0] = '\0';
     (void) mongui_refresh_window(&state);
     state.text_dirty = false;
