@@ -10,7 +10,7 @@ TheOS-Reborn is an experimental x86_64 operating system project with a full boot
 It currently boots with Limine, runs a higher-half kernel, mounts ext4 over AHCI, and launches ring3 apps linked against a shared `libc.so`.
 Runtime components are split across `Kernel`, `Driverland` (ring3 service domain for system daemons), and `Userland`.
 
-> This README reflects repository behavior as of **March 22, 2026**.
+> This README reflects repository behavior as of **April 15, 2026**.
 
 ---
 
@@ -24,6 +24,7 @@ Runtime components are split across `Kernel`, `Driverland` (ring3 service domain
 - [Boot Screenshot](#boot-screenshot)
 - [Memory Model (Limine-first)](#memory-model-limine-first)
 - [Architecture at a Glance](#architecture-at-a-glance)
+- [Desktop stack, IPC, and extended syscalls](#desktop-stack-ipc-and-extended-syscalls)
 - [Build & Run](#build--run)
 - [Configuration Options](#configuration-options)
 - [Disk Image & Userland](#disk-image--userland)
@@ -139,6 +140,7 @@ Core features currently implemented:
   - AF_INET socket baseline in kernel/libc with UNIX-like wrappers (`socket`, `bind`, `connect`, `listen`, `accept`, `send`, `recv`, `sendto`, `recvfrom`, `getsockname`, `getpeername`),
   - UDP baseline (datagram sockets) with loopback and E1000/ARP-backed L2 emission path,
   - TCP baseline (stream sockets) with SYN handshake, listen/accept, connected send/recv, and non-blocking controls (`FIONBIO`/`FIONREAD`).
+  - **AF_UNIX** (stream and datagram) in the kernel with libc `sys/socket.h` / `sys/un.h` wrappers (`socket` + `bind`/`connect`/`listen`/`accept` on UNIX paths), used for example by TheApp’s spawn service and other local IPC.
 - Userland/runtime:
   - ring3 ELF launch,
   - process execution domains (`Userland` and `Driverland`), with driver services installed under `/drv`,
@@ -156,8 +158,24 @@ Core features currently implemented:
   - `pthread` layer backed by shared-address-space kernel threads (no `fork/waitpid` emulation),
   - centralized app runtime build helper (`theos_add_user_app`) that auto-injects `crt0.S` and the canonical user linker script,
   - shell aliases including `doom -> /bin/embeddedDOOM`,
-  - shell, tests, power manager, system monitor, MicroPython, and embeddedDOOM app,
+  - shell, tests, power manager, system monitor, MicroPython, embeddedDOOM, and **desktop** binaries (`TheWindowServer`, `TheShellGUI`, `TheSystemMonitorGUI`),
   - Driverland/service-domain stdout mirroring to `kdebug` (hidden from interactive shell TTY).
+- **Graphical session (experimental)**:
+  - **`TheWindowServer`** (`/bin/TheWindowServer`): window manager / compositor, per-client IPC, keyboard and mouse routing, focus and frame chrome (close, drag); LibC **`window.h`** client API (`ws_client_*`, events, body text).
+  - **GUI wrappers**: **`TheShellGUI`** forks **`/bin/TheShell`** and attaches console capture + PTY-style input routing so the shell runs behind a desktop window; **`TheSystemMonitorGUI`** does the same for **`/bin/TheSystemMonitor`** (`--no-input`, text capture).
+  - **`TheApp`** supervises **`TheWindowServer`** (single instance, no respawn) alongside **`TheShell`** and **`/drv/TheDHCPd`**, creates `/var/run`, and runs an **AF_UNIX SOCK_DGRAM** “spawn server” on **`/var/run/theapp_spawn.sock`** so apps can be started via **`theapp_spawn()`** / **`theapp_spawn_argv()`** (`theapp.h`).
+- **Synchronization and IPC (kernel + libc)**:
+  - **`SYS_PIPE`** with libc `pipe()`; **`SYS_FUTEX`** / `sys/futex.h` for futex wait/wake used by pthread-style primitives.
+  - **SysV-style shared memory and message queues**: `shmget`/`shmat`/`shmdt`/`shmctl`, `msgget`/`msgsnd`/`msgrcv` (see `SYS_SHM*` / `SYS_MSG*`).
+  - **Console routing**: `SYS_CONSOLE_ROUTE_*`, **`SYS_CONSOLE_ROUTE_SET_SID`** / read/write/input by session id, flags for **capture**, **TTY**, and **PTY master input**; **`SYS_KBD_CAPTURE_SET`** for exclusive hardware keyboard ownership; **`SYS_KBD_INJECT_SCANCODE`**; **`SYS_KDEBUG_WRITE`** for direct kdebug output independent of PTY routing.
+  - **Mouse**: **`SYS_MOUSE_GET_EVENT`**, **`SYS_MOUSE_DEBUG_INFO_GET`** (diagnostics).
+  - **`SYS_RTC_TIME_GET`** for wall-clock style reads where supported.
+- **MicroPython on TheOS**:
+  - **`TheMicroPython`** installed as `/bin/TheMicroPython` and **`/bin/MicroPython`**; scripts staged under **`/system/python`** (see `Meta/disk.sh`).
+  - In-tree **port** under `Userland/Apps/MicroPython/ports/theos` with native module **`theos`** (CPU/sched/RCU/AHCI/proc snapshots, tick/sleep/yield, console routing by sid, window client calls, raw net stats, optional scheduler stress hook).
+  - **`PerfKit`**: MicroPython tooling under `Userland/Apps/TheMicroPython/scripts/perfkit` and entry **`/system/python/perfwm.py`** (live monitoring, stress mode, snapshot); details in `Userland/Apps/TheMicroPython/scripts/perfkit/README.md`.
+- **Process / signal behavior**:
+  - **`kill`** with terminating default actions (for example **`SIGTERM`**) ends the target **owner domain** and, in addition, **fork children** whose parent link matches that domain (see kernel `Syscall_signal_terminate_fork_children_of_owner_locked`), so closing a GUI that `fork()`’s a helper shell or monitor does not leave a stray child when the parent is signalled.
 
 ---
 
@@ -211,7 +229,7 @@ The runtime order in `k_entry` is intentionally staged and observable in `Build/
 17. **Drop startup identity map** after SMP is online.
 18. **Timer stack init** (HPET preferred for LAPIC calibration, PIT fallback).
 19. **Enable interrupts**, start LAPIC timers on BSP/APs.
-20. **Launch ring3 userland** (`/bin/TheApp` -> `/drv/TheDHCPd` + `/bin/TheShell`).
+20. **Launch ring3 userland** (`/bin/TheApp` -> `/drv/TheDHCPd` + `/bin/TheShell` + `/bin/TheWindowServer`).
 
 ---
 
@@ -310,6 +328,7 @@ flowchart TD
   - TCP stream sockets (SYN handshake, listen/accept, connected send/recv baseline).
 - User-facing APIs:
   - UNIX-like libc wrappers for AF_INET sockets (`socket`, `bind`, `connect`, `listen`, `accept`, `send`, `recv`, `sendto`, `recvfrom`),
+  - **`AF_UNIX`** stream and datagram sockets for same-machine IPC (paths, bind/listen/accept/connect; see `Kernel/Network/Unix.c`),
   - `ioctl(FIONREAD/FIONBIO)` support on socket-backed descriptors.
 
 ### Userland model
@@ -323,7 +342,25 @@ flowchart TD
 - Console writes from Driverland are routed to `kdebug` sink (not to shell TTY), while Userland apps keep normal TTY output.
 - libc provides a `pthread` layer backed by shared-address-space user threads (kernel thread syscalls + FS-base TLS activation).
 - libc `errno` is TLS-backed, and dynamic TLS modules can be registered/unregistered at runtime.
-- Shell-centric workflow with additional user apps (`TheTest`, `ThePowerManager`, `TheSystemMonitor`, `TheMicroPython`).
+- Shell-centric workflow with additional user apps (`TheTest`, `ThePowerManager`, `TheSystemMonitor`, `TheMicroPython`, `TheWindowServer`, `TheShellGUI`, `TheSystemMonitorGUI`).
+
+---
+
+## Desktop stack, IPC, and extended syscalls
+
+This section ties together the **windowing session**, **local IPC**, and **syscall surface** beyond the original `1..44` baseline. A fuller feature list is under [Features](#features); authoritative syscall numbers and flags live in **`Includes/UAPI/Syscall.h`**.
+
+| Area | What to look at |
+|------|------------------|
+| Window server | `Userland/Apps/TheWindowServer/` (`ws_*` compositor, IPC server, input, focus) |
+| Window client API | `Userland/Libraries/LibC/window.c`, `Includes/window.h` / `LibC/Includes/window.h` |
+| Shell / monitor GUIs | `Userland/Apps/TheShellGUI/`, `Userland/Apps/TheSystemMonitorGUI/` |
+| TheApp + spawn IPC | `Userland/Apps/TheApp/main.c`, `Userland/Libraries/LibC/theapp.c`, `theapp.h` |
+| AF_UNIX in kernel | `Kernel/Network/Unix.c`, `Includes/Network/Unix.h`, `Includes/UAPI/Net.h` |
+| MicroPython port + `theos` | `Userland/Apps/MicroPython/ports/theos/`, `Userland/Apps/TheMicroPython/` |
+| PerfKit (scripts) | `Userland/Apps/TheMicroPython/scripts/perfkit/`, `perfwm.py` |
+
+**Syscall IDs `45..65`** add mouse, console routing (including PTY-oriented sid routing), keyboard capture/inject, `pipe`, `futex`, SysV shm/msg, RTC read, and `kdebug` write—see the [Syscalls](#syscalls) table below.
 
 ---
 
@@ -462,10 +499,14 @@ serial_baudrate: 115200
 
 - `/bin/TheApp`
 - `/bin/TheShell`
+- `/bin/TheWindowServer`
+- `/bin/TheShellGUI`
+- `/bin/TheSystemMonitorGUI`
 - `/bin/TheTest`
 - `/bin/ThePowerManager`
 - `/bin/TheSystemMonitor`
 - `/bin/TheMicroPython`
+- `/bin/MicroPython` (same binary as `TheMicroPython`)
 - `/bin/embeddedDOOM`
 - `/drv/TheDHCPd`
 - `/lib/libc.so`
@@ -476,6 +517,7 @@ Runtime resources:
 - `/system/keyboard.conf`
 - `/system/azerty.conf`
 - `/system/fonts/ter-powerline-v14n.psf`
+- `/system/python/` (MicroPython scripts, including PerfKit `perfwm.py` when staged)
 
 `TheTest` currently exercises:
 
@@ -495,6 +537,7 @@ Runtime resources:
 - TCP socket probe (`AF_INET/SOCK_STREAM`, listen/accept/connect/send/recv loopback path)
 - ARP table ioctl probe (`SIOCGARP/SIOCSARP/SIOCDARP`, Driverland-only mutation path)
 - shared-object probe (`dlopen("/lib/libthetestdyn.so")`, symbol resolution, missing-symbol/missing-lib paths, open/close churn)
+- optional **windowed subset** via **`TheTest --wm`**: connects to `TheWindowServer`, runs a reduced system check list and optional scheduler stress in a window (full CLI suite is skipped in WM mode for stability).
 
 `TheShell` command UX:
 
@@ -512,7 +555,7 @@ At boot, root mount does:
 
 ## Syscalls
 
-Current public syscall IDs are `1..44` (`Includes/UAPI/Syscall.h`).
+Current public syscall IDs are **`1..65`** (`Includes/UAPI/Syscall.h`).
 
 - `1` `SYS_SLEEP_MS`
 - `2` `SYS_TICK_GET`
@@ -558,13 +601,37 @@ Current public syscall IDs are `1..44` (`Includes/UAPI/Syscall.h`).
 - `42` `SYS_GETPEERNAME`
 - `43` `SYS_LISTEN`
 - `44` `SYS_ACCEPT`
+- `45` `SYS_MOUSE_GET_EVENT`
+- `46` `SYS_CONSOLE_ROUTE_SET`
+- `47` `SYS_CONSOLE_ROUTE_READ`
+- `48` `SYS_CONSOLE_ROUTE_SET_SID`
+- `49` `SYS_CONSOLE_ROUTE_READ_SID`
+- `50` `SYS_MOUSE_DEBUG_INFO_GET`
+- `51` `SYS_KBD_INJECT_SCANCODE`
+- `52` `SYS_CONSOLE_ROUTE_INPUT_WRITE_SID`
+- `53` `SYS_CONSOLE_ROUTE_INPUT_READ`
+- `54` `SYS_KBD_CAPTURE_SET`
+- `55` `SYS_PIPE`
+- `56` `SYS_FUTEX`
+- `57` `SYS_SHMGET`
+- `58` `SYS_SHMAT`
+- `59` `SYS_SHMDT`
+- `60` `SYS_SHMCTL`
+- `61` `SYS_MSGGET`
+- `62` `SYS_MSGSND`
+- `63` `SYS_MSGRCV`
+- `64` `SYS_RTC_TIME_GET`
+- `65` `SYS_KDEBUG_WRITE`
 
 Behavior notes:
 
 - `SYS_PROC_INFO_GET` returns per-entry `domain`, `flags`, `current_cpu`, `term_signal`, and `exit_status`.
 - Unknown syscall numbers are treated as bad syscalls and terminate the owner process with `SIGSYS`.
-- `SYS_IOCTL` currently multiplexes DRM (`/dev/dri/card0`), OSS audio (`/dev/dsp`/`/dev/audio`), raw net (`/dev/net0`), and AF_INET socket (`FIONREAD`/`FIONBIO`) requests.
+- `SYS_IOCTL` multiplexes DRM (`/dev/dri/card0`), OSS audio (`/dev/dsp`/`/dev/audio`), raw net (`/dev/net0`), and socket endpoints (`FIONREAD`/`FIONBIO`, plus ARP where applicable).
 - ARP mutation ioctls (`SIOCSARP`, `SIOCDARP`) are accepted only for Driverland-domain owners.
+- `SYS_SOCKET` supports **`AF_INET`** and **`AF_UNIX`** (see `Includes/UAPI/Net.h`); UNIX stream and datagram paths are implemented in the kernel for local IPC.
+- **`SYS_KILL`** with a terminating default action on a process also marks **fork children** whose `ppid` link matches that process’s owner domain (see kernel `Syscall_signal_terminate_fork_children_of_owner_locked`), so nested helpers started with `fork()`+`exec` are torn down together with the signalled parent when appropriate.
+- Console routing flags (`SYS_CONSOLE_ROUTE_FLAG_*`) include **capture**, **TTY**, and **PTY master input** for GUI-in-terminal style apps.
 
 ---
 
@@ -621,18 +688,19 @@ Behavior notes:
   - userland `libdl` relocation coverage remains narrower (`RELATIVE`, `64`, `GLOB_DAT`, `JUMP_SLOT`, `DTPMOD64`, `DTPOFF64`),
   - no full `PT_INTERP`/`ld.so` userspace loader flow yet (the kernel-side exec path performs the current dynamic-link work),
   - lazy binding and advanced symbol-visibility semantics remain incomplete.
-- Networking now includes an AF_INET socket baseline (UDP + TCP stream), but remains intentionally scoped:
+- Networking now includes an AF_INET socket baseline (UDP + TCP stream) plus **AF_UNIX** local sockets, but remains intentionally scoped:
   - IPv4 only (no IPv6 path yet),
   - no `select/poll/epoll` socket readiness API yet,
   - limited socket-option coverage (`getsockopt/setsockopt` subset),
   - TCP reliability/state-machine coverage is still partial (no full retransmission/congestion-control/TIME-WAIT behavior yet, and no advanced out-of-order handling).
+  - AF_UNIX coverage is kernel-local (no Linux full ancillary credentials, abstract namespace parity, or `socketpair` baseline unless added later).
 - Driverland DHCP daemon is intentionally early-stage:
   - sends DHCPDISCOVER and parses OFFER/ACK/NAK frames,
   - REQUEST/lease commit/network interface configuration path is not implemented yet.
 - OSS audio compatibility is intentionally minimal (`/dev/dsp`-style subset only); ALSA/PulseAudio native user APIs are not provided by libc/kernel yet.
 - Current embeddedDOOM music is software-synth based (MUS parser + lightweight oscillator mixer), so timbre is functional but not yet faithful to OPL/General MIDI playback.
 - Audio quality defaults are intentionally conservative for stability/latency tuning (8-bit SFX assets + 11025 Hz mix path inherited from this DOOM port), so output fidelity remains limited.
-- Signal model now covers the UNIX-like numbering/default-action surface and `kill` delivery paths, but remains partial (`sigaction`, masks, handlers on async kernel-delivered signals, stop/continue semantics, and core-dump materialization are not fully implemented).
+- Signal model covers UNIX-like numbering/default-action surface and `kill` delivery; libc `signal()`/`raise()` handlers are not wired to true async kernel delivery yet (handlers are consulted for `raise` paths). `sigaction`, masks, stop/continue semantics, and core-dump materialization remain partial. **`kill`** terminating actions additionally cascade to **fork children** tied to the victim owner domain (see [Syscalls](#syscalls)), which is not a full job-control / process-group model (`kill` with negative PIDs is not supported).
 - Driverland is a policy/process domain today (same ring3 privilege level as Userland), not a hardware CPU ring isolation boundary yet.
 - Legacy IDE/PIIX storage path is not implemented; storage discovery currently targets AHCI-class controllers.
 - Some components (x2APIC SMP mode, parts of scheduler stress paths) are experimental.
@@ -652,6 +720,6 @@ Behavior notes:
 - Keep hardening memory and process semantics.
 - Extend filesystem write-path coverage.
 - Expand libc coverage for larger userland compatibility.
-- Continue stabilizing MicroPython script execution behavior.
+- Continue stabilizing MicroPython script execution behavior and the native **`theos`** module surface.
 - Improve scheduling and multi-process runtime capabilities.
 - Extend networking from baseline AF_INET support to fuller UNIX-like behavior (poll/select readiness, richer socket options, stronger TCP reliability and close-state handling).
