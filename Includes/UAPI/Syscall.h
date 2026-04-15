@@ -56,9 +56,24 @@
 #define SYS_CONSOLE_ROUTE_READ_SID 49
 #define SYS_MOUSE_DEBUG_INFO_GET 50
 #define SYS_KBD_INJECT_SCANCODE 51
+#define SYS_CONSOLE_ROUTE_INPUT_WRITE_SID 52
+#define SYS_CONSOLE_ROUTE_INPUT_READ      53
+/* Seul ce owner_pid reçoit les scancodes matériels (les autres voient 0).0 = libérer si détenteur. */
+#define SYS_KBD_CAPTURE_SET               54
+#define SYS_PIPE                          55
+#define SYS_FUTEX                         56
+#define SYS_SHMGET                        57
+#define SYS_SHMAT                         58
+#define SYS_SHMDT                         59
+#define SYS_SHMCTL                        60
+#define SYS_MSGGET                        61
+#define SYS_MSGSND                        62
+#define SYS_MSGRCV                        63
 
-#define SYS_CONSOLE_ROUTE_FLAG_CAPTURE (1U << 0)
-#define SYS_CONSOLE_ROUTE_FLAG_TTY     (1U << 1)
+#define SYS_CONSOLE_ROUTE_FLAG_CAPTURE   (1U << 0)
+#define SYS_CONSOLE_ROUTE_FLAG_TTY       (1U << 1)
+/* Entrée PTY : octets injectés par le maître (ex. TheShellGUI) lus par getchar/read sur l'esclave. */
+#define SYS_CONSOLE_ROUTE_FLAG_PTY_INPUT (1U << 2)
 
 #define SYS_PROT_READ    (1ULL << 0)
 #define SYS_PROT_WRITE   (1ULL << 1)
@@ -73,6 +88,9 @@
 #define SYS_MAP_SHARED    0x01U
 #define SYS_MAP_PRIVATE   0x02U
 #define SYS_MAP_ANONYMOUS 0x20U
+
+#define SYS_FUTEX_WAIT   0
+#define SYS_FUTEX_WAKE   1
 
 #define SYS_SEEK_SET     0
 #define SYS_SEEK_CUR     1

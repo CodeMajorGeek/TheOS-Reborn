@@ -17,6 +17,7 @@ set(LIBC_SOURCES
     syscall.c
     tls.c
     unistd.c
+    theapp.c
     window.c
     window_client.c
 )
@@ -49,6 +50,7 @@ target_include_directories(UserLibCShared
 target_compile_options(UserLibCShared
     PRIVATE
         -fPIC
+        -fno-plt
 )
 target_link_options(UserLibCShared
     PRIVATE

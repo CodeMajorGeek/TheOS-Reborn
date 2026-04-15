@@ -9,9 +9,10 @@
 #define WS_MAX_WINDOWS 32U
 #define WS_WINDOW_TITLE_MAX 63U
 #define WS_WINDOW_BODY_TEXT_MAX 2047U
-#define WS_SERVER_PORT 6090U
+#define WS_SERVER_SOCK_PATH "/var/run/ws.sock"
 #define WS_IPC_MAGIC 0x57534950U
-#define WS_IPC_VERSION 1U
+#define WS_IPC_VERSION 2U
+#define WS_IPC_MAX_PAYLOAD_LEN (WS_WINDOW_BODY_TEXT_MAX + 128U)
 #define WS_CURSOR_WIDTH 12U
 #define WS_CURSOR_HEIGHT 16U
 #define WS_CURSOR_SHADOW_OFFSET 1U
@@ -66,13 +67,29 @@ typedef enum ws_ipc_opcode
     WS_IPC_OP_POLL_EVENT = 11
 } ws_ipc_opcode_t;
 
-typedef struct ws_ipc_packet
+/*
+ * New IPC framing: every message is a fixed header followed by a variable-length
+ * payload.  Most operations carry 0-40 bytes of payload instead of the old 2 KiB
+ * flat packet, which makes high-frequency paths like POLL_EVENT ~100x smaller.
+ */
+typedef struct __attribute__((packed)) ws_ipc_header
 {
     uint32_t magic;
     uint16_t version;
     uint16_t opcode;
     int32_t status;
     uint32_t window_id;
+    uint32_t payload_len;
+} ws_ipc_header_t;
+
+typedef struct ws_ipc_hello_payload
+{
+    uint32_t owner_pid;
+    uint32_t client_role;
+} ws_ipc_hello_payload_t;
+
+typedef struct ws_ipc_create_window_payload
+{
     int32_t x;
     int32_t y;
     uint32_t width;
@@ -82,13 +99,38 @@ typedef struct ws_ipc_packet
     uint32_t titlebar_color;
     uint32_t visible;
     uint32_t frame_controls;
-    uint32_t owner_pid;
-    uint32_t client_role;
+    /* null-terminated title string follows immediately after this struct */
+} ws_ipc_create_window_payload_t;
+
+typedef struct ws_ipc_move_payload
+{
+    int32_t x;
+    int32_t y;
+} ws_ipc_move_payload_t;
+
+typedef struct ws_ipc_resize_payload
+{
+    uint32_t width;
+    uint32_t height;
+} ws_ipc_resize_payload_t;
+
+typedef struct ws_ipc_color_payload
+{
+    uint32_t color;
+} ws_ipc_color_payload_t;
+
+typedef struct ws_ipc_visible_payload
+{
+    uint32_t visible;
+} ws_ipc_visible_payload_t;
+
+typedef struct ws_ipc_event_payload
+{
     uint32_t event_type;
     int32_t event_key;
-    char title[WS_WINDOW_TITLE_MAX + 1U];
-    char text[WS_WINDOW_BODY_TEXT_MAX + 1U];
-} ws_ipc_packet_t;
+} ws_ipc_event_payload_t;
+
+/* Text/title payloads are raw null-terminated strings; payload_len includes the NUL. */
 
 typedef struct ws_client
 {
@@ -96,7 +138,6 @@ typedef struct ws_client
     uint32_t owner_pid;
     ws_client_role_t role;
     bool connected;
-    bool poll_event_inflight;
     bool poll_event_cached;
     ws_event_t cached_event;
 } ws_client_t;

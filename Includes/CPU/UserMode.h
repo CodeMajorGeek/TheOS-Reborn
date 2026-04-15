@@ -7,7 +7,8 @@
 #define USERMODE_CANONICAL_LOW_MAX    0x0000800000000000ULL
 #define USERMODE_MIN_VADDR            0x0000000020000000ULL
 #define USERMODE_STACK_TOP            0x0000000070000000ULL
-#define USERMODE_STACK_SIZE           (64ULL * 1024ULL)
+/* 64 KiB a montré des corruptions de cadre (ex. memset snapshot : rdi → adresse .text libc). */
+#define USERMODE_STACK_SIZE           (512ULL * 1024ULL)
 #define USERMODE_ELF_MAX_SIZE         (4ULL * 1024ULL * 1024ULL)
 #define USERMODE_ELF_MAX_PHDRS        64U
 #define USERMODE_PTE_PS               (1ULL << 7)

@@ -1,4 +1,11 @@
 theos_add_user_app(TheWindowServer
     SOURCES
         main.c
+        ws_compositor.c
+        ws_ipc_server.c
+        ws_input.c
+        ws_focus.c
+        ws_desktop_ui.c
+    INCLUDES
+        ${CMAKE_CURRENT_SOURCE_DIR}
 )

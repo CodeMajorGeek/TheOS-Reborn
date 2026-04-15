@@ -281,6 +281,44 @@ static ino_t unistd_inode_from_path(const char* path)
     return (ino_t) h;
 }
 
+int pipe(int pipefd[2])
+{
+    if (!pipefd)
+    {
+        errno = EINVAL;
+        return -1;
+    }
+
+    int kernel_fds[2] = { -1, -1 };
+    if (sys_pipe(kernel_fds) < 0)
+    {
+        errno = EMFILE;
+        return -1;
+    }
+
+    int read_fd = libc_fd_adopt_kernel(kernel_fds[0]);
+    if (read_fd < 0)
+    {
+        (void) sys_close(kernel_fds[0]);
+        (void) sys_close(kernel_fds[1]);
+        errno = EMFILE;
+        return -1;
+    }
+
+    int write_fd = libc_fd_adopt_kernel(kernel_fds[1]);
+    if (write_fd < 0)
+    {
+        (void) close(read_fd);
+        (void) sys_close(kernel_fds[1]);
+        errno = EMFILE;
+        return -1;
+    }
+
+    pipefd[0] = read_fd;
+    pipefd[1] = write_fd;
+    return 0;
+}
+
 ssize_t read(int fd, void* buf, size_t count)
 {
     if (count == 0U)
@@ -1171,7 +1209,22 @@ unsigned int sleep(unsigned int seconds)
 
 int usleep(unsigned int usec)
 {
-    uint32_t ms = (usec == 0U) ? 0U : (uint32_t) (((uint64_t) usec + 999ULL) / 1000ULL);
+    if (usec == 0U)
+        return 0;
+
+    /* Avant : (usec + 999) / 1000 forçait 1..999 µs → sys_sleep_ms(1) (~1 ms).
+     * Les boucles courtes (poll, retry socket) perdaient un ordre de grandeur. */
+    if (usec < 1000U)
+    {
+        if (sched_yield() < 0)
+        {
+            errno = EIO;
+            return -1;
+        }
+        return 0;
+    }
+
+    uint32_t ms = (uint32_t) (((uint64_t) usec + 999ULL) / 1000ULL);
     if (sys_sleep_ms(ms) < 0)
     {
         errno = EINVAL;

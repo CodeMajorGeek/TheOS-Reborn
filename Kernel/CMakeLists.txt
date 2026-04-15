@@ -84,6 +84,7 @@ set(KERNEL_NETWORK_SOURCES
     Network/ARP.c
     Network/Socket.c
     Network/TCP.c
+    Network/Unix.c
 )
 
 set(KERNEL_TASK_SOURCES

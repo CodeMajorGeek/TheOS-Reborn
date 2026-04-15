@@ -2,17 +2,12 @@
 #include <Device/Keyboard_private.h>
 #include <Device/Mouse.h>
 #include <CPU/IO.h>
-#include <Debug/KDebug.h>
 #include <Debug/Spinlock.h>
 #include <stddef.h>
 
 #define KEYBOARD_IRQ_DRAIN_BUDGET 64U
 
 static Keyboard_runtime_state_t Keyboard_state;
-static uint64_t Keyboard_dbg_enqueued = 0ULL;
-static uint64_t Keyboard_dbg_dequeued = 0ULL;
-static uint64_t Keyboard_dbg_empty_reads = 0ULL;
-static uint64_t Keyboard_dbg_dropped = 0ULL;
 
 static inline uint64_t Keyboard_lock_irqsave(void)
 {
@@ -77,25 +72,9 @@ static void Keyboard_process_scancode_locked(uint8_t scancode,
     {
         Keyboard_state.scancode_buffer[Keyboard_state.write_pos++] = scancode;
         Keyboard_state.scancode_buffer_length++;
-        Keyboard_dbg_enqueued++;
 
         if (Keyboard_state.write_pos == SCANCODE_BUFFER_SIZE)
             Keyboard_state.write_pos = 0;
-    }
-    else
-    {
-        Keyboard_dbg_dropped++;
-        if ((Keyboard_dbg_dropped & 0x3FULL) == 1ULL)
-        {
-            // #region agent log
-            kdebug_printf("[AGENTDBG H41 KBD_OVERFLOW] dropped=%llu enq=%llu deq=%llu empty=%llu cap=%u\n",
-                          (unsigned long long) Keyboard_dbg_dropped,
-                          (unsigned long long) Keyboard_dbg_enqueued,
-                          (unsigned long long) Keyboard_dbg_dequeued,
-                          (unsigned long long) Keyboard_dbg_empty_reads,
-                          (unsigned int) SCANCODE_BUFFER_SIZE);
-            // #endregion
-        }
     }
 
     if (out_refresh_leds)
@@ -141,14 +120,12 @@ uint8_t Keyboard_get_scancode(void)
     uint64_t flags = Keyboard_lock_irqsave();
     if (Keyboard_state.scancode_buffer_length == 0)
     {
-        Keyboard_dbg_empty_reads++;
         Keyboard_unlock_irqrestore(flags);
         return 0;
     }
 
     uint8_t sc = Keyboard_state.scancode_buffer[Keyboard_state.read_pos++];
     Keyboard_state.scancode_buffer_length--;
-    Keyboard_dbg_dequeued++;
 
     if (Keyboard_state.read_pos == SCANCODE_BUFFER_SIZE)
         Keyboard_state.read_pos = 0;

@@ -9,7 +9,7 @@ int socket(int domain, int type, int protocol)
     int kernel_fd = sys_socket(domain, type, protocol);
     if (kernel_fd < 0)
     {
-        if (domain != AF_INET)
+        if (domain != AF_INET && domain != AF_UNIX)
             errno = EAFNOSUPPORT;
         else if (type != SOCK_DGRAM && type != SOCK_STREAM)
             errno = ENOTSUP;
@@ -134,7 +134,7 @@ int connect(int sockfd, const struct sockaddr* addr, socklen_t addrlen)
     {
         if (addr->sa_family == AF_UNSPEC)
             errno = ENOTCONN;
-        else if (addr->sa_family != AF_INET)
+        else if (addr->sa_family != AF_INET && addr->sa_family != AF_UNIX)
             errno = EAFNOSUPPORT;
         else
             errno = EINVAL;
@@ -194,7 +194,29 @@ int getpeername(int sockfd, struct sockaddr* addr, socklen_t* addrlen)
 
 ssize_t send(int sockfd, const void* buf, size_t len, int flags)
 {
-    return sendto(sockfd, buf, len, flags, NULL, 0);
+    if (len != 0U && !buf)
+    {
+        errno = EINVAL;
+        return -1;
+    }
+    int kernel_fd = libc_fd_get_kernel(sockfd);
+    if (kernel_fd < 0)
+    {
+        errno = EBADF;
+        return -1;
+    }
+    int rc = sys_sendto(kernel_fd, buf, len, flags, NULL, 0);
+    if (rc == -2)
+    {
+        errno = EAGAIN;
+        return -1;
+    }
+    if (rc < 0)
+    {
+        errno = ENOTCONN;
+        return -1;
+    }
+    return (ssize_t) rc;
 }
 
 ssize_t sendto(int sockfd, const void* buf, size_t len, int flags, const struct sockaddr* dest_addr, socklen_t addrlen)
@@ -211,12 +233,6 @@ ssize_t sendto(int sockfd, const void* buf, size_t len, int flags, const struct 
         return -1;
     }
 
-    if ((flags & ~(MSG_DONTWAIT)) != 0)
-    {
-        errno = ENOTSUP;
-        return -1;
-    }
-
     int kernel_fd = libc_fd_get_kernel(sockfd);
     if (kernel_fd < 0)
     {
@@ -224,7 +240,7 @@ ssize_t sendto(int sockfd, const void* buf, size_t len, int flags, const struct 
         return -1;
     }
 
-    if (dest_addr && dest_addr->sa_family != AF_INET)
+    if (dest_addr && dest_addr->sa_family != AF_INET && dest_addr->sa_family != AF_UNIX)
     {
         errno = EAFNOSUPPORT;
         return -1;
@@ -247,7 +263,31 @@ ssize_t sendto(int sockfd, const void* buf, size_t len, int flags, const struct 
 
 ssize_t recv(int sockfd, void* buf, size_t len, int flags)
 {
-    return recvfrom(sockfd, buf, len, flags, NULL, NULL);
+    if (len != 0U && !buf)
+    {
+        errno = EINVAL;
+        return -1;
+    }
+    if (len == 0U)
+        return 0;
+    int kernel_fd = libc_fd_get_kernel(sockfd);
+    if (kernel_fd < 0)
+    {
+        errno = EBADF;
+        return -1;
+    }
+    int rc = sys_recvfrom(kernel_fd, buf, len, flags, NULL, NULL);
+    if (rc == -2)
+    {
+        errno = EAGAIN;
+        return -1;
+    }
+    if (rc < 0)
+    {
+        errno = ECONNRESET;
+        return -1;
+    }
+    return (ssize_t) rc;
 }
 
 ssize_t recvfrom(int sockfd, void* buf, size_t len, int flags, struct sockaddr* src_addr, socklen_t* addrlen)
@@ -260,12 +300,6 @@ ssize_t recvfrom(int sockfd, void* buf, size_t len, int flags, struct sockaddr* 
 
     if (len == 0U)
         return 0;
-
-    if ((flags & ~(MSG_DONTWAIT)) != 0)
-    {
-        errno = ENOTSUP;
-        return -1;
-    }
 
     int kernel_fd = libc_fd_get_kernel(sockfd);
     if (kernel_fd < 0)

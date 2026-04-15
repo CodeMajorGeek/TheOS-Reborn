@@ -35,6 +35,9 @@ static const AHCI_device_t AHCI_devices[] =
 static AHCI_runtime_state_t AHCI_state = {
     .irq_mode = AHCI_IRQ_MODE_POLL
 };
+static volatile uint8_t AHCI_port_io_busy[AHCI_MAX_SLOT] = { 0 };
+
+#define AHCI_PORT_IO_LOCK_SPINS (SATA_IO_MAX_WAIT * 1024U)
 
 extern uintptr_t ROOT_DEV;
 
@@ -57,6 +60,36 @@ static int AHCI_port_index(HBA_PORT_t* port)
         return -1;
 
     return (int) index;
+}
+
+static uint32_t AHCI_port_lock_index(HBA_PORT_t* port)
+{
+    int port_index = AHCI_port_index(port);
+    if (port_index < 0 || port_index >= (int) AHCI_MAX_SLOT)
+        return AHCI_MAX_SLOT;
+    return (uint32_t) port_index;
+}
+
+static bool AHCI_port_lock_acquire(uint32_t port_index)
+{
+    if (port_index >= AHCI_MAX_SLOT)
+        return false;
+
+    for (uint32_t spin = 0; spin < AHCI_PORT_IO_LOCK_SPINS; spin++)
+    {
+        if (__atomic_exchange_n(&AHCI_port_io_busy[port_index], 1U, __ATOMIC_ACQ_REL) == 0U)
+            return true;
+        __asm__ __volatile__("pause");
+    }
+
+    return false;
+}
+
+static void AHCI_port_lock_release(uint32_t port_index)
+{
+    if (port_index >= AHCI_MAX_SLOT)
+        return;
+    __atomic_store_n(&AHCI_port_io_busy[port_index], 0U, __ATOMIC_RELEASE);
 }
 
 static bool AHCI_wait_slot_pending(void* context)
@@ -286,13 +319,20 @@ static bool AHCI_identify_capacity_sectors(HBA_PORT_t* port, uint64_t* out_secto
     if (!port || !out_sector_count || port->sig == SATA_SIG_ATAPI)
         return false;
 
+    uint32_t lock_index = AHCI_port_lock_index(port);
+    if (lock_index >= AHCI_MAX_SLOT || !AHCI_port_lock_acquire(lock_index))
+        return false;
+
     uint8_t identify_data[AHCI_SECTOR_SIZE];
     memset(identify_data, 0, sizeof(identify_data));
 
     AHCI_cmd_context_t cmd_ctx = { 0 };
     int prep_rc = AHCI_prepare_cmd(port, AHCI_SECTOR_SIZE, identify_data, &cmd_ctx);
     if (prep_rc != SATA_IO_SUCCESS)
+    {
+        AHCI_port_lock_release(lock_index);
         return false;
+    }
 
     cmd_ctx.cmd_header->w = 0; // Device -> host.
 
@@ -303,7 +343,10 @@ static bool AHCI_identify_capacity_sectors(HBA_PORT_t* port, uint64_t* out_secto
     cmd_fis->device = 0;
 
     if (AHCI_submit_cmd(port, &cmd_ctx) != SATA_IO_SUCCESS)
+    {
+        AHCI_port_lock_release(lock_index);
         return false;
+    }
 
     const uint16_t* words = (const uint16_t*) identify_data;
     uint64_t lba48 = ((uint64_t) words[103] << 48) |
@@ -313,14 +356,19 @@ static bool AHCI_identify_capacity_sectors(HBA_PORT_t* port, uint64_t* out_secto
     if (lba48 != 0)
     {
         *out_sector_count = lba48;
+        AHCI_port_lock_release(lock_index);
         return true;
     }
 
     uint32_t lba28 = ((uint32_t) words[61] << 16) | (uint32_t) words[60];
     if (lba28 == 0)
+    {
+        AHCI_port_lock_release(lock_index);
         return false;
+    }
 
     *out_sector_count = (uint64_t) lba28;
+    AHCI_port_lock_release(lock_index);
     return true;
 }
 
@@ -359,10 +407,17 @@ static int AHCI_atapi_read_blocks(HBA_PORT_t* port, uint32_t lba, uint32_t count
     if (count > (UINT32_MAX / AHCI_ATAPI_SECTOR_SIZE))
         return SATA_IO_ERROR_HUNG_PORT;
 
+    uint32_t lock_index = AHCI_port_lock_index(port);
+    if (lock_index >= AHCI_MAX_SLOT || !AHCI_port_lock_acquire(lock_index))
+        return SATA_IO_ERROR_HUNG_PORT;
+
     AHCI_cmd_context_t cmd_ctx = { 0 };
     int prep_rc = AHCI_prepare_cmd(port, count * AHCI_ATAPI_SECTOR_SIZE, buf, &cmd_ctx);
     if (prep_rc != SATA_IO_SUCCESS)
+    {
+        AHCI_port_lock_release(lock_index);
         return prep_rc;
+    }
 
     cmd_ctx.cmd_header->a = 1;
     cmd_ctx.cmd_header->w = 0;
@@ -385,7 +440,9 @@ static int AHCI_atapi_read_blocks(HBA_PORT_t* port, uint32_t lba, uint32_t count
     cdb[8] = (uint8_t) (count >> 8);
     cdb[9] = (uint8_t) count;
 
-    return AHCI_submit_cmd(port, &cmd_ctx);
+    int rc = AHCI_submit_cmd(port, &cmd_ctx);
+    AHCI_port_lock_release(lock_index);
+    return rc;
 }
 
 static int AHCI_atapi_read_512(HBA_PORT_t* port, uint32_t startl, uint32_t starth, uint32_t count, uint8_t* buf)
@@ -887,10 +944,17 @@ int AHCI_sata_read(HBA_PORT_t* port, uint32_t startl, uint32_t starth, uint32_t 
     if (count > (UINT32_MAX / AHCI_SECTOR_SIZE))
         return SATA_IO_ERROR_HUNG_PORT;
 
+    uint32_t lock_index = AHCI_port_lock_index(port);
+    if (lock_index >= AHCI_MAX_SLOT || !AHCI_port_lock_acquire(lock_index))
+        return SATA_IO_ERROR_HUNG_PORT;
+
     AHCI_cmd_context_t cmd_ctx = { 0 };
     int prep_rc = AHCI_prepare_cmd(port, count * AHCI_SECTOR_SIZE, buf, &cmd_ctx);
     if (prep_rc != SATA_IO_SUCCESS)
+    {
+        AHCI_port_lock_release(lock_index);
         return prep_rc;
+    }
     cmd_ctx.cmd_header->w = 0; // Read from device.
 
     // Setup command.
@@ -910,7 +974,9 @@ int AHCI_sata_read(HBA_PORT_t* port, uint32_t startl, uint32_t starth, uint32_t 
     cmd_fis->countl = count & 0xFF;
     cmd_fis->counth = (count >> 8) & 0xFF;
 
-    return AHCI_submit_cmd(port, &cmd_ctx);
+    int rc = AHCI_submit_cmd(port, &cmd_ctx);
+    AHCI_port_lock_release(lock_index);
+    return rc;
 }
 
 int AHCI_SATA_write(HBA_PORT_t* port, uint32_t startl, uint32_t starth, uint32_t count, uint8_t* buf)
@@ -954,10 +1020,17 @@ int AHCI_SATA_write(HBA_PORT_t* port, uint32_t startl, uint32_t starth, uint32_t
     uint64_t ignored_disk_sector_count = 0;
     (void) AHCI_get_cached_capacity_sectors(port, &ignored_disk_sector_count);
 
+    uint32_t lock_index = AHCI_port_lock_index(port);
+    if (lock_index >= AHCI_MAX_SLOT || !AHCI_port_lock_acquire(lock_index))
+        return SATA_IO_ERROR_HUNG_PORT;
+
     AHCI_cmd_context_t cmd_ctx = { 0 };
     int prep_rc = AHCI_prepare_cmd(port, count * AHCI_SECTOR_SIZE, buf, &cmd_ctx);
     if (prep_rc != SATA_IO_SUCCESS)
+    {
+        AHCI_port_lock_release(lock_index);
         return prep_rc;
+    }
     cmd_ctx.cmd_header->w = 1; // Write to device.
 
     FIS_REG_H2D_t* cmd_fis = (FIS_REG_H2D_t*) (&cmd_ctx.cmd_tbl->cfis);
@@ -977,5 +1050,7 @@ int AHCI_SATA_write(HBA_PORT_t* port, uint32_t startl, uint32_t starth, uint32_t
     cmd_fis->countl = count & 0xFF;
     cmd_fis->counth = (count >> 8) & 0xFF;
 
-    return AHCI_submit_cmd(port, &cmd_ctx);
+    int rc = AHCI_submit_cmd(port, &cmd_ctx);
+    AHCI_port_lock_release(lock_index);
+    return rc;
 }

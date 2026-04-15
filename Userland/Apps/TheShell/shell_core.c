@@ -61,6 +61,7 @@ static const char* shell_known_binaries[] =
 static const shell_command_alias_t shell_command_aliases[] =
 {
     { "doom", "embeddedDOOM" },
+    { "micropython", "TheMicroPython" },
     { "windowserver", "TheWindowServer" }
 };
 

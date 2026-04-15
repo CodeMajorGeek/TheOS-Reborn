@@ -2,6 +2,7 @@
 
 .globl enable_syscall_ext
 .globl syscall_handler_stub
+.globl Syscall_resume_user_context
 
 .extern Syscall_interrupt_handler
 .extern Syscall_post_handler
@@ -119,3 +120,39 @@ syscall_handler_stub:
     # No sti here: interrupts will be re-enabled in user mode
     # according to R11 flags, masked by IA32_FMASK.
     sysretq
+
+# Syscall_resume_user_context(ctx)
+#   rdi = pointer to syscall_user_resume_context_t
+# Never returns: jumps to ring3 with iretq.
+Syscall_resume_user_context:
+    cli
+
+    movq %rdi, %rax
+
+    # Build iretq frame (SS, RSP, RFLAGS, CS, RIP)
+    pushq $USER_DATA_SEGMENT_RPL3
+    pushq 136(%rax)            # rsp
+    movq 128(%rax), %rdx       # rflags
+    orq  $0x200, %rdx          # IF
+    pushq %rdx
+    pushq $USER_CODE_SEGMENT_RPL3
+    pushq 120(%rax)            # rip
+
+    # Restore GPRs from context
+    movq 112(%rax), %rbx
+    movq 8(%rax), %rcx
+    movq 16(%rax), %rdx
+    movq 24(%rax), %rsi
+    movq 32(%rax), %rdi
+    movq 40(%rax), %r8
+    movq 48(%rax), %r9
+    movq 56(%rax), %r10
+    movq 64(%rax), %r11
+    movq 72(%rax), %r15
+    movq 80(%rax), %r14
+    movq 88(%rax), %r13
+    movq 96(%rax), %r12
+    movq 104(%rax), %rbp
+    movq 0(%rax), %rax
+
+    iretq

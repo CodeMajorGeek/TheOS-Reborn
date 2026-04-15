@@ -1,4 +1,5 @@
 #include <errno.h>
+#include <sched.h>
 #include <stdbool.h>
 #include <stddef.h>
 #include <stdint.h>
@@ -10,12 +11,10 @@
 #include <unistd.h>
 #include <window.h>
 
-#define MONGUI_FRAME_TIME_US 8000U
-#define MONGUI_IDLE_SLEEP_US 2000U
 #define MONGUI_LINES_MAX     72U
 #define MONGUI_LINE_LEN      180U
-#define MONGUI_REFRESH_MIN_TICKS 2ULL
-#define MONGUI_EVENT_POLL_BACKOFF_TICKS 6ULL
+#define MONGUI_REFRESH_MIN_TICKS 0ULL
+#define MONGUI_EVENT_POLL_BACKOFF_TICKS 0ULL
 #define MONGUI_FRAME_HEADER_PREFIX "TheSystemMonitor  frame="
 
 #define MONGUI_LOG(fmt, ...)                                                                                               \
@@ -220,7 +219,7 @@ static bool mongui_launch_monitor(mongui_state_t* state)
         char* const argv[] = {
             "TheSystemMonitor",
             "--interval",
-            "1500",
+            "500",
             "--no-input",
             "--no-clear",
             NULL
@@ -413,10 +412,7 @@ int main(void)
             }
         }
 
-        if (state.text_dirty)
-            (void) usleep(MONGUI_FRAME_TIME_US);
-        else
-            (void) usleep(MONGUI_IDLE_SLEEP_US);
+        (void) sched_yield();
     }
 
     mongui_cleanup(&state);

@@ -8,7 +8,23 @@
 #include "../../../../Includes/UAPI/Syscall.h"
 
 #ifndef __ASSEMBLER__
-long syscall(long num, long a1, long a2, long a3, long a4, long a5, long a6);
+
+static inline long syscall(long num, long a1, long a2, long a3,
+                           long a4, long a5, long a6)
+{
+    long ret;
+    register long r10 __asm__("r10") = a4;
+    register long r8  __asm__("r8")  = a5;
+    register long r9  __asm__("r9")  = a6;
+    __asm__ __volatile__(
+        "syscall"
+        : "=a"(ret)
+        : "a"(num), "D"(a1), "S"(a2), "d"(a3), "r"(r10), "r"(r8), "r"(r9)
+        : "rcx", "r11", "memory"
+    );
+    return ret;
+}
+
 
 int fs_is_dir(const char* path);
 int fs_mkdir(const char* path);
@@ -26,6 +42,8 @@ int sys_console_route_set(uint32_t flags);
 int sys_console_route_read(void* buf, size_t len);
 int sys_console_route_set_sid(uint32_t console_sid, uint32_t flags);
 int sys_console_route_read_sid(uint32_t console_sid, void* buf, size_t len);
+int sys_console_route_input_write_sid(uint32_t console_sid, const void* buf, size_t len);
+int sys_console_route_input_read(void* buf, size_t len);
 __attribute__((__noreturn__)) void sys_exit(int status);
 int sys_fork(void);
 int sys_execve(const char* path, const char* const argv[], const char* const envp[]);
@@ -51,6 +69,7 @@ int sys_listen(int fd, int backlog);
 int sys_accept(int fd, void* addr, void* addrlen_ptr);
 int sys_kbd_get_scancode(void);
 int sys_kbd_inject_scancode(uint32_t target_pid, uint8_t scancode);
+int sys_kbd_capture_set(uint32_t owner_pid_or_zero_to_release);
 int sys_mouse_get_event(syscall_mouse_event_t* out_event);
 int sys_mouse_debug_info_get(syscall_mouse_debug_info_t* out_info);
 int sys_waitpid(int pid, int* out_status, int* out_signal);
@@ -66,6 +85,15 @@ __attribute__((__noreturn__)) void sys_thread_exit(uint64_t retval);
 int sys_thread_self(void);
 int sys_thread_set_fsbase(uintptr_t fs_base);
 uintptr_t sys_thread_get_fsbase(void);
+int sys_pipe(int* pipefd);
+int sys_futex(int* uaddr, int op, int val, unsigned int timeout_ms);
+int sys_shmget(int key, size_t size, int shmflg);
+long sys_shmat(int shmid, const void* shmaddr);
+int sys_shmdt(const void* shmaddr);
+int sys_shmctl(int shmid, int cmd);
+int sys_msgget(int key, int msgflg);
+int sys_msgsnd(int msqid, const void* msgp, size_t msgsz, int msgflg);
+long sys_msgrcv(int msqid, void* msgp, size_t msgsz, long msgtyp, int msgflg);
 #endif
 
 #endif

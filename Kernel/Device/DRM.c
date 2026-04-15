@@ -1,6 +1,7 @@
 #include <Device/DRM.h>
 
 #include <CPU/IO.h>
+#include <Debug/KDebug.h>
 #include <Device/TTY.h>
 #include <Device/TTYFramebuffer.h>
 #include <Memory/KMem.h>
@@ -782,7 +783,6 @@ static bool DRM_present_buffer_locked(const drm_buffer_t* buffer,
                 memcpy(back_row, front_row, row_bytes);
             }
         }
-
         return true;
     }
 
@@ -807,7 +807,6 @@ static bool DRM_present_buffer_locked(const drm_buffer_t* buffer,
                 DRM_store_fb_pixel(&fb, fb.back, dst_x + dx, dst_y + dy, out_pixel);
         }
     }
-
     return true;
 }
 

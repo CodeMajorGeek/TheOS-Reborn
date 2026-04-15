@@ -1,22 +1,5 @@
 #include <syscall.h>
 
-long syscall(long num, long a1, long a2, long a3, long a4, long a5, long a6)
-{
-    long ret;
-    register long r10 __asm__("r10") = a4;
-    register long r8 __asm__("r8") = a5;
-    register long r9 __asm__("r9") = a6;
-
-    __asm__ __volatile__(
-        "syscall"
-        : "=a"(ret)
-        : "a"(num), "D"(a1), "S"(a2), "d"(a3), "r"(r10), "r"(r8), "r"(r9)
-        : "rcx", "r11", "memory"
-    );
-
-    return ret;
-}
-
 int fs_is_dir(const char* path)
 {
     return (int) syscall(SYS_FS_ISDIR, (long) path, 0, 0, 0, 0, 0);
@@ -101,6 +84,16 @@ int sys_console_route_set_sid(uint32_t console_sid, uint32_t flags)
 int sys_console_route_read_sid(uint32_t console_sid, void* buf, size_t len)
 {
     return (int) syscall(SYS_CONSOLE_ROUTE_READ_SID, (long) console_sid, (long) buf, (long) len, 0, 0, 0);
+}
+
+int sys_console_route_input_write_sid(uint32_t console_sid, const void* buf, size_t len)
+{
+    return (int) syscall(SYS_CONSOLE_ROUTE_INPUT_WRITE_SID, (long) console_sid, (long) buf, (long) len, 0, 0, 0);
+}
+
+int sys_console_route_input_read(void* buf, size_t len)
+{
+    return (int) syscall(SYS_CONSOLE_ROUTE_INPUT_READ, (long) buf, (long) len, 0, 0, 0, 0);
 }
 
 __attribute__((__noreturn__)) void sys_exit(int status)
@@ -242,6 +235,11 @@ int sys_kbd_get_scancode(void)
     return (int) syscall(SYS_KBD_GET_SCANCODE, 0, 0, 0, 0, 0, 0);
 }
 
+int sys_kbd_capture_set(uint32_t owner_pid_or_zero_to_release)
+{
+    return (int) syscall(SYS_KBD_CAPTURE_SET, (long) owner_pid_or_zero_to_release, 0, 0, 0, 0, 0);
+}
+
 int sys_kbd_inject_scancode(uint32_t target_pid, uint8_t scancode)
 {
     return (int) syscall(SYS_KBD_INJECT_SCANCODE, (long) target_pid, (long) scancode, 0, 0, 0, 0);
@@ -331,4 +329,49 @@ uintptr_t sys_thread_get_fsbase(void)
     if (ret < 0)
         return 0;
     return (uintptr_t) ret;
+}
+
+int sys_pipe(int* pipefd)
+{
+    return (int) syscall(SYS_PIPE, (long) pipefd, 0, 0, 0, 0, 0);
+}
+
+int sys_futex(int* uaddr, int op, int val, unsigned int timeout_ms)
+{
+    return (int) syscall(SYS_FUTEX, (long) uaddr, (long) op, (long) val, (long) timeout_ms, 0, 0);
+}
+
+int sys_shmget(int key, size_t size, int shmflg)
+{
+    return (int) syscall(SYS_SHMGET, (long) key, (long) size, (long) shmflg, 0, 0, 0);
+}
+
+long sys_shmat(int shmid, const void* shmaddr)
+{
+    return syscall(SYS_SHMAT, (long) shmid, (long) shmaddr, 0, 0, 0, 0);
+}
+
+int sys_shmdt(const void* shmaddr)
+{
+    return (int) syscall(SYS_SHMDT, (long) shmaddr, 0, 0, 0, 0, 0);
+}
+
+int sys_shmctl(int shmid, int cmd)
+{
+    return (int) syscall(SYS_SHMCTL, (long) shmid, (long) cmd, 0, 0, 0, 0);
+}
+
+int sys_msgget(int key, int msgflg)
+{
+    return (int) syscall(SYS_MSGGET, (long) key, (long) msgflg, 0, 0, 0, 0);
+}
+
+int sys_msgsnd(int msqid, const void* msgp, size_t msgsz, int msgflg)
+{
+    return (int) syscall(SYS_MSGSND, (long) msqid, (long) msgp, (long) msgsz, (long) msgflg, 0, 0);
+}
+
+long sys_msgrcv(int msqid, void* msgp, size_t msgsz, long msgtyp, int msgflg)
+{
+    return syscall(SYS_MSGRCV, (long) msqid, (long) msgp, (long) msgsz, (long) msgtyp, (long) msgflg, 0);
 }

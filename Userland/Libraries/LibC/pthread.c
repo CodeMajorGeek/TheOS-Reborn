@@ -9,7 +9,9 @@
 #include <sys/mman.h>
 #include <syscall.h>
 
-#define LIBC_PTHREAD_DEFAULT_STACK_SIZE (256U * 1024U)
+/* Le rendu WindowServer + libc peut monter haut en pile ; 256 KiB a montré des #PF
+ * avec cr2 cohérent avec rdi corrompu dans memcpy (thread de rendu). */
+#define LIBC_PTHREAD_DEFAULT_STACK_SIZE (2U * 1024U * 1024U)
 #define LIBC_PTHREAD_MAX_TRACKED        128U
 
 typedef struct libc_pthread_start

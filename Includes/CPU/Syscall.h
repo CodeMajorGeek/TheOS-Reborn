@@ -3,6 +3,7 @@
 
 #include <CPU/ISR.h>
 #include <Debug/Spinlock.h>
+#include <Task/Task.h>
 #include <UAPI/Syscall.h>
 #include <stdbool.h>
 #include <stddef.h>
@@ -21,11 +22,13 @@
 #define SYSCALL_MAP_HINT_BASE          0x0000000050000000ULL
 #define SYSCALL_MAP_HINT_LIMIT         0x000000006F000000ULL
 #define SYSCALL_MAX_OPEN_FILES         64U
-#define SYSCALL_MAX_PROCS              32U
-#define SYSCALL_MAX_EXIT_EVENTS        64U
-#define SYSCALL_MAX_THREAD_EXIT_EVENTS 64U
+/*128 slots : saturations fréquentes sous charge (GUI + threads + DHCP), fork → -1 → EAGAIN côté LibC. */
+#define SYSCALL_MAX_PROCS              256U
+#define SYSCALL_MAX_EXIT_EVENTS        256U
+#define SYSCALL_MAX_THREAD_EXIT_EVENTS 128U
 #define SYSCALL_MAX_CONSOLE_ROUTES     16U
 #define SYSCALL_CONSOLE_CAPTURE_SIZE   16384U
+#define SYSCALL_CONSOLE_PTY_INPUT_SIZE 4096U
 #define SYSCALL_PATH_MAX_COMPONENTS    32U
 #define SYSCALL_PATH_COMPONENT_MAX     255U
 #define SYSCALL_PROC_NONE              0xFFFFFFFFU
@@ -101,6 +104,8 @@
 #define SYSCALL_FD_TYPE_NET_RAW  5U
 #define SYSCALL_FD_TYPE_NET_UDP_SOCKET 6U
 #define SYSCALL_FD_TYPE_NET_TCP_SOCKET 7U
+#define SYSCALL_FD_TYPE_NET_UNIX_SOCKET 8U
+#define SYSCALL_FD_TYPE_PIPE 9U
 
 extern void enable_syscall_ext(void);
 extern void syscall_handler_stub(void);
@@ -124,6 +129,28 @@ typedef struct syscall_frame
     uint64_t rsp;
     uint64_t reserved0;
 } syscall_frame_t;
+
+typedef struct syscall_user_resume_context
+{
+    uint64_t rax;
+    uint64_t rcx;
+    uint64_t rdx;
+    uint64_t rsi;
+    uint64_t rdi;
+    uint64_t r8;
+    uint64_t r9;
+    uint64_t r10;
+    uint64_t r11;
+    uint64_t r15;
+    uint64_t r14;
+    uint64_t r13;
+    uint64_t r12;
+    uint64_t rbp;
+    uint64_t rbx;
+    uint64_t rip;
+    uint64_t rflags;
+    uint64_t rsp;
+} syscall_user_resume_context_t;
 
 typedef struct syscall_file_desc
 {
@@ -195,6 +222,10 @@ typedef struct syscall_console_route
     uint32_t tail;
     uint32_t count;
     char buffer[SYSCALL_CONSOLE_CAPTURE_SIZE];
+    uint32_t in_head;
+    uint32_t in_tail;
+    uint32_t in_count;
+    char in_buffer[SYSCALL_CONSOLE_PTY_INPUT_SIZE];
 } syscall_console_route_t;
 
 typedef struct syscall_cow_ref
@@ -278,6 +309,74 @@ typedef struct syscall_elf64_rela
     int64_t r_addend;
 } __attribute__((packed)) syscall_elf64_rela_t;
 
+#define SYSCALL_PIPE_MAX            32U
+#define SYSCALL_PIPE_BUF_SIZE       4096U
+#define SYSCALL_PIPE_FLAG_READ      1U
+#define SYSCALL_PIPE_FLAG_WRITE     2U
+
+typedef struct syscall_pipe
+{
+    bool used;
+    uint8_t ring[SYSCALL_PIPE_BUF_SIZE];
+    uint16_t head;
+    uint16_t tail;
+    uint32_t count;
+    uint32_t readers;
+    uint32_t writers;
+    task_wait_queue_t read_waitq;
+    task_wait_queue_t write_waitq;
+    spinlock_t lock;
+    bool lock_ready;
+} syscall_pipe_t;
+
+#define SYSCALL_FUTEX_BUCKETS       64U
+
+typedef struct syscall_futex_bucket
+{
+    task_wait_queue_t waitq;
+    bool init;
+} syscall_futex_bucket_t;
+
+#define SYSCALL_SHM_MAX_SEGMENTS    32U
+#define SYSCALL_SHM_MAX_PAGES       64U
+
+typedef struct syscall_shm_segment
+{
+    bool used;
+    int32_t key;
+    size_t size;
+    uint32_t num_pages;
+    uintptr_t pages[SYSCALL_SHM_MAX_PAGES];
+    uint32_t refcount;
+    bool marked_remove;
+    uint32_t mode;
+} syscall_shm_segment_t;
+
+#define SYSCALL_MSG_MAX_QUEUES      32U
+#define SYSCALL_MSG_RING_SIZE       64U
+#define SYSCALL_MSG_MAX_TEXT        4096U
+
+typedef struct syscall_msg
+{
+    int32_t mtype;
+    uint16_t len;
+    uint8_t mtext[SYSCALL_MSG_MAX_TEXT];
+} syscall_msg_t;
+
+typedef struct syscall_msgq
+{
+    bool used;
+    int32_t key;
+    syscall_msg_t ring[SYSCALL_MSG_RING_SIZE];
+    uint16_t head;
+    uint16_t tail;
+    uint32_t count;
+    task_wait_queue_t send_waitq;
+    task_wait_queue_t recv_waitq;
+    spinlock_t lock;
+    bool lock_ready;
+} syscall_msgq_t;
+
 typedef struct syscall_runtime_state
 {
     volatile uint64_t count_per_cpu[256];
@@ -294,6 +393,7 @@ typedef struct syscall_runtime_state
     syscall_cow_ref_t cow_refs[SYSCALL_COW_MAX_REFS];
     uint32_t cpu_current_proc[256];
     uint8_t cpu_need_resched[256];
+    uint8_t cpu_yield_same_owner_pick[256];
     uint8_t cpu_need_timer_preempt[256];
     uint8_t cpu_slice_ticks[256];
     uint32_t next_pid;
@@ -303,6 +403,20 @@ typedef struct syscall_runtime_state
     bool console_lock_ready;
     spinlock_t cow_lock;
     bool cow_lock_ready;
+
+    syscall_pipe_t pipes[SYSCALL_PIPE_MAX];
+    spinlock_t pipe_lock;
+    bool pipe_lock_ready;
+
+    syscall_futex_bucket_t futex_buckets[SYSCALL_FUTEX_BUCKETS];
+    spinlock_t futex_lock;
+    bool futex_lock_ready;
+
+    syscall_shm_segment_t shm_segments[SYSCALL_SHM_MAX_SEGMENTS];
+    spinlock_t shm_lock;
+    bool shm_lock_ready;
+
+    syscall_msgq_t msg_queues[SYSCALL_MSG_MAX_QUEUES];
 } syscall_runtime_state_t;
 
 void Syscall_init(void);
@@ -317,5 +431,6 @@ uint64_t Syscall_post_handler(uint64_t syscall_ret, syscall_frame_t* frame, uint
 bool Syscall_handle_user_exception(interrupt_frame_t* frame, uintptr_t fault_addr);
 void Syscall_on_timer_tick(uint32_t cpu_index);
 bool Syscall_handle_timer_preempt(interrupt_frame_t* frame, uint32_t cpu_index);
+bool Syscall_try_dispatch_user_from_idle(uint32_t cpu_index);
 
 #endif

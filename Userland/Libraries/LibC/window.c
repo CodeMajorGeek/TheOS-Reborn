@@ -741,12 +741,105 @@ static uint32_t ws_glyph_index_for_char(const ws_context_t* ctx, unsigned char c
     return 0U;
 }
 
+/* Décode un codepoint UTF-8 ; retourne l’index du prochain octet à lire, ou 0 si fin de chaîne. */
+static size_t ws_utf8_next_codepoint(const char* text, size_t text_bytes, size_t i, uint32_t* out_cp)
+{
+    if (!text || !out_cp || i >= text_bytes || text[i] == '\0')
+        return 0U;
+
+    const unsigned char* s = (const unsigned char*) text;
+    unsigned char c0 = s[i];
+
+    if (c0 < 0x80U)
+    {
+        *out_cp = (uint32_t) c0;
+        return i + 1U;
+    }
+
+    if ((c0 & 0xE0U) == 0xC0U)
+    {
+        if (i + 1U >= text_bytes || s[i + 1U] == '\0' || (s[i + 1U] & 0xC0U) != 0x80U)
+        {
+            *out_cp = (uint32_t) '?';
+            return i + 1U;
+        }
+        uint32_t cp = ((uint32_t) (c0 & 0x1FU) << 6) | (uint32_t) (s[i + 1U] & 0x3FU);
+        if (cp < 0x80U)
+        {
+            *out_cp = (uint32_t) '?';
+            return i + 2U;
+        }
+        *out_cp = cp;
+        return i + 2U;
+    }
+
+    if ((c0 & 0xF0U) == 0xE0U)
+    {
+        if (i + 2U >= text_bytes || s[i + 1U] == '\0' || s[i + 2U] == '\0' ||
+            (s[i + 1U] & 0xC0U) != 0x80U || (s[i + 2U] & 0xC0U) != 0x80U)
+        {
+            *out_cp = (uint32_t) '?';
+            return i + 1U;
+        }
+        uint32_t cp = ((uint32_t) (c0 & 0x0FU) << 12) | ((uint32_t) (s[i + 1U] & 0x3FU) << 6) |
+                      (uint32_t) (s[i + 2U] & 0x3FU);
+        if (cp < 0x800U)
+        {
+            *out_cp = (uint32_t) '?';
+            return i + 3U;
+        }
+        *out_cp = cp;
+        return i + 3U;
+    }
+
+    if ((c0 & 0xF8U) == 0xF0U)
+    {
+        if (i + 3U >= text_bytes || s[i + 1U] == '\0' || s[i + 2U] == '\0' || s[i + 3U] == '\0' ||
+            (s[i + 1U] & 0xC0U) != 0x80U || (s[i + 2U] & 0xC0U) != 0x80U || (s[i + 3U] & 0xC0U) != 0x80U)
+        {
+            *out_cp = (uint32_t) '?';
+            return i + 1U;
+        }
+        uint32_t cp = ((uint32_t) (c0 & 0x07U) << 18) | ((uint32_t) (s[i + 1U] & 0x3FU) << 12) |
+                      ((uint32_t) (s[i + 2U] & 0x3FU) << 6) | (uint32_t) (s[i + 3U] & 0x3FU);
+        if (cp < 0x10000U || cp > 0x10FFFFU)
+        {
+            *out_cp = (uint32_t) '?';
+            return i + 4U;
+        }
+        *out_cp = cp;
+        return i + 4U;
+    }
+
+    *out_cp = (uint32_t) '?';
+    return i + 1U;
+}
+
+static uint32_t ws_glyph_index_for_codepoint(const ws_context_t* ctx, uint32_t cp)
+{
+    if (!ctx || ctx->font_num_glyph == 0U)
+        return 0U;
+
+    if (cp == (uint32_t) '\t')
+        cp = (uint32_t) ' ';
+    if (cp < 32U)
+        cp = (uint32_t) ' ';
+
+    if (cp < ctx->font_num_glyph)
+        return cp;
+
+    if (ctx->font_num_glyph > (uint32_t) '?')
+        return (uint32_t) '?';
+    return 0U;
+}
+
 static void ws_draw_text_psf2(ws_context_t* ctx,
                               int32_t x,
                               int32_t y,
                               uint32_t max_width,
                               uint32_t color,
-                              const char* text)
+                              const char* text,
+                              size_t text_bytes)
 {
     if (!ctx ||
         !text ||
@@ -784,12 +877,18 @@ static void ws_draw_text_psf2(ws_context_t* ctx,
     if (y + (int32_t) ctx->font_height <= vis_y0 || y >= vis_y1)
         return;
 
-    for (size_t i = 0; text[i] != '\0'; i++)
+    for (size_t i = 0; i < text_bytes && text[i] != '\0';)
     {
         if (pen_x + (int32_t) ctx->font_width > max_x)
             break;
 
-        uint32_t glyph_index = ws_glyph_index_for_char(ctx, (unsigned char) text[i]);
+        uint32_t cp = 0U;
+        size_t next = ws_utf8_next_codepoint(text, text_bytes, i, &cp);
+        if (next == 0U)
+            break;
+        i = next;
+
+        uint32_t glyph_index = ws_glyph_index_for_codepoint(ctx, cp);
         size_t glyph_offset = (size_t) glyph_index * (size_t) ctx->font_bytes_per_glyph;
         if (glyph_offset >= ctx->font_bitmap_size)
         {
@@ -892,12 +991,21 @@ static void ws_draw_window_body_text(ws_context_t* ctx, const ws_window_t* windo
         return;
 
     const char* src = window->body_text;
+    const char* body_end = window->body_text + sizeof(window->body_text);
     char line_buf[WS_WINDOW_BODY_TEXT_MAX + 1U];
     static bool ws_body_text_log_once = false;
-    while (*src != '\0')
+    for (;;)
     {
+        size_t off = (size_t) (src - window->body_text);
+        if (off >= sizeof(window->body_text))
+            break;
+        if (*src == '\0')
+            break;
+
+        size_t room = sizeof(window->body_text) - off;
+
         size_t len = 0U;
-        while (src[len] != '\0' && src[len] != '\n')
+        while (len < room && src[len] != '\0' && src[len] != '\n')
             len++;
         if (len > WS_WINDOW_BODY_TEXT_MAX)
             len = WS_WINDOW_BODY_TEXT_MAX;
@@ -921,10 +1029,19 @@ static void ws_draw_window_body_text(ws_context_t* ctx, const ws_window_t* windo
         int32_t line_x1 = content_x + (int32_t) content_w;
         int32_t line_y1 = content_y + (int32_t) ctx->font_height;
         if (!(line_x1 <= vis_x0 || line_y1 <= vis_y0 || line_x0 >= vis_x1 || line_y0 >= vis_y1))
-            ws_draw_text_psf2(ctx, content_x, content_y, content_w, text_color, line_buf);
+            ws_draw_text_psf2(ctx,
+                              content_x,
+                              content_y,
+                              content_w,
+                              text_color,
+                              line_buf,
+                              sizeof(line_buf));
+
         content_y += (int32_t) line_h;
 
         src += len;
+        if (src >= body_end)
+            break;
         if (*src == '\n')
             src++;
     }
@@ -1139,7 +1256,8 @@ static void ws_draw_window(ws_context_t* ctx, const ws_window_t* window)
                               window->y + 3,
                               title_max_width,
                               text_color,
-                              window->title);
+                              window->title,
+                              sizeof(window->title));
         }
     }
 
@@ -1166,7 +1284,10 @@ static void ws_redraw_scene(ws_context_t* ctx)
                  24U,
                  0x00101922U);
 
-    for (uint32_t i = 0U; i < ctx->window_count; i++)
+    uint32_t win_n = ctx->window_count;
+    if (win_n > WS_MAX_WINDOWS)
+        win_n = WS_MAX_WINDOWS;
+    for (uint32_t i = 0U; i < win_n; i++)
         ws_draw_window(ctx, &ctx->windows[i]);
 
     ws_draw_cursor(ctx);

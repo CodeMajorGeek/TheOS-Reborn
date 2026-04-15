@@ -6,7 +6,7 @@
 #include <stdint.h>
 #include <stdbool.h>
 
-#define KERNEL_STACK_SIZE   0x2000      // Define a 16 kB stack area for the kernel.
+#define KERNEL_STACK_SIZE   0x8000      // Per-CPU kernel stack (32 KiB) to cover deep syscall paths.
 
 #define TASK_SWITCH_APPENED 0xDEADBEEF  // A dummy value to know when we have already switched to another task.
 

@@ -46,6 +46,7 @@ typedef struct shell_command_alias
 static const shell_command_alias_t shell_command_aliases[] =
 {
     { "doom", "embeddedDOOM" },
+    { "micropython", "TheMicroPython" },
     { "windowserver", "TheWindowServer" }
 };
 
@@ -62,34 +63,6 @@ static const char* shell_builtin_commands[] =
     "help",
     "exit"
 };
-
-static void shell_debug_emit(const char* run_id,
-                             const char* hypothesis_id,
-                             const char* location,
-                             const char* message,
-                             unsigned long long v1,
-                             unsigned long long v2,
-                             unsigned long long v3)
-{
-    FILE* file = fopen("/home/alternant/TheOS-Reborn/.cursor/debug-f2d0c7.log", "a");
-    if (!file)
-        return;
-
-    unsigned long long timestamp = (unsigned long long) sys_tick_get();
-    // #region agent log
-    fprintf(file,
-            "{\"sessionId\":\"f2d0c7\",\"runId\":\"%s\",\"hypothesisId\":\"%s\",\"location\":\"%s\",\"message\":\"%s\",\"data\":{\"v1\":%llu,\"v2\":%llu,\"v3\":%llu},\"timestamp\":%llu}\n",
-            run_id,
-            hypothesis_id,
-            location,
-            message,
-            v1,
-            v2,
-            v3,
-            timestamp);
-    // #endregion
-    fclose(file);
-}
 
 static char* shell_trim(char* str)
 {
@@ -1075,14 +1048,6 @@ static bool shell_read_line(const char* prompt,
     size_t cursor = 0U;
     out_line[0] = '\0';
     size_t prev_len = 0U;
-    static unsigned long long debug_eof_count = 0ULL;
-    static unsigned long long debug_key_count = 0ULL;
-    static unsigned long long debug_log_epoch = 0ULL;
-    static unsigned long long debug_key_gap_max = 0ULL;
-    static unsigned long long debug_key_gap_over_20 = 0ULL;
-    static unsigned long long debug_last_key_tick = 0ULL;
-    static unsigned long long debug_last_key_value = 0ULL;
-    static unsigned long long debug_enter_count = 0ULL;
 
     if (history)
     {
@@ -1094,54 +1059,8 @@ static bool shell_read_line(const char* prompt,
     for (;;)
     {
         int key = getchar();
-        unsigned long long now_tick = (unsigned long long) sys_tick_get();
         if (key == EOF)
-        {
-            debug_eof_count++;
             (void) usleep(2000U);
-        }
-        else
-        {
-            debug_key_count++;
-            debug_last_key_value = (unsigned long long) (uint32_t) key;
-            if (key == '\r' || key == '\n')
-                debug_enter_count++;
-            if (debug_last_key_tick != 0ULL && now_tick > debug_last_key_tick)
-            {
-                unsigned long long key_gap = now_tick - debug_last_key_tick;
-                if (key_gap > debug_key_gap_max)
-                    debug_key_gap_max = key_gap;
-                if (key_gap > 20ULL)
-                    debug_key_gap_over_20++;
-            }
-            debug_last_key_tick = now_tick;
-        }
-        unsigned long long epoch = now_tick / 500ULL;
-        if (epoch != 0ULL && epoch > debug_log_epoch)
-        {
-            debug_log_epoch = epoch;
-            // #region agent log
-            shell_debug_emit("run-2", "H17", "TheShell/main.c:shell_read_line", "input_loop", debug_eof_count, debug_key_count, now_tick);
-            printf("[AGENTDBG H17 SHELL_INPUT] tick=%llu eof=%llu key=%llu\n",
-                   now_tick,
-                   debug_eof_count,
-                   debug_key_count);
-            shell_debug_emit("run-3",
-                             "H24",
-                             "TheShell/main.c:shell_read_line",
-                             "stdin_key_gap",
-                             debug_key_gap_max,
-                             debug_key_gap_over_20,
-                             debug_key_count);
-            printf("[AGENTDBG H24 SHELL_KEY_GAP] max_ticks=%llu over20=%llu key=%llu\n",
-                   debug_key_gap_max,
-                   debug_key_gap_over_20,
-                   debug_key_count);
-            printf("[AGENTDBG H40 SHELL_KEY_VALUES] last_key=%llu enter=%llu\n",
-                   debug_last_key_value,
-                   debug_enter_count);
-            // #endregion
-        }
 
         if (key == EOF)
             continue;

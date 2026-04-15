@@ -7,8 +7,8 @@
 # define EXT_C(sym) sym
 #endif
 
-/* The size of our early kernel stack (16KiB). */
-#define STACK_SIZE  0x4000
+/* The size of our early BSP kernel stack (32 KiB). */
+#define STACK_SIZE  0x8000
 
 .set KERNEL_VIRT_BASE,   VMM_KERNEL_VIRT_BASE
 .set HHDM_PML4_INDEX,    VMM_HHDM_PML4_INDEX

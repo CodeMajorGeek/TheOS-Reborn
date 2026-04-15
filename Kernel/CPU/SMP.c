@@ -1094,7 +1094,13 @@ static bool SMP_issue_tlb_shootdown(uint8_t kind, uintptr_t virt)
         return true;
 
     bool ok = true;
-    uint64_t flags = spin_lock_irqsave(&SMP_state.tests.tlb_lock);
+    /*
+     * Keep IRQs enabled while waiting/holding the shootdown lock so this CPU
+     * can still service incoming TLB IPIs and publish ack generations.
+     * Using irqsave here can deadlock two CPUs that concurrently request
+     * shootdowns while one is spinning on tlb_lock.
+     */
+    spin_lock(&SMP_state.tests.tlb_lock);
     uint64_t generation = __atomic_add_fetch(&SMP_state.tests.tlb_generation, 1, __ATOMIC_ACQ_REL);
 
     __atomic_store_n(&SMP_state.tests.tlb_target_virt, virt & ~(uintptr_t) 0xFFFULL, __ATOMIC_RELAXED);
@@ -1149,7 +1155,7 @@ static bool SMP_issue_tlb_shootdown(uint8_t kind, uintptr_t virt)
     }
 
     __atomic_store_n(&SMP_state.tests.tlb_kind, SMP_TLB_SHOOTDOWN_NONE, __ATOMIC_RELEASE);
-    spin_unlock_irqrestore(&SMP_state.tests.tlb_lock, flags);
+    spin_unlock(&SMP_state.tests.tlb_lock);
 
     return ok;
 }

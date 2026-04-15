@@ -37,6 +37,8 @@ int kill(pid_t pid, int sig);
 __attribute__((__noreturn__)) void _exit(int status);
 int daemon(int nochdir, int noclose);
 
+int pipe(int pipefd[2]);
+
 unsigned int sleep(unsigned int seconds);
 int usleep(unsigned int usec);
 int sleep_state(unsigned int state);

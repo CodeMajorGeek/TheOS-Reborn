@@ -778,6 +778,11 @@ static int stdio_read_key(void)
 {
     for (;;)
     {
+        uint8_t pty_byte = 0U;
+        int pty_rc = sys_console_route_input_read(&pty_byte, 1U);
+        if (pty_rc == 1)
+            return (int) pty_byte;
+
         int code = sys_kbd_get_scancode();
         if (code <= 0)
         {

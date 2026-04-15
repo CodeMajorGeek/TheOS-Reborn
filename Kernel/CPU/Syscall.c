@@ -20,6 +20,7 @@
 #include <Network/ARP.h>
 #include <Network/Socket.h>
 #include <Network/TCP.h>
+#include <Network/Unix.h>
 #include <Storage/AHCI.h>
 #include <Storage/VFS.h>
 #include <Task/RCU.h>
@@ -46,11 +47,9 @@ static uint64_t Syscall_debug_preempt_no_flag = 0;
 static uint64_t Syscall_debug_preempt_no_current = 0;
 static uint64_t Syscall_debug_preempt_same_slot = 0;
 static uint64_t Syscall_debug_preempt_invalid_next = 0;
-static uint64_t Syscall_debug_log_epoch = 0;
 static uint64_t Syscall_debug_post_calls = 0;
 static uint64_t Syscall_debug_post_pick_next = 0;
 static uint64_t Syscall_debug_post_switch = 0;
-static uint64_t Syscall_debug_post_log_epoch = 0;
 static uint64_t Syscall_debug_need_resched_set_cpu[4] = { 0, 0, 0, 0 };
 static uint64_t Syscall_debug_preempt_attempt_cpu[4] = { 0, 0, 0, 0 };
 static uint64_t Syscall_debug_preempt_success_cpu[4] = { 0, 0, 0, 0 };
@@ -65,6 +64,15 @@ static uint64_t Syscall_debug_nr_other = 0;
 static uint64_t Syscall_debug_flag_consume_timer_cpu[4] = { 0, 0, 0, 0 };
 static uint64_t Syscall_debug_flag_consume_post_cpu[4] = { 0, 0, 0, 0 };
 static uint64_t Syscall_debug_flag_set_sleep_cpu[4] = { 0, 0, 0, 0 };
+static uint64_t Syscall_debug_idle_dispatch_attempts = 0;
+static uint64_t Syscall_debug_idle_dispatch_success = 0;
+static uint64_t Syscall_debug_idle_dispatch_rejected_running = 0;
+static uint64_t Syscall_debug_idle_dispatch_rejected_empty = 0;
+static uint64_t Syscall_debug_idle_dispatch_attempt_cpu[4] = { 0, 0, 0, 0 };
+static uint64_t Syscall_debug_idle_dispatch_success_cpu[4] = { 0, 0, 0, 0 };
+static uint8_t Syscall_idle_claimed_slots[SYSCALL_MAX_PROCS] = { 0 };
+
+__attribute__((__noreturn__)) void Syscall_resume_user_context(const syscall_user_resume_context_t* ctx);
 
 #define SYSCALL_KBD_INJECT_QUEUE_CAP 256U
 typedef struct syscall_kbd_inject_entry
@@ -81,6 +89,7 @@ static uint64_t Syscall_kbd_inject_push_drop = 0ULL;
 static uint64_t Syscall_kbd_inject_pop_ok = 0ULL;
 static uint32_t Syscall_kbd_inject_targets[32] = { 0U };
 static uint64_t Syscall_kbd_inject_target_hits = 0ULL;
+static uint32_t Syscall_kbd_hardware_capture_pid = 0U;
 
 static void Syscall_kbd_inject_register_target(uint32_t pid)
 {
@@ -967,24 +976,39 @@ static uint64_t Syscall_handle_socket(uint32_t cpu_index, const syscall_frame_t*
     int domain = (int) frame->rdi;
     int type = (int) frame->rsi;
     int protocol = (int) frame->rdx;
-    if (domain != NET_SOCKET_AF_INET)
-        return (uint64_t) -1;
 
     uint32_t socket_id = 0U;
     uint32_t fd_type = SYSCALL_FD_TYPE_NONE;
-    if (type == (int) NET_SOCKET_SOCK_DGRAM &&
-        (protocol == 0 || protocol == (int) NET_SOCKET_IPPROTO_UDP))
+
+    if (domain == (int) AF_UNIX)
     {
-        if (!NET_socket_create_udp(owner_pid, &socket_id))
+        if (type == (int) NET_UNIX_SOCK_STREAM || type == (int) NET_UNIX_SOCK_DGRAM)
+        {
+            if (!NET_unix_create(owner_pid, (uint32_t) type, &socket_id))
+                return (uint64_t) -1;
+            fd_type = SYSCALL_FD_TYPE_NET_UNIX_SOCKET;
+        }
+        else
             return (uint64_t) -1;
-        fd_type = SYSCALL_FD_TYPE_NET_UDP_SOCKET;
     }
-    else if (type == (int) NET_TCP_SOCK_STREAM &&
-             (protocol == 0 || protocol == (int) NET_TCP_IPPROTO_TCP))
+    else if (domain == (int) NET_SOCKET_AF_INET)
     {
-        if (!NET_tcp_create(owner_pid, &socket_id))
+        if (type == (int) NET_SOCKET_SOCK_DGRAM &&
+            (protocol == 0 || protocol == (int) NET_SOCKET_IPPROTO_UDP))
+        {
+            if (!NET_socket_create_udp(owner_pid, &socket_id))
+                return (uint64_t) -1;
+            fd_type = SYSCALL_FD_TYPE_NET_UDP_SOCKET;
+        }
+        else if (type == (int) NET_TCP_SOCK_STREAM &&
+                 (protocol == 0 || protocol == (int) NET_TCP_IPPROTO_TCP))
+        {
+            if (!NET_tcp_create(owner_pid, &socket_id))
+                return (uint64_t) -1;
+            fd_type = SYSCALL_FD_TYPE_NET_TCP_SOCKET;
+        }
+        else
             return (uint64_t) -1;
-        fd_type = SYSCALL_FD_TYPE_NET_TCP_SOCKET;
     }
     else
     {
@@ -998,8 +1022,10 @@ static uint64_t Syscall_handle_socket(uint32_t cpu_index, const syscall_frame_t*
         spin_unlock(&Syscall_state.fd_lock);
         if (fd_type == SYSCALL_FD_TYPE_NET_UDP_SOCKET)
             (void) NET_socket_close_udp(owner_pid, socket_id);
-        else
+        else if (fd_type == SYSCALL_FD_TYPE_NET_TCP_SOCKET)
             (void) NET_tcp_close(owner_pid, socket_id);
+        else if (fd_type == SYSCALL_FD_TYPE_NET_UNIX_SOCKET)
+            (void) NET_unix_close(owner_pid, socket_id);
         return (uint64_t) -1;
     }
 
@@ -1027,11 +1053,6 @@ static uint64_t Syscall_handle_bind(uint32_t cpu_index, const syscall_frame_t* f
     if (fd < 0 || (uint64_t) fd >= SYSCALL_MAX_OPEN_FILES || owner_pid == 0U)
         return (uint64_t) -1;
 
-    uint32_t local_addr_be = 0U;
-    uint16_t local_port = 0U;
-    if (!Syscall_copy_in_sockaddr_in(user_addr, addr_len, &local_addr_be, &local_port))
-        return (uint64_t) -1;
-
     uint32_t socket_id = 0U;
     uint32_t fd_type = SYSCALL_FD_TYPE_NONE;
     spin_lock(&Syscall_state.fd_lock);
@@ -1042,13 +1063,44 @@ static uint64_t Syscall_handle_bind(uint32_t cpu_index, const syscall_frame_t* f
         return (uint64_t) -1;
     }
     fd_type = entry->type;
-    if (fd_type != SYSCALL_FD_TYPE_NET_UDP_SOCKET && fd_type != SYSCALL_FD_TYPE_NET_TCP_SOCKET)
+    if (fd_type != SYSCALL_FD_TYPE_NET_UDP_SOCKET &&
+        fd_type != SYSCALL_FD_TYPE_NET_TCP_SOCKET &&
+        fd_type != SYSCALL_FD_TYPE_NET_UNIX_SOCKET)
     {
         spin_unlock(&Syscall_state.fd_lock);
         return (uint64_t) -1;
     }
     socket_id = entry->net_socket_id;
     spin_unlock(&Syscall_state.fd_lock);
+
+    if (fd_type == SYSCALL_FD_TYPE_NET_UNIX_SOCKET)
+    {
+        if (!user_addr || addr_len < 4U)
+            return (uint64_t) -1;
+        sys_sockaddr_t hdr;
+        if (!Syscall_copy_from_user(&hdr, user_addr, sizeof(hdr)))
+            return (uint64_t) -1;
+        if (hdr.sa_family != AF_UNIX)
+            return (uint64_t) -1;
+        size_t path_len = addr_len - 2U;
+        if (path_len == 0 || path_len >= NET_UNIX_PATH_MAX)
+            return (uint64_t) -1;
+        char path[NET_UNIX_PATH_MAX];
+        if (!Syscall_copy_from_user(path, (const uint8_t*) user_addr + 2U, path_len))
+            return (uint64_t) -1;
+        path[path_len] = '\0';
+        size_t real_len = 0;
+        while (real_len < path_len && path[real_len] != '\0')
+            real_len++;
+        if (real_len == 0)
+            return (uint64_t) -1;
+        return NET_unix_bind(owner_pid, socket_id, path, real_len) ? 0 : (uint64_t) -1;
+    }
+
+    uint32_t local_addr_be = 0U;
+    uint16_t local_port = 0U;
+    if (!Syscall_copy_in_sockaddr_in(user_addr, addr_len, &local_addr_be, &local_port))
+        return (uint64_t) -1;
 
     if (fd_type == SYSCALL_FD_TYPE_NET_UDP_SOCKET)
         return NET_socket_bind_udp(owner_pid, socket_id, local_addr_be, local_port) ? 0 : (uint64_t) -1;
@@ -1079,7 +1131,9 @@ static uint64_t Syscall_handle_connect(uint32_t cpu_index, const syscall_frame_t
         return (uint64_t) -1;
     }
     fd_type = entry->type;
-    if (fd_type != SYSCALL_FD_TYPE_NET_UDP_SOCKET && fd_type != SYSCALL_FD_TYPE_NET_TCP_SOCKET)
+    if (fd_type != SYSCALL_FD_TYPE_NET_UDP_SOCKET &&
+        fd_type != SYSCALL_FD_TYPE_NET_TCP_SOCKET &&
+        fd_type != SYSCALL_FD_TYPE_NET_UNIX_SOCKET)
     {
         spin_unlock(&Syscall_state.fd_lock);
         return (uint64_t) -1;
@@ -1092,7 +1146,9 @@ static uint64_t Syscall_handle_connect(uint32_t cpu_index, const syscall_frame_t
     {
         if (fd_type == SYSCALL_FD_TYPE_NET_UDP_SOCKET)
             return NET_socket_disconnect_udp(owner_pid, socket_id) ? 0 : (uint64_t) -1;
-        return NET_tcp_disconnect(owner_pid, socket_id) ? 0 : (uint64_t) -1;
+        if (fd_type == SYSCALL_FD_TYPE_NET_TCP_SOCKET)
+            return NET_tcp_disconnect(owner_pid, socket_id) ? 0 : (uint64_t) -1;
+        return (uint64_t) -1;
     }
     if (!user_addr || addr_len < sizeof(sys_sockaddr_t))
         return (uint64_t) -1;
@@ -1100,6 +1156,28 @@ static uint64_t Syscall_handle_connect(uint32_t cpu_index, const syscall_frame_t
     sys_sockaddr_t addr;
     if (!Syscall_copy_from_user(&addr, user_addr, sizeof(addr)))
         return (uint64_t) -1;
+
+    if (fd_type == SYSCALL_FD_TYPE_NET_UNIX_SOCKET)
+    {
+        if (addr.sa_family != AF_UNIX)
+            return (uint64_t) -1;
+        size_t path_len = addr_len - 2U;
+        if (path_len == 0 || path_len >= NET_UNIX_PATH_MAX)
+            return (uint64_t) -1;
+        char path[NET_UNIX_PATH_MAX];
+        if (!Syscall_copy_from_user(path, (const uint8_t*) user_addr + 2U, path_len))
+            return (uint64_t) -1;
+        path[path_len] = '\0';
+        size_t real_len = 0;
+        while (real_len < path_len && path[real_len] != '\0')
+            real_len++;
+        if (real_len == 0)
+            return (uint64_t) -1;
+        bool would_block = false;
+        if (!NET_unix_connect(owner_pid, socket_id, path, real_len, fd_non_blocking, &would_block))
+            return (uint64_t) -1;
+        return would_block ? (uint64_t) -2 : 0U;
+    }
 
     if (addr.sa_family == AF_UNSPEC)
     {
@@ -1146,13 +1224,23 @@ static uint64_t Syscall_handle_listen(uint32_t cpu_index, const syscall_frame_t*
     uint32_t socket_id = 0U;
     spin_lock(&Syscall_state.fd_lock);
     syscall_file_desc_t* entry = &Syscall_state.fds[(uint32_t) fd];
-    if (!entry->used || entry->owner_pid != owner_pid || entry->type != SYSCALL_FD_TYPE_NET_TCP_SOCKET || entry->io_busy)
+    if (!entry->used || entry->owner_pid != owner_pid || entry->io_busy)
+    {
+        spin_unlock(&Syscall_state.fd_lock);
+        return (uint64_t) -1;
+    }
+    uint32_t listen_fd_type = entry->type;
+    if (listen_fd_type != SYSCALL_FD_TYPE_NET_TCP_SOCKET &&
+        listen_fd_type != SYSCALL_FD_TYPE_NET_UNIX_SOCKET)
     {
         spin_unlock(&Syscall_state.fd_lock);
         return (uint64_t) -1;
     }
     socket_id = entry->net_socket_id;
     spin_unlock(&Syscall_state.fd_lock);
+
+    if (listen_fd_type == SYSCALL_FD_TYPE_NET_UNIX_SOCKET)
+        return NET_unix_listen(owner_pid, socket_id, (uint32_t) backlog) ? 0U : (uint64_t) -1;
 
     return NET_tcp_listen(owner_pid, socket_id, (uint32_t) backlog) ? 0U : (uint64_t) -1;
 }
@@ -1175,7 +1263,14 @@ static uint64_t Syscall_handle_accept(uint32_t cpu_index, const syscall_frame_t*
     bool listener_non_blocking = false;
     spin_lock(&Syscall_state.fd_lock);
     syscall_file_desc_t* entry = &Syscall_state.fds[(uint32_t) fd];
-    if (!entry->used || entry->owner_pid != owner_pid || entry->type != SYSCALL_FD_TYPE_NET_TCP_SOCKET || !entry->can_read || entry->io_busy)
+    uint32_t accept_fd_type = entry->type;
+    if (accept_fd_type != SYSCALL_FD_TYPE_NET_TCP_SOCKET &&
+        accept_fd_type != SYSCALL_FD_TYPE_NET_UNIX_SOCKET)
+    {
+        spin_unlock(&Syscall_state.fd_lock);
+        return (uint64_t) -1;
+    }
+    if (!entry->used || entry->owner_pid != owner_pid || !entry->can_read || entry->io_busy)
     {
         spin_unlock(&Syscall_state.fd_lock);
         return (uint64_t) -1;
@@ -1187,15 +1282,17 @@ static uint64_t Syscall_handle_accept(uint32_t cpu_index, const syscall_frame_t*
 
     uint32_t child_socket_id = 0U;
     bool would_block = false;
-    bool accepted = NET_tcp_accept(owner_pid,
-                                   listener_socket_id,
-                                   &child_socket_id,
-                                   listener_non_blocking,
-                                   &would_block);
+    bool accepted = false;
+    if (accept_fd_type == SYSCALL_FD_TYPE_NET_UNIX_SOCKET)
+        accepted = NET_unix_accept(owner_pid, listener_socket_id, &child_socket_id,
+                                   listener_non_blocking, &would_block);
+    else
+        accepted = NET_tcp_accept(owner_pid, listener_socket_id, &child_socket_id,
+                                  listener_non_blocking, &would_block);
 
     spin_lock(&Syscall_state.fd_lock);
     entry = &Syscall_state.fds[(uint32_t) fd];
-    if (entry->used && entry->owner_pid == owner_pid && entry->type == SYSCALL_FD_TYPE_NET_TCP_SOCKET)
+    if (entry->used && entry->owner_pid == owner_pid && entry->type == accept_fd_type)
         entry->io_busy = false;
     spin_unlock(&Syscall_state.fd_lock);
 
@@ -1211,20 +1308,26 @@ static uint64_t Syscall_handle_accept(uint32_t cpu_index, const syscall_frame_t*
     if (accepted_fd < 0)
     {
         spin_unlock(&Syscall_state.fd_lock);
-        (void) NET_tcp_close(owner_pid, child_socket_id);
+        if (accept_fd_type == SYSCALL_FD_TYPE_NET_UNIX_SOCKET)
+            (void) NET_unix_close(owner_pid, child_socket_id);
+        else
+            (void) NET_tcp_close(owner_pid, child_socket_id);
         return (uint64_t) -1;
     }
 
     syscall_file_desc_t* accepted_entry = &Syscall_state.fds[(uint32_t) accepted_fd];
     memset(accepted_entry, 0, sizeof(*accepted_entry));
     accepted_entry->used = true;
-    accepted_entry->type = SYSCALL_FD_TYPE_NET_TCP_SOCKET;
+    accepted_entry->type = accept_fd_type;
     accepted_entry->owner_pid = owner_pid;
     accepted_entry->can_read = true;
     accepted_entry->can_write = true;
     accepted_entry->non_blocking = listener_non_blocking;
     accepted_entry->net_socket_id = child_socket_id;
     spin_unlock(&Syscall_state.fd_lock);
+
+    if (accept_fd_type == SYSCALL_FD_TYPE_NET_UNIX_SOCKET)
+        return (uint64_t) accepted_fd;
 
     if (user_addr && user_addrlen_ptr)
     {
@@ -1298,7 +1401,9 @@ static uint64_t Syscall_handle_sendto(uint32_t cpu_index, const syscall_frame_t*
         return (uint64_t) -1;
     }
     fd_type = entry->type;
-    if (fd_type != SYSCALL_FD_TYPE_NET_UDP_SOCKET && fd_type != SYSCALL_FD_TYPE_NET_TCP_SOCKET)
+    if (fd_type != SYSCALL_FD_TYPE_NET_UDP_SOCKET &&
+        fd_type != SYSCALL_FD_TYPE_NET_TCP_SOCKET &&
+        fd_type != SYSCALL_FD_TYPE_NET_UNIX_SOCKET)
     {
         spin_unlock(&Syscall_state.fd_lock);
         return (uint64_t) -1;
@@ -1306,6 +1411,69 @@ static uint64_t Syscall_handle_sendto(uint32_t cpu_index, const syscall_frame_t*
     entry->io_busy = true;
     socket_id = entry->net_socket_id;
     spin_unlock(&Syscall_state.fd_lock);
+
+    if (fd_type == SYSCALL_FD_TYPE_NET_UNIX_SOCKET)
+    {
+        size_t unix_cap = NET_UNIX_RX_MAX_PAYLOAD;
+        if (len > unix_cap)
+        {
+            spin_lock(&Syscall_state.fd_lock);
+            entry = &Syscall_state.fds[(uint32_t) fd];
+            if (entry->used && entry->owner_pid == owner_pid && entry->type == fd_type)
+                entry->io_busy = false;
+            spin_unlock(&Syscall_state.fd_lock);
+            return (uint64_t) -1;
+        }
+        uint8_t unix_payload[NET_UNIX_RX_MAX_PAYLOAD];
+        if (!Syscall_copy_from_user(unix_payload, user_buf, len))
+        {
+            spin_lock(&Syscall_state.fd_lock);
+            entry = &Syscall_state.fds[(uint32_t) fd];
+            if (entry->used && entry->owner_pid == owner_pid && entry->type == fd_type)
+                entry->io_busy = false;
+            spin_unlock(&Syscall_state.fd_lock);
+            return (uint64_t) -1;
+        }
+        char dest_path[NET_UNIX_PATH_MAX];
+        size_t dest_path_real = 0;
+        if (user_dest_addr && dest_addr_len > 2U)
+        {
+            sys_sockaddr_t sa_hdr;
+            if (!Syscall_copy_from_user(&sa_hdr, user_dest_addr, sizeof(sa_hdr)) || sa_hdr.sa_family != AF_UNIX)
+            {
+                spin_lock(&Syscall_state.fd_lock);
+                entry = &Syscall_state.fds[(uint32_t) fd];
+                if (entry->used && entry->owner_pid == owner_pid && entry->type == fd_type)
+                    entry->io_busy = false;
+                spin_unlock(&Syscall_state.fd_lock);
+                return (uint64_t) -1;
+            }
+            size_t plen = dest_addr_len - 2U;
+            if (plen >= NET_UNIX_PATH_MAX)
+                plen = NET_UNIX_PATH_MAX - 1U;
+            if (!Syscall_copy_from_user(dest_path, (const uint8_t*) user_dest_addr + 2U, plen))
+            {
+                spin_lock(&Syscall_state.fd_lock);
+                entry = &Syscall_state.fds[(uint32_t) fd];
+                if (entry->used && entry->owner_pid == owner_pid && entry->type == fd_type)
+                    entry->io_busy = false;
+                spin_unlock(&Syscall_state.fd_lock);
+                return (uint64_t) -1;
+            }
+            dest_path[plen] = '\0';
+            while (dest_path_real < plen && dest_path[dest_path_real] != '\0')
+                dest_path_real++;
+        }
+        size_t sent = 0;
+        bool ok = NET_unix_sendto(owner_pid, socket_id, unix_payload, len,
+                                  dest_path_real > 0 ? dest_path : NULL, dest_path_real, &sent);
+        spin_lock(&Syscall_state.fd_lock);
+        entry = &Syscall_state.fds[(uint32_t) fd];
+        if (entry->used && entry->owner_pid == owner_pid && entry->type == fd_type)
+            entry->io_busy = false;
+        spin_unlock(&Syscall_state.fd_lock);
+        return ok ? (uint64_t) sent : (uint64_t) -1;
+    }
 
     size_t payload_cap = NET_SOCKET_UDP_MAX_PAYLOAD;
     if (fd_type == SYSCALL_FD_TYPE_NET_UDP_SOCKET && len > payload_cap)
@@ -1452,7 +1620,9 @@ static uint64_t Syscall_handle_recvfrom(uint32_t cpu_index, const syscall_frame_
         return (uint64_t) -1;
     }
     fd_type = entry->type;
-    if (fd_type != SYSCALL_FD_TYPE_NET_UDP_SOCKET && fd_type != SYSCALL_FD_TYPE_NET_TCP_SOCKET)
+    if (fd_type != SYSCALL_FD_TYPE_NET_UDP_SOCKET &&
+        fd_type != SYSCALL_FD_TYPE_NET_TCP_SOCKET &&
+        fd_type != SYSCALL_FD_TYPE_NET_UNIX_SOCKET)
     {
         spin_unlock(&Syscall_state.fd_lock);
         return (uint64_t) -1;
@@ -1465,6 +1635,26 @@ static uint64_t Syscall_handle_recvfrom(uint32_t cpu_index, const syscall_frame_
     entry->io_busy = true;
     socket_id = entry->net_socket_id;
     spin_unlock(&Syscall_state.fd_lock);
+
+    if (fd_type == SYSCALL_FD_TYPE_NET_UNIX_SOCKET)
+    {
+        size_t unix_cap = len < NET_UNIX_RX_MAX_PAYLOAD ? len : NET_UNIX_RX_MAX_PAYLOAD;
+        uint8_t unix_buf[NET_UNIX_RX_MAX_PAYLOAD];
+        size_t recv_len = 0U;
+        bool would_block = false;
+        bool ok = NET_unix_recvfrom(owner_pid, socket_id, unix_buf, unix_cap, &recv_len,
+                                    (flags & NET_SOCKET_MSG_DONTWAIT) != 0U, &would_block);
+        spin_lock(&Syscall_state.fd_lock);
+        entry = &Syscall_state.fds[(uint32_t) fd];
+        if (entry->used && entry->owner_pid == owner_pid && entry->type == fd_type)
+            entry->io_busy = false;
+        spin_unlock(&Syscall_state.fd_lock);
+        if (!ok)
+            return would_block ? (uint64_t) -2 : (uint64_t) -1;
+        if (recv_len > 0U && !Syscall_copy_to_user(user_buf, unix_buf, recv_len))
+            return (uint64_t) -1;
+        return (uint64_t) recv_len;
+    }
 
     size_t payload_cap = (fd_type == SYSCALL_FD_TYPE_NET_TCP_SOCKET) ? NET_TCP_MAX_PAYLOAD : NET_SOCKET_UDP_MAX_PAYLOAD;
     uint8_t payload[NET_SOCKET_UDP_MAX_PAYLOAD];
@@ -1917,6 +2107,49 @@ static uint64_t Syscall_handle_close(uint32_t cpu_index, const syscall_frame_t* 
         return 0;
     }
 
+    if (entry_type == SYSCALL_FD_TYPE_NET_UNIX_SOCKET)
+    {
+        uint32_t socket_id = entry->net_socket_id;
+        memset(entry, 0, sizeof(*entry));
+        spin_unlock(&Syscall_state.fd_lock);
+        (void) NET_unix_close(owner_pid, socket_id);
+        return 0;
+    }
+
+    if (entry_type == SYSCALL_FD_TYPE_PIPE)
+    {
+        uint32_t pipe_id = entry->net_socket_id;
+        bool was_reader = entry->can_read;
+        bool was_writer = entry->can_write;
+        memset(entry, 0, sizeof(*entry));
+        spin_unlock(&Syscall_state.fd_lock);
+
+        if (pipe_id < SYSCALL_PIPE_MAX)
+        {
+            syscall_pipe_t* p = &Syscall_state.pipes[pipe_id];
+            if (p->used && p->lock_ready)
+            {
+                spin_lock(&p->lock);
+                if (was_reader && p->readers > 0)
+                    p->readers--;
+                if (was_writer && p->writers > 0)
+                    p->writers--;
+                task_wait_queue_wake_all(&p->read_waitq);
+                task_wait_queue_wake_all(&p->write_waitq);
+                if (p->readers == 0 && p->writers == 0)
+                {
+                    spin_unlock(&p->lock);
+                    spin_lock(&Syscall_state.pipe_lock);
+                    p->used = false;
+                    spin_unlock(&Syscall_state.pipe_lock);
+                }
+                else
+                    spin_unlock(&p->lock);
+            }
+        }
+        return 0;
+    }
+
     if (entry_type == SYSCALL_FD_TYPE_NET_RAW)
     {
         memset(entry, 0, sizeof(*entry));
@@ -1979,6 +2212,9 @@ static uint64_t Syscall_handle_close(uint32_t cpu_index, const syscall_frame_t* 
     spin_unlock(&Syscall_state.fd_lock);
     return 0;
 }
+
+static bool Syscall_pipe_rx_empty(void* ctx);
+static bool Syscall_pipe_tx_full(void* ctx);
 
 static uint64_t Syscall_handle_read(uint32_t cpu_index, const syscall_frame_t* frame)
 {
@@ -2094,6 +2330,51 @@ static uint64_t Syscall_handle_read(uint32_t cpu_index, const syscall_frame_t* f
             entry->io_busy = false;
         spin_unlock(&Syscall_state.fd_lock);
         return (uint64_t) recv_len;
+    }
+
+    if (entry_type == SYSCALL_FD_TYPE_PIPE)
+    {
+        uint32_t pipe_id = entry->net_socket_id;
+        spin_unlock(&Syscall_state.fd_lock);
+
+        if (pipe_id >= SYSCALL_PIPE_MAX)
+            return (uint64_t) -1;
+        syscall_pipe_t* p = &Syscall_state.pipes[pipe_id];
+        if (!p->used || !p->lock_ready)
+            return (uint64_t) -1;
+
+        spin_lock(&p->lock);
+        if (p->count == 0 && p->writers > 0)
+        {
+            spin_unlock(&p->lock);
+            task_waiter_t waiter;
+            task_waiter_init(&waiter);
+            task_wait_queue_wait_event(&p->read_waitq, &waiter,
+                                       Syscall_pipe_rx_empty, p,
+                                       TASK_WAIT_TIMEOUT_INFINITE);
+            spin_lock(&p->lock);
+        }
+
+        if (p->count == 0)
+        {
+            spin_unlock(&p->lock);
+            return 0;
+        }
+
+        size_t to_read = p->count < len ? p->count : len;
+        uint8_t pipe_buf[SYSCALL_PIPE_BUF_SIZE];
+        for (size_t i = 0; i < to_read; i++)
+        {
+            pipe_buf[i] = p->ring[p->head];
+            p->head = (uint16_t) ((p->head + 1U) % SYSCALL_PIPE_BUF_SIZE);
+        }
+        __atomic_store_n(&p->count, p->count - (uint32_t) to_read, __ATOMIC_RELEASE);
+        task_wait_queue_wake_all(&p->write_waitq);
+        spin_unlock(&p->lock);
+
+        if (!Syscall_copy_to_user(user_buf, pipe_buf, to_read))
+            return (uint64_t) -1;
+        return (uint64_t) to_read;
     }
 
     if (entry_type != SYSCALL_FD_TYPE_REGULAR)
@@ -2282,6 +2563,58 @@ static uint64_t Syscall_handle_write(uint32_t cpu_index, const syscall_frame_t* 
             entry->io_busy = false;
         spin_unlock(&Syscall_state.fd_lock);
         return (uint64_t) sent;
+    }
+
+    if (entry_type == SYSCALL_FD_TYPE_PIPE)
+    {
+        uint32_t pipe_id = entry->net_socket_id;
+        spin_unlock(&Syscall_state.fd_lock);
+
+        if (pipe_id >= SYSCALL_PIPE_MAX)
+            return (uint64_t) -1;
+        syscall_pipe_t* p = &Syscall_state.pipes[pipe_id];
+        if (!p->used || !p->lock_ready)
+            return (uint64_t) -1;
+
+        uint8_t pipe_buf[SYSCALL_PIPE_BUF_SIZE];
+        size_t to_write = len < SYSCALL_PIPE_BUF_SIZE ? len : SYSCALL_PIPE_BUF_SIZE;
+        if (!Syscall_copy_from_user(pipe_buf, user_buf, to_write))
+            return (uint64_t) -1;
+
+        spin_lock(&p->lock);
+        if (p->readers == 0)
+        {
+            spin_unlock(&p->lock);
+            return (uint64_t) -1;
+        }
+
+        if (p->count >= SYSCALL_PIPE_BUF_SIZE)
+        {
+            spin_unlock(&p->lock);
+            task_waiter_t waiter;
+            task_waiter_init(&waiter);
+            task_wait_queue_wait_event(&p->write_waitq, &waiter,
+                                       Syscall_pipe_tx_full, p,
+                                       TASK_WAIT_TIMEOUT_INFINITE);
+            spin_lock(&p->lock);
+            if (p->readers == 0)
+            {
+                spin_unlock(&p->lock);
+                return (uint64_t) -1;
+            }
+        }
+
+        uint32_t avail = SYSCALL_PIPE_BUF_SIZE - p->count;
+        size_t actual = to_write < avail ? to_write : avail;
+        for (size_t i = 0; i < actual; i++)
+        {
+            p->ring[p->tail] = pipe_buf[i];
+            p->tail = (uint16_t) ((p->tail + 1U) % SYSCALL_PIPE_BUF_SIZE);
+        }
+        __atomic_store_n(&p->count, p->count + (uint32_t) actual, __ATOMIC_RELEASE);
+        task_wait_queue_wake_all(&p->read_waitq);
+        spin_unlock(&p->lock);
+        return (uint64_t) actual;
     }
 
     if (entry_type != SYSCALL_FD_TYPE_REGULAR)
@@ -2639,6 +2972,53 @@ static uint64_t Syscall_handle_tcp_socket_ioctl(uint32_t owner_pid, int64_t fd, 
     }
 }
 
+static uint64_t Syscall_handle_unix_socket_ioctl(uint32_t owner_pid, int64_t fd, unsigned long request, void* user_arg)
+{
+    if (fd < 0 || (uint64_t) fd >= SYSCALL_MAX_OPEN_FILES || owner_pid == 0U || !user_arg)
+        return (uint64_t) -1;
+
+    uint32_t socket_id = 0U;
+    spin_lock(&Syscall_state.fd_lock);
+    syscall_file_desc_t* entry = &Syscall_state.fds[(uint32_t) fd];
+    if (!entry->used || entry->owner_pid != owner_pid || entry->type != SYSCALL_FD_TYPE_NET_UNIX_SOCKET || entry->io_busy)
+    {
+        spin_unlock(&Syscall_state.fd_lock);
+        return (uint64_t) -1;
+    }
+    socket_id = entry->net_socket_id;
+    spin_unlock(&Syscall_state.fd_lock);
+
+    switch (request)
+    {
+        case FIONBIO:
+        {
+            int32_t non_blocking = 0;
+            if (!Syscall_copy_from_user(&non_blocking, user_arg, sizeof(non_blocking)))
+                return (uint64_t) -1;
+
+            bool out_value = false;
+            if (!NET_unix_set_non_blocking(owner_pid, socket_id, non_blocking != 0, &out_value))
+                return (uint64_t) -1;
+
+            spin_lock(&Syscall_state.fd_lock);
+            entry = &Syscall_state.fds[(uint32_t) fd];
+            if (!entry->used || entry->owner_pid != owner_pid || entry->type != SYSCALL_FD_TYPE_NET_UNIX_SOCKET || entry->io_busy)
+            {
+                spin_unlock(&Syscall_state.fd_lock);
+                return (uint64_t) -1;
+            }
+            entry->non_blocking = out_value;
+            spin_unlock(&Syscall_state.fd_lock);
+
+            int32_t out_int = out_value ? 1 : 0;
+            return Syscall_copy_to_user(user_arg, &out_int, sizeof(out_int)) ? 0 : (uint64_t) -1;
+        }
+
+        default:
+            return (uint64_t) -1;
+    }
+}
+
 static uint64_t Syscall_handle_ioctl(uint32_t cpu_index, const syscall_frame_t* frame)
 {
     if (!frame || !Syscall_state.fd_lock_ready)
@@ -2673,6 +3053,8 @@ static uint64_t Syscall_handle_ioctl(uint32_t cpu_index, const syscall_frame_t* 
         return Syscall_handle_udp_socket_ioctl(owner_pid, fd, request, user_arg);
     if (fd_type == SYSCALL_FD_TYPE_NET_TCP_SOCKET)
         return Syscall_handle_tcp_socket_ioctl(owner_pid, fd, request, user_arg);
+    if (fd_type == SYSCALL_FD_TYPE_NET_UNIX_SOCKET)
+        return Syscall_handle_unix_socket_ioctl(owner_pid, fd, request, user_arg);
 
     if (fd_type != SYSCALL_FD_TYPE_DRM_CARD || drm_file_id == 0)
         return (uint64_t) -1;
@@ -4905,6 +5287,15 @@ static void Syscall_fd_cleanup_owner(uint32_t owner_pid)
             continue;
         }
 
+        if (entry_type == SYSCALL_FD_TYPE_NET_UNIX_SOCKET)
+        {
+            uint32_t socket_id = entry->net_socket_id;
+            memset(entry, 0, sizeof(*entry));
+            spin_unlock(&Syscall_state.fd_lock);
+            (void) NET_unix_close(owner_pid, socket_id);
+            continue;
+        }
+
         if (entry_type != SYSCALL_FD_TYPE_REGULAR)
         {
             memset(entry, 0, sizeof(*entry));
@@ -4978,6 +5369,7 @@ static int32_t Syscall_proc_ensure_current_locked(uint32_t cpu_index, const sysc
 
     syscall_process_t* proc = &Syscall_state.procs[new_slot];
     memset(proc, 0, sizeof(*proc));
+    Syscall_idle_claimed_slots[(uint32_t) new_slot] = 0U;
     proc->used = true;
     proc->exiting = false;
     proc->terminated_by_signal = false;
@@ -5170,28 +5562,148 @@ static size_t Syscall_console_route_pop_locked(syscall_console_route_t* route, c
     return copied;
 }
 
-static int32_t Syscall_proc_pick_next_locked(int32_t current_slot)
+static void Syscall_console_route_input_push_locked(syscall_console_route_t* route, const char* data, size_t len)
+{
+    if (!route || !data || len == 0U || (route->flags & SYS_CONSOLE_ROUTE_FLAG_PTY_INPUT) == 0U)
+        return;
+
+    for (size_t i = 0; i < len; i++)
+    {
+        route->in_buffer[route->in_head] = data[i];
+        route->in_head = (route->in_head + 1U) % SYSCALL_CONSOLE_PTY_INPUT_SIZE;
+        if (route->in_count == SYSCALL_CONSOLE_PTY_INPUT_SIZE)
+            route->in_tail = (route->in_tail + 1U) % SYSCALL_CONSOLE_PTY_INPUT_SIZE;
+        else
+            route->in_count++;
+    }
+}
+
+static size_t Syscall_console_route_input_pop_locked(syscall_console_route_t* route, char* out, size_t out_size)
+{
+    if (!route || !out || out_size == 0U || route->in_count == 0U)
+        return 0U;
+
+    size_t copied = 0U;
+    while (copied < out_size && route->in_count > 0U)
+    {
+        out[copied++] = route->in_buffer[route->in_tail];
+        route->in_tail = (route->in_tail + 1U) % SYSCALL_CONSOLE_PTY_INPUT_SIZE;
+        route->in_count--;
+    }
+
+    if (route->in_count == 0U)
+    {
+        route->in_head = 0U;
+        route->in_tail = 0U;
+    }
+
+    return copied;
+}
+
+static bool Syscall_proc_is_on_other_cpu_locked(uint32_t slot, uint32_t cpu_index)
+{
+    uint32_t owner = 0U;
+    if (slot < SYSCALL_MAX_PROCS)
+    {
+        syscall_process_t* cand = &Syscall_state.procs[slot];
+        if (cand->used)
+            owner = cand->owner_pid;
+    }
+
+    for (uint32_t i = 0; i < 256; i++)
+    {
+        if (i == cpu_index)
+            continue;
+
+        uint32_t running_slot = Syscall_state.cpu_current_proc[i];
+        if (running_slot >= SYSCALL_MAX_PROCS)
+            continue;
+        if (running_slot == slot)
+            return true;
+        if (owner == 0U)
+            continue;
+
+        syscall_process_t* running = &Syscall_state.procs[running_slot];
+        if (running->used && !running->exiting && running->owner_pid == owner)
+            return true;
+    }
+    return false;
+}
+
+static int32_t Syscall_proc_pick_next_locked(int32_t current_slot, uint32_t cpu_index)
 {
     if (current_slot >= 0)
     {
         for (uint32_t step = 1; step < SYSCALL_MAX_PROCS; step++)
         {
             uint32_t idx = ((uint32_t) current_slot + step) % SYSCALL_MAX_PROCS;
-            if (Syscall_state.procs[idx].used)
+            syscall_process_t* p = &Syscall_state.procs[idx];
+            if (p->used && p->cr3_phys != 0 &&
+                !Syscall_proc_is_on_other_cpu_locked(idx, cpu_index))
                 return (int32_t) idx;
         }
-    }
 
-    if (current_slot >= 0 && Syscall_state.procs[current_slot].used)
-        return current_slot;
+        syscall_process_t* cur = &Syscall_state.procs[(uint32_t) current_slot];
+        if (cur->used && cur->cr3_phys != 0)
+            return current_slot;
+    }
 
     for (uint32_t idx = 0; idx < SYSCALL_MAX_PROCS; idx++)
     {
-        if (Syscall_state.procs[idx].used)
+        syscall_process_t* p = &Syscall_state.procs[idx];
+        if (p->used && p->cr3_phys != 0 &&
+            !Syscall_proc_is_on_other_cpu_locked(idx, cpu_index))
             return (int32_t) idx;
     }
 
     return -1;
+}
+
+static int32_t Syscall_proc_pick_next_same_owner_locked(int32_t current_slot, uint32_t cpu_index)
+{
+    if (current_slot < 0 || (uint32_t) current_slot >= SYSCALL_MAX_PROCS)
+        return Syscall_proc_pick_next_locked(current_slot, cpu_index);
+
+    const syscall_process_t* cur = &Syscall_state.procs[(uint32_t) current_slot];
+    if (!cur->used || cur->owner_pid == 0U)
+        return Syscall_proc_pick_next_locked(current_slot, cpu_index);
+
+    const uint32_t owner = cur->owner_pid;
+    for (uint32_t step = 1; step < SYSCALL_MAX_PROCS; step++)
+    {
+        uint32_t idx = ((uint32_t) current_slot + step) % SYSCALL_MAX_PROCS;
+        syscall_process_t* p = &Syscall_state.procs[idx];
+        if (p->used && !p->exiting && p->cr3_phys != 0 && p->owner_pid == owner &&
+            !Syscall_proc_is_on_other_cpu_locked(idx, cpu_index))
+            return (int32_t) idx;
+    }
+
+    if (cur->used && cur->cr3_phys != 0)
+        return current_slot;
+
+    return Syscall_proc_pick_next_locked(current_slot, cpu_index);
+}
+
+static bool Syscall_proc_has_other_owner_peer_locked(int32_t current_slot)
+{
+    if (current_slot < 0 || (uint32_t) current_slot >= SYSCALL_MAX_PROCS)
+        return false;
+
+    const syscall_process_t* current = &Syscall_state.procs[(uint32_t) current_slot];
+    if (!current->used || current->owner_pid == 0U)
+        return false;
+
+    for (uint32_t i = 0; i < SYSCALL_MAX_PROCS; i++)
+    {
+        if ((int32_t) i == current_slot)
+            continue;
+        const syscall_process_t* p = &Syscall_state.procs[i];
+        if (!p->used || p->exiting || p->cr3_phys == 0)
+            continue;
+        if (p->owner_pid == current->owner_pid)
+            return true;
+    }
+    return false;
 }
 
 static void Syscall_proc_save_from_interrupt(syscall_process_t* proc,
@@ -5286,10 +5798,25 @@ static bool Syscall_resolve_cow_fault(uint32_t cpu_index, uintptr_t fault_addr, 
     }
 
     uintptr_t entry = *pte;
-    if ((entry & (PRESENT | USER_MODE | SYSCALL_PTE_COW)) != (PRESENT | USER_MODE | SYSCALL_PTE_COW))
+    if ((entry & (PRESENT | USER_MODE)) != (PRESENT | USER_MODE))
     {
         spin_unlock(&Syscall_state.vm_lock);
         return false;
+    }
+
+    /*
+     * SMP race: another CPU sharing the same CR3 may have already resolved
+     * this COW fault and cleared SYSCALL_PTE_COW+set WRITABLE, while this CPU
+     * still faults on a stale local TLB entry.
+     */
+    if ((entry & SYSCALL_PTE_COW) == 0)
+    {
+        bool writable = (entry & WRITABLE) != 0;
+        spin_unlock(&Syscall_state.vm_lock);
+        if (!writable)
+            return false;
+        Syscall_write_cr3_phys(proc_cr3);
+        return true;
     }
 
     uintptr_t old_phys = entry & FRAME;
@@ -5658,6 +6185,28 @@ static bool Syscall_proc_owner_has_other_live_locked(uint32_t owner_pid, int32_t
     return false;
 }
 
+/* Same owner_pid as pthreads, but threads must not block fork() on the main task. */
+static bool Syscall_proc_owner_has_other_live_non_thread_locked(uint32_t owner_pid, int32_t exclude_slot)
+{
+    if (owner_pid == 0)
+        return false;
+
+    for (uint32_t i = 0; i < SYSCALL_MAX_PROCS; i++)
+    {
+        if ((int32_t) i == exclude_slot)
+            continue;
+        if (!Syscall_state.procs[i].used)
+            continue;
+        if (Syscall_state.procs[i].is_thread)
+            continue;
+        if (Syscall_state.procs[i].owner_pid != owner_pid)
+            continue;
+        return true;
+    }
+
+    return false;
+}
+
 static bool Syscall_proc_has_live_thread_locked(uint32_t owner_pid, uint32_t tid)
 {
     if (owner_pid == 0 || tid == 0)
@@ -5710,6 +6259,7 @@ void Syscall_init(void)
     {
         Syscall_state.cpu_current_proc[i] = SYSCALL_PROC_NONE;
         Syscall_state.cpu_need_resched[i] = 0;
+        Syscall_state.cpu_yield_same_owner_pick[i] = 0;
         Syscall_state.cpu_need_timer_preempt[i] = 0;
         Syscall_state.cpu_slice_ticks[i] = 0;
     }
@@ -5723,6 +6273,20 @@ void Syscall_init(void)
     spinlock_init(&Syscall_kbd_inject_lock);
     Syscall_kbd_inject_lock_ready = true;
 
+    memset(Syscall_state.pipes, 0, sizeof(Syscall_state.pipes));
+    spinlock_init(&Syscall_state.pipe_lock);
+    Syscall_state.pipe_lock_ready = true;
+
+    memset(Syscall_state.futex_buckets, 0, sizeof(Syscall_state.futex_buckets));
+    spinlock_init(&Syscall_state.futex_lock);
+    Syscall_state.futex_lock_ready = true;
+
+    memset(Syscall_state.shm_segments, 0, sizeof(Syscall_state.shm_segments));
+    spinlock_init(&Syscall_state.shm_lock);
+    Syscall_state.shm_lock_ready = true;
+
+    memset(Syscall_state.msg_queues, 0, sizeof(Syscall_state.msg_queues));
+
     MSR_set(IA32_LSTAR, (uint64_t) &syscall_handler_stub);
     MSR_set(IA32_FMASK, SYSCALL_FMASK_TF_BIT | SYSCALL_FMASK_DF_BIT);
 
@@ -5730,6 +6294,619 @@ void Syscall_init(void)
     DRM_init();
     NET_socket_init();
     NET_tcp_init();
+    NET_unix_init();
+}
+
+/* ------------------------------------------------------------------ */
+/*  Pipe handlers                                                      */
+/* ------------------------------------------------------------------ */
+
+static bool Syscall_pipe_rx_empty(void* ctx) { syscall_pipe_t* p = (syscall_pipe_t*) ctx; return p && __atomic_load_n(&p->count, __ATOMIC_ACQUIRE) == 0 && __atomic_load_n(&p->writers, __ATOMIC_ACQUIRE) > 0; }
+static bool Syscall_pipe_tx_full(void* ctx)  { syscall_pipe_t* p = (syscall_pipe_t*) ctx; return p && __atomic_load_n(&p->count, __ATOMIC_ACQUIRE) >= SYSCALL_PIPE_BUF_SIZE && __atomic_load_n(&p->readers, __ATOMIC_ACQUIRE) > 0; }
+
+static uint64_t Syscall_handle_pipe(uint32_t cpu_index, const syscall_frame_t* frame)
+{
+    if (!frame || !Syscall_state.pipe_lock_ready)
+        return (uint64_t) -1;
+
+    int* user_fds = (int*) frame->rdi;
+    if (!user_fds)
+        return (uint64_t) -1;
+
+    uint32_t owner_pid = Syscall_proc_current_pid(cpu_index, frame);
+    if (owner_pid == 0U)
+        return (uint64_t) -1;
+
+    spin_lock(&Syscall_state.pipe_lock);
+    int32_t pipe_id = -1;
+    for (uint32_t i = 0; i < SYSCALL_PIPE_MAX; i++)
+    {
+        if (!Syscall_state.pipes[i].used)
+        {
+            pipe_id = (int32_t) i;
+            break;
+        }
+    }
+    if (pipe_id < 0)
+    {
+        spin_unlock(&Syscall_state.pipe_lock);
+        return (uint64_t) -1;
+    }
+
+    syscall_pipe_t* p = &Syscall_state.pipes[(uint32_t) pipe_id];
+    memset(p, 0, sizeof(*p));
+    p->used = true;
+    p->readers = 1;
+    p->writers = 1;
+    spinlock_init(&p->lock);
+    p->lock_ready = true;
+    task_wait_queue_init(&p->read_waitq);
+    task_wait_queue_init(&p->write_waitq);
+    spin_unlock(&Syscall_state.pipe_lock);
+
+    spin_lock(&Syscall_state.fd_lock);
+    int32_t read_fd = Syscall_fd_alloc_locked();
+    if (read_fd < 0)
+    {
+        spin_unlock(&Syscall_state.fd_lock);
+        spin_lock(&Syscall_state.pipe_lock);
+        p->used = false;
+        spin_unlock(&Syscall_state.pipe_lock);
+        return (uint64_t) -1;
+    }
+    syscall_file_desc_t* rentry = &Syscall_state.fds[(uint32_t) read_fd];
+    memset(rentry, 0, sizeof(*rentry));
+    rentry->used = true;
+    rentry->type = SYSCALL_FD_TYPE_PIPE;
+    rentry->owner_pid = owner_pid;
+    rentry->can_read = true;
+    rentry->can_write = false;
+    rentry->net_socket_id = (uint32_t) pipe_id;
+
+    int32_t write_fd = Syscall_fd_alloc_locked();
+    if (write_fd < 0)
+    {
+        memset(rentry, 0, sizeof(*rentry));
+        spin_unlock(&Syscall_state.fd_lock);
+        spin_lock(&Syscall_state.pipe_lock);
+        p->used = false;
+        spin_unlock(&Syscall_state.pipe_lock);
+        return (uint64_t) -1;
+    }
+    syscall_file_desc_t* wentry = &Syscall_state.fds[(uint32_t) write_fd];
+    memset(wentry, 0, sizeof(*wentry));
+    wentry->used = true;
+    wentry->type = SYSCALL_FD_TYPE_PIPE;
+    wentry->owner_pid = owner_pid;
+    wentry->can_read = false;
+    wentry->can_write = true;
+    wentry->net_socket_id = (uint32_t) pipe_id;
+    spin_unlock(&Syscall_state.fd_lock);
+
+    int result[2] = { (int) read_fd, (int) write_fd };
+    if (!Syscall_copy_to_user(user_fds, result, sizeof(result)))
+    {
+        spin_lock(&Syscall_state.fd_lock);
+        memset(&Syscall_state.fds[(uint32_t) read_fd], 0, sizeof(syscall_file_desc_t));
+        memset(&Syscall_state.fds[(uint32_t) write_fd], 0, sizeof(syscall_file_desc_t));
+        spin_unlock(&Syscall_state.fd_lock);
+        spin_lock(&Syscall_state.pipe_lock);
+        p->used = false;
+        spin_unlock(&Syscall_state.pipe_lock);
+        return (uint64_t) -1;
+    }
+
+    return 0;
+}
+
+/* ------------------------------------------------------------------ */
+/*  Futex handler                                                      */
+/* ------------------------------------------------------------------ */
+
+static uint32_t Syscall_futex_hash(uintptr_t cr3_phys, uintptr_t vaddr)
+{
+    uintptr_t page = vaddr & ~0xFFFULL;
+    uint64_t h = (uint64_t) cr3_phys ^ (uint64_t) page;
+    h ^= (h >> 16);
+    h *= 0x45d9f3bULL;
+    h ^= (h >> 16);
+    return (uint32_t) (h % SYSCALL_FUTEX_BUCKETS);
+}
+
+typedef struct futex_wait_ctx
+{
+    volatile int* uaddr;
+    int expected;
+} futex_wait_ctx_t;
+
+static bool Syscall_futex_still_equal(void* ctx)
+{
+    futex_wait_ctx_t* fc = (futex_wait_ctx_t*) ctx;
+    return fc && __atomic_load_n(fc->uaddr, __ATOMIC_ACQUIRE) == fc->expected;
+}
+
+static uint64_t Syscall_handle_futex(uint32_t cpu_index, const syscall_frame_t* frame)
+{
+    if (!frame || !Syscall_state.futex_lock_ready)
+        return (uint64_t) -1;
+
+    volatile int* uaddr = (volatile int*) frame->rdi;
+    int op = (int) frame->rsi;
+    int val = (int) frame->rdx;
+
+    if (!uaddr)
+        return (uint64_t) -1;
+
+    uintptr_t cr3_phys = 0;
+    __asm__ volatile("mov %%cr3, %0" : "=r"(cr3_phys));
+    uint32_t bucket = Syscall_futex_hash(cr3_phys, (uintptr_t) uaddr);
+
+    spin_lock(&Syscall_state.futex_lock);
+    syscall_futex_bucket_t* b = &Syscall_state.futex_buckets[bucket];
+    if (!b->init)
+    {
+        task_wait_queue_init(&b->waitq);
+        b->init = true;
+    }
+    spin_unlock(&Syscall_state.futex_lock);
+
+    if (op == SYS_FUTEX_WAIT)
+    {
+        int current_val = __atomic_load_n(uaddr, __ATOMIC_ACQUIRE);
+        if (current_val != val)
+            return (uint64_t) -11; /* EAGAIN */
+
+        futex_wait_ctx_t wc = { .uaddr = uaddr, .expected = val };
+        task_waiter_t waiter;
+        task_waiter_init(&waiter);
+
+        uint64_t timeout = (frame->r10 != 0) ? (uint64_t) frame->r10 : TASK_WAIT_TIMEOUT_INFINITE;
+        task_wait_queue_wait_event(&b->waitq, &waiter,
+                                   Syscall_futex_still_equal, &wc,
+                                   timeout);
+        return 0;
+    }
+
+    if (op == SYS_FUTEX_WAKE)
+    {
+        if (val <= 0)
+            return 0;
+        uint32_t woken = 0;
+        for (int i = 0; i < val; i++)
+        {
+            task_wait_queue_wake_one(&b->waitq);
+            woken++;
+        }
+        return (uint64_t) woken;
+    }
+
+    return (uint64_t) -1;
+}
+
+/* ------------------------------------------------------------------ */
+/*  Shared Memory handlers                                             */
+/* ------------------------------------------------------------------ */
+
+static uint64_t Syscall_handle_shmget(uint32_t cpu_index, const syscall_frame_t* frame)
+{
+    if (!frame || !Syscall_state.shm_lock_ready)
+        return (uint64_t) -1;
+    (void) cpu_index;
+
+    int32_t key = (int32_t) frame->rdi;
+    size_t size = (size_t) frame->rsi;
+    uint32_t flags = (uint32_t) frame->rdx;
+    bool create = (flags & 0x200U) != 0; /* IPC_CREAT */
+
+    spin_lock(&Syscall_state.shm_lock);
+
+    for (uint32_t i = 0; i < SYSCALL_SHM_MAX_SEGMENTS; i++)
+    {
+        if (Syscall_state.shm_segments[i].used && Syscall_state.shm_segments[i].key == key)
+        {
+            spin_unlock(&Syscall_state.shm_lock);
+            return (uint64_t) i;
+        }
+    }
+
+    if (!create)
+    {
+        spin_unlock(&Syscall_state.shm_lock);
+        return (uint64_t) -1;
+    }
+
+    if (size == 0 || size > SYSCALL_SHM_MAX_PAGES * 4096ULL)
+    {
+        spin_unlock(&Syscall_state.shm_lock);
+        return (uint64_t) -1;
+    }
+
+    int32_t slot = -1;
+    for (uint32_t i = 0; i < SYSCALL_SHM_MAX_SEGMENTS; i++)
+    {
+        if (!Syscall_state.shm_segments[i].used)
+        {
+            slot = (int32_t) i;
+            break;
+        }
+    }
+    if (slot < 0)
+    {
+        spin_unlock(&Syscall_state.shm_lock);
+        return (uint64_t) -1;
+    }
+
+    uint32_t num_pages = (uint32_t) ((size + 4095ULL) / 4096ULL);
+    syscall_shm_segment_t* seg = &Syscall_state.shm_segments[slot];
+    memset(seg, 0, sizeof(*seg));
+    seg->used = true;
+    seg->key = key;
+    seg->size = size;
+    seg->num_pages = num_pages;
+    seg->mode = flags & 0x1FFU;
+
+    for (uint32_t i = 0; i < num_pages; i++)
+    {
+        void* page_ptr = PMM_alloc_page();
+        if (!page_ptr)
+        {
+            for (uint32_t j = 0; j < i; j++)
+                PMM_dealloc_page((void*) seg->pages[j]);
+            memset(seg, 0, sizeof(*seg));
+            spin_unlock(&Syscall_state.shm_lock);
+            return (uint64_t) -1;
+        }
+        seg->pages[i] = (uintptr_t) page_ptr;
+        memset((void*) P2V(seg->pages[i]), 0, 4096);
+    }
+
+    spin_unlock(&Syscall_state.shm_lock);
+    return (uint64_t) slot;
+}
+
+static uint64_t Syscall_handle_shmat(uint32_t cpu_index, const syscall_frame_t* frame)
+{
+    if (!frame || !Syscall_state.shm_lock_ready)
+        return (uint64_t) -1;
+    (void) cpu_index;
+
+    int32_t shmid = (int32_t) frame->rdi;
+    uintptr_t hint = (uintptr_t) frame->rsi;
+
+    if (shmid < 0 || (uint32_t) shmid >= SYSCALL_SHM_MAX_SEGMENTS)
+        return (uint64_t) -1;
+
+    spin_lock(&Syscall_state.shm_lock);
+    syscall_shm_segment_t* seg = &Syscall_state.shm_segments[shmid];
+    if (!seg->used)
+    {
+        spin_unlock(&Syscall_state.shm_lock);
+        return (uint64_t) -1;
+    }
+
+    uint32_t num_pages = seg->num_pages;
+    uintptr_t pages_copy[SYSCALL_SHM_MAX_PAGES];
+    for (uint32_t i = 0; i < num_pages; i++)
+        pages_copy[i] = seg->pages[i];
+    seg->refcount++;
+    spin_unlock(&Syscall_state.shm_lock);
+
+    uintptr_t base = hint;
+    if (base == 0)
+    {
+        spin_lock(&Syscall_state.vm_lock);
+        base = Syscall_state.user_map_hint;
+        Syscall_state.user_map_hint += (uintptr_t) num_pages * 4096ULL;
+        spin_unlock(&Syscall_state.vm_lock);
+    }
+
+    uintptr_t cr3_phys = 0;
+    __asm__ volatile("mov %%cr3, %0" : "=r"(cr3_phys));
+
+    for (uint32_t i = 0; i < num_pages; i++)
+    {
+        uintptr_t virt = base + (uintptr_t) i * 4096ULL;
+        VMM_map_user_page(virt, pages_copy[i]);
+    }
+
+    return (uint64_t) base;
+}
+
+static uint64_t Syscall_handle_shmdt(uint32_t cpu_index, const syscall_frame_t* frame)
+{
+    if (!frame || !Syscall_state.shm_lock_ready)
+        return (uint64_t) -1;
+    (void) cpu_index;
+
+    uintptr_t addr = (uintptr_t) frame->rdi;
+    if (addr == 0)
+        return (uint64_t) -1;
+
+    spin_lock(&Syscall_state.shm_lock);
+    for (uint32_t i = 0; i < SYSCALL_SHM_MAX_SEGMENTS; i++)
+    {
+        syscall_shm_segment_t* seg = &Syscall_state.shm_segments[i];
+        if (!seg->used)
+            continue;
+
+        bool match = false;
+        uintptr_t cr3_phys = 0;
+        __asm__ volatile("mov %%cr3, %0" : "=r"(cr3_phys));
+        for (uint32_t p = 0; p < seg->num_pages; p++)
+        {
+            uintptr_t virt = addr + (uintptr_t) p * 4096ULL;
+            uint64_t* pte = Syscall_get_user_pte_ptr(cr3_phys, virt);
+            if (pte && (*pte & 1ULL) && ((*pte & ~0xFFFULL) == seg->pages[p]))
+            {
+                match = true;
+                break;
+            }
+        }
+
+        if (match)
+        {
+            for (uint32_t p = 0; p < seg->num_pages; p++)
+            {
+                uintptr_t virt = addr + (uintptr_t) p * 4096ULL;
+                uintptr_t old_phys = 0;
+                VMM_unmap_page(virt, &old_phys);
+            }
+            if (seg->refcount > 0)
+                seg->refcount--;
+            if (seg->refcount == 0 && seg->marked_remove)
+            {
+                for (uint32_t p = 0; p < seg->num_pages; p++)
+                    PMM_dealloc_page((void*) seg->pages[p]);
+                memset(seg, 0, sizeof(*seg));
+            }
+            spin_unlock(&Syscall_state.shm_lock);
+            return 0;
+        }
+    }
+    spin_unlock(&Syscall_state.shm_lock);
+    return (uint64_t) -1;
+}
+
+static uint64_t Syscall_handle_shmctl(uint32_t cpu_index, const syscall_frame_t* frame)
+{
+    if (!frame || !Syscall_state.shm_lock_ready)
+        return (uint64_t) -1;
+    (void) cpu_index;
+
+    int32_t shmid = (int32_t) frame->rdi;
+    int32_t cmd = (int32_t) frame->rsi;
+
+    if (shmid < 0 || (uint32_t) shmid >= SYSCALL_SHM_MAX_SEGMENTS)
+        return (uint64_t) -1;
+
+    if (cmd != 0) /* IPC_RMID = 0 */
+        return (uint64_t) -1;
+
+    spin_lock(&Syscall_state.shm_lock);
+    syscall_shm_segment_t* seg = &Syscall_state.shm_segments[shmid];
+    if (!seg->used)
+    {
+        spin_unlock(&Syscall_state.shm_lock);
+        return (uint64_t) -1;
+    }
+    seg->marked_remove = true;
+    if (seg->refcount == 0)
+    {
+        for (uint32_t p = 0; p < seg->num_pages; p++)
+            PMM_dealloc_page((void*) seg->pages[p]);
+        memset(seg, 0, sizeof(*seg));
+    }
+    spin_unlock(&Syscall_state.shm_lock);
+    return 0;
+}
+
+/* ------------------------------------------------------------------ */
+/*  Message Queue handlers                                             */
+/* ------------------------------------------------------------------ */
+
+static bool Syscall_msgq_send_full(void* ctx)
+{
+    syscall_msgq_t* q = (syscall_msgq_t*) ctx;
+    return q && __atomic_load_n(&q->count, __ATOMIC_ACQUIRE) >= SYSCALL_MSG_RING_SIZE;
+}
+
+static bool Syscall_msgq_recv_empty(void* ctx)
+{
+    syscall_msgq_t* q = (syscall_msgq_t*) ctx;
+    return q && __atomic_load_n(&q->count, __ATOMIC_ACQUIRE) == 0;
+}
+
+static uint64_t Syscall_handle_msgget(uint32_t cpu_index, const syscall_frame_t* frame)
+{
+    if (!frame)
+        return (uint64_t) -1;
+    (void) cpu_index;
+
+    int32_t key = (int32_t) frame->rdi;
+    uint32_t flags = (uint32_t) frame->rsi;
+    bool create = (flags & 0x200U) != 0; /* IPC_CREAT */
+
+    for (uint32_t i = 0; i < SYSCALL_MSG_MAX_QUEUES; i++)
+    {
+        if (Syscall_state.msg_queues[i].used && Syscall_state.msg_queues[i].key == key)
+            return (uint64_t) i;
+    }
+
+    if (!create)
+        return (uint64_t) -1;
+
+    for (uint32_t i = 0; i < SYSCALL_MSG_MAX_QUEUES; i++)
+    {
+        syscall_msgq_t* q = &Syscall_state.msg_queues[i];
+        if (!q->used)
+        {
+            memset(q, 0, sizeof(*q));
+            q->used = true;
+            q->key = key;
+            spinlock_init(&q->lock);
+            q->lock_ready = true;
+            task_wait_queue_init(&q->send_waitq);
+            task_wait_queue_init(&q->recv_waitq);
+            return (uint64_t) i;
+        }
+    }
+    return (uint64_t) -1;
+}
+
+static uint64_t Syscall_handle_msgsnd(uint32_t cpu_index, const syscall_frame_t* frame)
+{
+    if (!frame)
+        return (uint64_t) -1;
+    (void) cpu_index;
+
+    int32_t msqid = (int32_t) frame->rdi;
+    const void* user_msgp = (const void*) frame->rsi;
+    size_t msgsz = (size_t) frame->rdx;
+    uint32_t msgflg = (uint32_t) frame->r10;
+
+    if (msqid < 0 || (uint32_t) msqid >= SYSCALL_MSG_MAX_QUEUES || !user_msgp)
+        return (uint64_t) -1;
+
+    syscall_msgq_t* q = &Syscall_state.msg_queues[msqid];
+    if (!q->used || !q->lock_ready)
+        return (uint64_t) -1;
+
+    if (msgsz > SYSCALL_MSG_MAX_TEXT)
+        return (uint64_t) -1;
+
+    int32_t mtype = 0;
+    if (!Syscall_copy_from_user(&mtype, user_msgp, sizeof(mtype)))
+        return (uint64_t) -1;
+
+    uint8_t mtext[SYSCALL_MSG_MAX_TEXT];
+    if (msgsz > 0 && !Syscall_copy_from_user(mtext, (const uint8_t*) user_msgp + sizeof(int32_t), msgsz))
+        return (uint64_t) -1;
+
+    spin_lock(&q->lock);
+    if (q->count >= SYSCALL_MSG_RING_SIZE)
+    {
+        if (msgflg & 0x800U) /* IPC_NOWAIT */
+        {
+            spin_unlock(&q->lock);
+            return (uint64_t) -2;
+        }
+        spin_unlock(&q->lock);
+
+        task_waiter_t waiter;
+        task_waiter_init(&waiter);
+        task_wait_queue_wait_event(&q->send_waitq, &waiter,
+                                   Syscall_msgq_send_full, q,
+                                   TASK_WAIT_TIMEOUT_INFINITE);
+
+        spin_lock(&q->lock);
+        if (!q->used || q->count >= SYSCALL_MSG_RING_SIZE)
+        {
+            spin_unlock(&q->lock);
+            return (uint64_t) -1;
+        }
+    }
+
+    syscall_msg_t* slot = &q->ring[q->tail];
+    slot->mtype = mtype;
+    slot->len = (uint16_t) msgsz;
+    if (msgsz > 0)
+        memcpy(slot->mtext, mtext, msgsz);
+    q->tail = (uint16_t) ((q->tail + 1U) % SYSCALL_MSG_RING_SIZE);
+    __atomic_store_n(&q->count, q->count + 1U, __ATOMIC_RELEASE);
+    task_wait_queue_wake_all(&q->recv_waitq);
+    spin_unlock(&q->lock);
+    return 0;
+}
+
+static uint64_t Syscall_handle_msgrcv(uint32_t cpu_index, const syscall_frame_t* frame)
+{
+    if (!frame)
+        return (uint64_t) -1;
+    (void) cpu_index;
+
+    int32_t msqid = (int32_t) frame->rdi;
+    void* user_msgp = (void*) frame->rsi;
+    size_t msgsz = (size_t) frame->rdx;
+    int32_t msgtyp = (int32_t) frame->r10;
+    uint32_t msgflg = (uint32_t) frame->r8;
+
+    if (msqid < 0 || (uint32_t) msqid >= SYSCALL_MSG_MAX_QUEUES || !user_msgp)
+        return (uint64_t) -1;
+
+    syscall_msgq_t* q = &Syscall_state.msg_queues[msqid];
+    if (!q->used || !q->lock_ready)
+        return (uint64_t) -1;
+
+    spin_lock(&q->lock);
+retry:
+    if (q->count == 0U)
+    {
+        if (msgflg & 0x800U) /* IPC_NOWAIT */
+        {
+            spin_unlock(&q->lock);
+            return (uint64_t) -2;
+        }
+        spin_unlock(&q->lock);
+
+        task_waiter_t waiter;
+        task_waiter_init(&waiter);
+        task_wait_queue_wait_event(&q->recv_waitq, &waiter,
+                                   Syscall_msgq_recv_empty, q,
+                                   TASK_WAIT_TIMEOUT_INFINITE);
+
+        spin_lock(&q->lock);
+        if (!q->used || q->count == 0U)
+        {
+            spin_unlock(&q->lock);
+            return (uint64_t) -1;
+        }
+    }
+
+    /* Search for matching message */
+    uint32_t found_idx = SYSCALL_MSG_RING_SIZE;
+    for (uint32_t i = 0; i < q->count; i++)
+    {
+        uint32_t idx = (q->head + i) % SYSCALL_MSG_RING_SIZE;
+        if (msgtyp == 0 || q->ring[idx].mtype == msgtyp)
+        {
+            found_idx = idx;
+            break;
+        }
+    }
+
+    if (found_idx >= SYSCALL_MSG_RING_SIZE)
+        goto retry;
+
+    syscall_msg_t found_msg = q->ring[found_idx];
+
+    /* Remove from ring - if it's the head, just advance head */
+    if (found_idx == q->head)
+    {
+        q->head = (uint16_t) ((q->head + 1U) % SYSCALL_MSG_RING_SIZE);
+    }
+    else
+    {
+        /* Shift entries to fill the gap */
+        uint32_t pos = found_idx;
+        uint32_t end_pos = (q->head + q->count - 1U) % SYSCALL_MSG_RING_SIZE;
+        while (pos != end_pos)
+        {
+            uint32_t next = (pos + 1U) % SYSCALL_MSG_RING_SIZE;
+            q->ring[pos] = q->ring[next];
+            pos = next;
+        }
+    }
+    __atomic_store_n(&q->count, q->count - 1U, __ATOMIC_RELEASE);
+    task_wait_queue_wake_all(&q->send_waitq);
+    spin_unlock(&q->lock);
+
+    size_t copy_len = found_msg.len < msgsz ? found_msg.len : msgsz;
+    if (!Syscall_copy_to_user(user_msgp, &found_msg.mtype, sizeof(found_msg.mtype)))
+        return (uint64_t) -1;
+    if (copy_len > 0 && !Syscall_copy_to_user((uint8_t*) user_msgp + sizeof(int32_t), found_msg.mtext, copy_len))
+        return (uint64_t) -1;
+
+    return (uint64_t) copy_len;
 }
 
 void Syscall_on_timer_tick(uint32_t cpu_index)
@@ -5763,56 +6940,117 @@ void Syscall_on_timer_tick(uint32_t cpu_index)
         Syscall_debug_need_resched_set_cpu[cpu_index & 0x3U]++;
     }
 
-    uint64_t now_ticks = ISR_get_timer_ticks();
-    uint64_t epoch = now_ticks / 2000ULL;
-    if (epoch != 0ULL &&
-        epoch > Syscall_debug_post_log_epoch &&
-        __atomic_exchange_n(&Syscall_debug_post_log_epoch, epoch, __ATOMIC_ACQ_REL) < epoch)
+}
+
+bool Syscall_try_dispatch_user_from_idle(uint32_t cpu_index)
+{
+    if (!Syscall_state.proc_lock_ready || cpu_index >= 256)
+        return false;
+
+    Syscall_debug_idle_dispatch_attempts++;
+    Syscall_debug_idle_dispatch_attempt_cpu[cpu_index & 0x3U]++;
+
+    syscall_user_resume_context_t resume_ctx;
+    memset(&resume_ctx, 0, sizeof(resume_ctx));
+    uintptr_t next_cr3 = 0;
+    uintptr_t next_fs_base = 0;
+    uint32_t next_pid = 0;
+    bool has_target = false;
+
+    uint64_t lock_flags = spin_lock_irqsave(&Syscall_state.proc_lock);
+    int32_t current_slot = Syscall_proc_get_current_slot_locked(cpu_index);
+    if (current_slot >= 0)
     {
-        // #region agent log
-        kdebug_printf("[AGENTDBG H7 PREEMPT] tick=%llu calls=%llu runnable_le1=%llu need_resched_set=%llu attempts=%llu success=%llu fail_flag=%llu fail_no_current=%llu fail_same=%llu fail_next=%llu\n",
-                      (unsigned long long) now_ticks,
-                      (unsigned long long) Syscall_debug_tick_calls,
-                      (unsigned long long) Syscall_debug_tick_runnable_le1,
-                      (unsigned long long) Syscall_debug_need_resched_set,
-                      (unsigned long long) Syscall_debug_preempt_attempts,
-                      (unsigned long long) Syscall_debug_preempt_success,
-                      (unsigned long long) Syscall_debug_preempt_no_flag,
-                      (unsigned long long) Syscall_debug_preempt_no_current,
-                      (unsigned long long) Syscall_debug_preempt_same_slot,
-                      (unsigned long long) Syscall_debug_preempt_invalid_next);
-        kdebug_printf("[AGENTDBG H9 PREEMPT_CPU] set=[%llu,%llu,%llu,%llu] attempts=[%llu,%llu,%llu,%llu] success=[%llu,%llu,%llu,%llu] fail_flag=[%llu,%llu,%llu,%llu]\n",
-                      (unsigned long long) Syscall_debug_need_resched_set_cpu[0],
-                      (unsigned long long) Syscall_debug_need_resched_set_cpu[1],
-                      (unsigned long long) Syscall_debug_need_resched_set_cpu[2],
-                      (unsigned long long) Syscall_debug_need_resched_set_cpu[3],
-                      (unsigned long long) Syscall_debug_preempt_attempt_cpu[0],
-                      (unsigned long long) Syscall_debug_preempt_attempt_cpu[1],
-                      (unsigned long long) Syscall_debug_preempt_attempt_cpu[2],
-                      (unsigned long long) Syscall_debug_preempt_attempt_cpu[3],
-                      (unsigned long long) Syscall_debug_preempt_success_cpu[0],
-                      (unsigned long long) Syscall_debug_preempt_success_cpu[1],
-                      (unsigned long long) Syscall_debug_preempt_success_cpu[2],
-                      (unsigned long long) Syscall_debug_preempt_success_cpu[3],
-                      (unsigned long long) Syscall_debug_preempt_no_flag_cpu[0],
-                      (unsigned long long) Syscall_debug_preempt_no_flag_cpu[1],
-                      (unsigned long long) Syscall_debug_preempt_no_flag_cpu[2],
-                      (unsigned long long) Syscall_debug_preempt_no_flag_cpu[3]);
-        kdebug_printf("[AGENTDBG H13 FLAG_FLOW] timer_consume=[%llu,%llu,%llu,%llu] post_consume=[%llu,%llu,%llu,%llu] set_sleep=[%llu,%llu,%llu,%llu]\n",
-                      (unsigned long long) Syscall_debug_flag_consume_timer_cpu[0],
-                      (unsigned long long) Syscall_debug_flag_consume_timer_cpu[1],
-                      (unsigned long long) Syscall_debug_flag_consume_timer_cpu[2],
-                      (unsigned long long) Syscall_debug_flag_consume_timer_cpu[3],
-                      (unsigned long long) Syscall_debug_flag_consume_post_cpu[0],
-                      (unsigned long long) Syscall_debug_flag_consume_post_cpu[1],
-                      (unsigned long long) Syscall_debug_flag_consume_post_cpu[2],
-                      (unsigned long long) Syscall_debug_flag_consume_post_cpu[3],
-                      (unsigned long long) Syscall_debug_flag_set_sleep_cpu[0],
-                      (unsigned long long) Syscall_debug_flag_set_sleep_cpu[1],
-                      (unsigned long long) Syscall_debug_flag_set_sleep_cpu[2],
-                      (unsigned long long) Syscall_debug_flag_set_sleep_cpu[3]);
-        // #endregion
+        spin_unlock_irqrestore(&Syscall_state.proc_lock, lock_flags);
+        Syscall_debug_idle_dispatch_rejected_running++;
+        return false;
     }
+
+    int32_t next_slot = -1;
+    syscall_process_t* next = NULL;
+    for (uint32_t idx = 0; idx < SYSCALL_MAX_PROCS; idx++)
+    {
+        syscall_process_t* cand = &Syscall_state.procs[idx];
+        if (!cand->used || cand->exiting || cand->cr3_phys == 0)
+            continue;
+        if (cand->pid == 1U || cand->ppid == 0U)
+            continue;
+        if (Syscall_idle_claimed_slots[idx] != 0U)
+            continue;
+        if (Syscall_proc_is_on_other_cpu_locked(idx, cpu_index))
+            continue;
+
+        next_slot = (int32_t) idx;
+        next = cand;
+        break;
+    }
+    if (next_slot < 0 || !next)
+    {
+        spin_unlock_irqrestore(&Syscall_state.proc_lock, lock_flags);
+        Syscall_debug_idle_dispatch_rejected_empty++;
+        return false;
+    }
+
+    Syscall_state.cpu_current_proc[cpu_index] = (uint32_t) next_slot;
+    Syscall_idle_claimed_slots[(uint32_t) next_slot] = 1U;
+    Syscall_state.cpu_slice_ticks[cpu_index] = 0U;
+    __atomic_store_n(&Syscall_state.cpu_need_resched[cpu_index], 0, __ATOMIC_RELEASE);
+    __atomic_store_n(&Syscall_state.cpu_need_timer_preempt[cpu_index], 0, __ATOMIC_RELEASE);
+    __atomic_store_n(&Syscall_state.cpu_yield_same_owner_pick[cpu_index], 0, __ATOMIC_RELEASE);
+
+    resume_ctx.rax = next->rax;
+    resume_ctx.rcx = next->rcx;
+    resume_ctx.rdx = next->rdx;
+    resume_ctx.rsi = next->rsi;
+    resume_ctx.rdi = next->rdi;
+    resume_ctx.r8 = next->r8;
+    resume_ctx.r9 = next->r9;
+    resume_ctx.r10 = next->r10;
+    resume_ctx.r11 = next->r11;
+    resume_ctx.r15 = next->r15;
+    resume_ctx.r14 = next->r14;
+    resume_ctx.r13 = next->r13;
+    resume_ctx.r12 = next->r12;
+    resume_ctx.rbp = next->rbp;
+    resume_ctx.rbx = next->rbx;
+    resume_ctx.rip = next->rip;
+    resume_ctx.rflags = next->rflags | SYSCALL_RFLAGS_IF;
+    resume_ctx.rsp = next->rsp;
+
+    next_cr3 = next->cr3_phys;
+    next_fs_base = next->fs_base;
+    next_pid = next->pid;
+    has_target = true;
+    spin_unlock_irqrestore(&Syscall_state.proc_lock, lock_flags);
+
+    if (!has_target)
+        return false;
+
+    if (next_cr3 != Syscall_read_cr3_phys())
+        Syscall_write_cr3_phys(next_cr3);
+    if (next_fs_base != Syscall_read_fs_base())
+        Syscall_write_fs_base(next_fs_base);
+
+    /*
+     * Idle->user handoff may run outside the syscall stub path.
+     * Re-establish GS/KERNEL_GS_BASE invariants expected by SYSCALL entry:
+     *   - IA32_GS_BASE         = user GS base (currently 0)
+     *   - IA32_KERNEL_GS_BASE  = per-CPU kernel local pointer
+     */
+    task_cpu_local_t* cpu_local = task_get_cpu_local();
+    if (cpu_local)
+    {
+        MSR_set(IA32_GS_BASE, 0);
+        MSR_set(IA32_KERNEL_GS_BASE, (uint64_t) (uintptr_t) cpu_local);
+    }
+
+    Syscall_debug_idle_dispatch_success++;
+    Syscall_debug_idle_dispatch_success_cpu[cpu_index & 0x3U]++;
+    kdebug_printf("[SMPUSR] idle dispatch cpu=%u pid=%u rip=0x%llx\n",
+                  (unsigned) cpu_index,
+                  (unsigned) next_pid,
+                  (unsigned long long) resume_ctx.rip);
+    Syscall_resume_user_context(&resume_ctx);
 }
 
 bool Syscall_handle_timer_preempt(interrupt_frame_t* frame, uint32_t cpu_index)
@@ -5876,7 +7114,7 @@ bool Syscall_handle_timer_preempt(interrupt_frame_t* frame, uint32_t cpu_index)
     uintptr_t current_fs_base = Syscall_read_fs_base();
     Syscall_proc_save_from_interrupt(current, frame, current_cr3, current_fs_base);
 
-    int32_t next_slot = Syscall_proc_pick_next_locked(current_slot);
+    int32_t next_slot = Syscall_proc_pick_next_locked(current_slot, cpu_index);
     if (next_slot < 0 || next_slot == current_slot)
     {
         Syscall_debug_preempt_same_slot++;
@@ -6157,7 +7395,8 @@ uint64_t Syscall_interrupt_handler(uint64_t syscall_num, syscall_frame_t* frame,
         case SYS_CONSOLE_ROUTE_SET:
         {
             uint32_t flags = (uint32_t) frame->rdi;
-            uint32_t allowed = SYS_CONSOLE_ROUTE_FLAG_CAPTURE | SYS_CONSOLE_ROUTE_FLAG_TTY;
+            uint32_t allowed =
+                SYS_CONSOLE_ROUTE_FLAG_CAPTURE | SYS_CONSOLE_ROUTE_FLAG_TTY | SYS_CONSOLE_ROUTE_FLAG_PTY_INPUT;
             if ((flags & ~allowed) != 0U)
                 return (uint64_t) -1;
 
@@ -6203,6 +7442,12 @@ uint64_t Syscall_interrupt_handler(uint64_t syscall_num, syscall_frame_t* frame,
                 route->head = 0U;
                 route->tail = 0U;
                 route->count = 0U;
+            }
+            if ((flags & SYS_CONSOLE_ROUTE_FLAG_PTY_INPUT) == 0U)
+            {
+                route->in_head = 0U;
+                route->in_tail = 0U;
+                route->in_count = 0U;
             }
             spin_unlock_irqrestore(&Syscall_state.console_lock, lock_flags);
             return 0ULL;
@@ -6266,7 +7511,8 @@ uint64_t Syscall_interrupt_handler(uint64_t syscall_num, syscall_frame_t* frame,
         {
             uint32_t console_sid = (uint32_t) frame->rdi;
             uint32_t flags = (uint32_t) frame->rsi;
-            uint32_t allowed = SYS_CONSOLE_ROUTE_FLAG_CAPTURE | SYS_CONSOLE_ROUTE_FLAG_TTY;
+            uint32_t allowed =
+                SYS_CONSOLE_ROUTE_FLAG_CAPTURE | SYS_CONSOLE_ROUTE_FLAG_TTY | SYS_CONSOLE_ROUTE_FLAG_PTY_INPUT;
             if (console_sid == 0U || (flags & ~allowed) != 0U)
                 return (uint64_t) -1;
 
@@ -6317,6 +7563,12 @@ uint64_t Syscall_interrupt_handler(uint64_t syscall_num, syscall_frame_t* frame,
                 route->head = 0U;
                 route->tail = 0U;
                 route->count = 0U;
+            }
+            if ((flags & SYS_CONSOLE_ROUTE_FLAG_PTY_INPUT) == 0U)
+            {
+                route->in_head = 0U;
+                route->in_tail = 0U;
+                route->in_count = 0U;
             }
             spin_unlock_irqrestore(&Syscall_state.console_lock, lock_flags);
             return 0ULL;
@@ -6374,6 +7626,105 @@ uint64_t Syscall_interrupt_handler(uint64_t syscall_num, syscall_frame_t* frame,
             return (uint64_t) copied;
         }
 
+        case SYS_CONSOLE_ROUTE_INPUT_WRITE_SID:
+        {
+            uint32_t console_sid = (uint32_t) frame->rdi;
+            const char* user_buf = (const char*) frame->rsi;
+            size_t len = (size_t) frame->rdx;
+            if (console_sid == 0U || !user_buf || len == 0U)
+                return (uint64_t) -1;
+
+            if (len > SYSCALL_CONSOLE_MAX_WRITE)
+                len = SYSCALL_CONSOLE_MAX_WRITE;
+
+            if (!Syscall_state.console_lock_ready)
+                return (uint64_t) -1;
+
+            uint32_t caller_owner_pid = Syscall_proc_current_pid(cpu_index, frame);
+            if (caller_owner_pid == 0U)
+                return (uint64_t) -1;
+
+            char* kernel_buf = (char*) kmalloc(len);
+            if (!kernel_buf)
+                return (uint64_t) -1;
+
+            if (!Syscall_copy_from_user(kernel_buf, user_buf, len))
+            {
+                kfree(kernel_buf);
+                return (uint64_t) -1;
+            }
+
+            uint64_t lock_flags = spin_lock_irqsave(&Syscall_state.console_lock);
+            int32_t route_slot = Syscall_console_route_find_locked(console_sid);
+            if (route_slot < 0)
+            {
+                spin_unlock_irqrestore(&Syscall_state.console_lock, lock_flags);
+                kfree(kernel_buf);
+                return (uint64_t) -1;
+            }
+
+            syscall_console_route_t* route = &Syscall_state.console_routes[(uint32_t) route_slot];
+            if (route->owner_pid != caller_owner_pid || (route->flags & SYS_CONSOLE_ROUTE_FLAG_PTY_INPUT) == 0U)
+            {
+                spin_unlock_irqrestore(&Syscall_state.console_lock, lock_flags);
+                kfree(kernel_buf);
+                return (uint64_t) -1;
+            }
+
+            Syscall_console_route_input_push_locked(route, kernel_buf, len);
+            spin_unlock_irqrestore(&Syscall_state.console_lock, lock_flags);
+            kfree(kernel_buf);
+            return (uint64_t) len;
+        }
+
+        case SYS_CONSOLE_ROUTE_INPUT_READ:
+        {
+            char* user_buf = (char*) frame->rdi;
+            size_t cap = (size_t) frame->rsi;
+            if (!user_buf || cap == 0U)
+                return 0ULL;
+
+            if (cap > SYSCALL_CONSOLE_MAX_WRITE)
+                cap = SYSCALL_CONSOLE_MAX_WRITE;
+
+            if (!Syscall_state.console_lock_ready)
+                return 0ULL;
+
+            uint32_t console_sid = Syscall_proc_current_console_sid(cpu_index, frame);
+            if (console_sid == 0U)
+                return 0ULL;
+
+            char* kernel_buf = (char*) kmalloc(cap);
+            if (!kernel_buf)
+                return (uint64_t) -1;
+
+            size_t copied = 0U;
+            uint64_t lock_flags = spin_lock_irqsave(&Syscall_state.console_lock);
+            int32_t route_slot = Syscall_console_route_find_locked(console_sid);
+            if (route_slot >= 0)
+            {
+                syscall_console_route_t* route = &Syscall_state.console_routes[(uint32_t) route_slot];
+                if ((route->flags & SYS_CONSOLE_ROUTE_FLAG_PTY_INPUT) != 0U)
+                    copied = Syscall_console_route_input_pop_locked(route, kernel_buf, cap);
+            }
+            spin_unlock_irqrestore(&Syscall_state.console_lock, lock_flags);
+
+            if (copied == 0U)
+            {
+                kfree(kernel_buf);
+                return 0ULL;
+            }
+
+            if (!Syscall_copy_to_user(user_buf, kernel_buf, copied))
+            {
+                kfree(kernel_buf);
+                return (uint64_t) -1;
+            }
+
+            kfree(kernel_buf);
+            return (uint64_t) copied;
+        }
+
         case SYS_EXIT:
         {
             int64_t status = (int64_t) frame->rdi;
@@ -6412,7 +7763,7 @@ uint64_t Syscall_interrupt_handler(uint64_t syscall_num, syscall_frame_t* frame,
             }
 
             syscall_process_t* parent = &Syscall_state.procs[parent_slot];
-            if (Syscall_proc_owner_has_other_live_locked(parent->owner_pid, parent_slot))
+            if (Syscall_proc_owner_has_other_live_non_thread_locked(parent->owner_pid, parent_slot))
             {
                 spin_unlock_irqrestore(&Syscall_state.proc_lock, lock_flags);
                 return (uint64_t) -1;
@@ -6439,6 +7790,7 @@ uint64_t Syscall_interrupt_handler(uint64_t syscall_num, syscall_frame_t* frame,
             uint32_t child_pid = Syscall_state.next_pid++;
             syscall_process_t* child = &Syscall_state.procs[child_slot];
             memset(child, 0, sizeof(*child));
+            Syscall_idle_claimed_slots[(uint32_t) child_slot] = 0U;
             child->used = true;
             child->exiting = false;
             child->terminated_by_signal = false;
@@ -6625,7 +7977,17 @@ uint64_t Syscall_interrupt_handler(uint64_t syscall_num, syscall_frame_t* frame,
 
         case SYS_YIELD:
             if (cpu_index < 256)
+            {
+                if (Syscall_state.proc_lock_ready)
+                {
+                    uint64_t lock_flags = spin_lock_irqsave(&Syscall_state.proc_lock);
+                    int32_t slot = Syscall_proc_ensure_current_locked(cpu_index, frame);
+                    if (slot >= 0 && Syscall_proc_has_other_owner_peer_locked(slot))
+                        __atomic_store_n(&Syscall_state.cpu_yield_same_owner_pick[cpu_index], 1, __ATOMIC_RELEASE);
+                    spin_unlock_irqrestore(&Syscall_state.proc_lock, lock_flags);
+                }
                 __atomic_store_n(&Syscall_state.cpu_need_resched[cpu_index], 1, __ATOMIC_RELEASE);
+            }
             return 0;
 
         case SYS_MAP:
@@ -7134,7 +8496,27 @@ mprotect_out:
                 Syscall_kbd_inject_target_hits++;
                 return 0ULL;
             }
+            if (Syscall_kbd_hardware_capture_pid != 0U && caller_pid != Syscall_kbd_hardware_capture_pid)
+                return 0ULL;
             return (uint64_t) Keyboard_get_scancode();
+        }
+
+        case SYS_KBD_CAPTURE_SET:
+        {
+            uint32_t caller_pid = Syscall_proc_current_pid(cpu_index, frame);
+            uint32_t want = (uint32_t) frame->rdi;
+            if (caller_pid == 0U)
+                return (uint64_t) -1;
+            if (want == 0U)
+            {
+                if (Syscall_kbd_hardware_capture_pid == caller_pid)
+                    Syscall_kbd_hardware_capture_pid = 0U;
+                return 0ULL;
+            }
+            if (want != caller_pid)
+                return (uint64_t) -1;
+            Syscall_kbd_hardware_capture_pid = want;
+            return 0ULL;
         }
 
         case SYS_KBD_INJECT_SCANCODE:
@@ -7610,6 +8992,33 @@ mprotect_out:
             }
         }
 
+        case SYS_PIPE:
+            return Syscall_handle_pipe(cpu_index, frame);
+
+        case SYS_FUTEX:
+            return Syscall_handle_futex(cpu_index, frame);
+
+        case SYS_SHMGET:
+            return Syscall_handle_shmget(cpu_index, frame);
+
+        case SYS_SHMAT:
+            return Syscall_handle_shmat(cpu_index, frame);
+
+        case SYS_SHMDT:
+            return Syscall_handle_shmdt(cpu_index, frame);
+
+        case SYS_SHMCTL:
+            return Syscall_handle_shmctl(cpu_index, frame);
+
+        case SYS_MSGGET:
+            return Syscall_handle_msgget(cpu_index, frame);
+
+        case SYS_MSGSND:
+            return Syscall_handle_msgsnd(cpu_index, frame);
+
+        case SYS_MSGRCV:
+            return Syscall_handle_msgrcv(cpu_index, frame);
+
         default:
         {
             if (Syscall_state.proc_lock_ready)
@@ -7659,11 +9068,20 @@ uint64_t Syscall_post_handler(uint64_t syscall_ret, syscall_frame_t* frame, uint
 {
     if (!frame || !Syscall_state.proc_lock_ready)
         return syscall_ret;
-    Syscall_debug_post_calls++;
-    Syscall_debug_post_calls_cpu[cpu_index & 0x3U]++;
+
+    task_cpu_local_t* post_cpu_local = task_get_cpu_local();
+    uint8_t post_apic_id = APIC_get_current_lapic_id();
+    if (post_cpu_local)
+    {
+        cpu_index = __atomic_load_n(&post_cpu_local->cpu_index, __ATOMIC_RELAXED);
+        post_apic_id = __atomic_load_n(&post_cpu_local->apic_id, __ATOMIC_RELAXED);
+    }
 
     if (cpu_index >= 256)
-        cpu_index = 0;
+        cpu_index = post_apic_id;
+
+    Syscall_debug_post_calls++;
+    Syscall_debug_post_calls_cpu[cpu_index & 0x3U]++;
 
     uintptr_t old_cr3_to_free = 0;
     bool free_old_cr3 = false;
@@ -7737,13 +9155,15 @@ uint64_t Syscall_post_handler(uint64_t syscall_ret, syscall_frame_t* frame, uint
         queue_exit_event = (!owner_has_other_live && cleanup_ppid != 0 && cleanup_pid != 0);
         cleanup_fds = !owner_has_other_live;
         cleanup_console_route = false;
+        Syscall_idle_claimed_slots[(uint32_t) current_slot] = 0U;
         memset(current, 0, sizeof(*current));
         Syscall_state.cpu_current_proc[cpu_index] = SYSCALL_PROC_NONE;
         current_slot = -1;
     }
 
     bool pick_next = (current_slot < 0);
-    if (__atomic_exchange_n(&Syscall_state.cpu_need_resched[cpu_index], 0, __ATOMIC_ACQ_REL) != 0)
+    bool consumed_resched = __atomic_exchange_n(&Syscall_state.cpu_need_resched[cpu_index], 0, __ATOMIC_ACQ_REL) != 0;
+    if (consumed_resched)
     {
         pick_next = true;
         Syscall_debug_flag_consume_post_cpu[cpu_index & 0x3U]++;
@@ -7751,9 +9171,21 @@ uint64_t Syscall_post_handler(uint64_t syscall_ret, syscall_frame_t* frame, uint
     if (pick_next)
         Syscall_debug_post_pick_next++;
 
+    bool same_owner_coop = false;
+    if (consumed_resched)
+    {
+        bool yield_route = __atomic_exchange_n(&Syscall_state.cpu_yield_same_owner_pick[cpu_index], 0, __ATOMIC_ACQ_REL) != 0;
+        same_owner_coop = yield_route && current_slot >= 0;
+    }
+
     int32_t next_slot = current_slot;
     if (pick_next)
-        next_slot = Syscall_proc_pick_next_locked(current_slot);
+    {
+        if (same_owner_coop)
+            next_slot = Syscall_proc_pick_next_same_owner_locked(current_slot, cpu_index);
+        else
+            next_slot = Syscall_proc_pick_next_locked(current_slot, cpu_index);
+    }
     if (next_slot < 0)
     {
         spin_unlock_irqrestore(&Syscall_state.proc_lock, lock_flags);
@@ -7801,49 +9233,12 @@ uint64_t Syscall_post_handler(uint64_t syscall_ret, syscall_frame_t* frame, uint
         Syscall_write_fs_base(next_fs_base);
     if (cleanup_fds)
         Syscall_fd_cleanup_owner(cleanup_pid);
+    if (cleanup_fds && cleanup_pid != 0U && Syscall_kbd_hardware_capture_pid == cleanup_pid)
+        Syscall_kbd_hardware_capture_pid = 0U;
     if (cleanup_console_route)
         Syscall_console_route_clear_sid(cleanup_console_sid);
     if (free_old_cr3 && old_cr3_to_free != next_cr3)
         Syscall_free_address_space(old_cr3_to_free);
-
-    uint64_t now_ticks = ISR_get_timer_ticks();
-    uint64_t epoch = now_ticks / 2000ULL;
-    uint32_t debug_task_cpu = task_get_current_cpu_index();
-    uint32_t debug_apic_cpu = (uint32_t) APIC_get_current_lapic_id();
-    if (epoch != 0ULL &&
-        epoch > Syscall_debug_post_log_epoch &&
-        __atomic_exchange_n(&Syscall_debug_post_log_epoch, epoch, __ATOMIC_ACQ_REL) < epoch)
-    {
-        // #region agent log
-        kdebug_printf("[AGENTDBG H8 POST] tick=%llu post_calls=%llu pick_next=%llu switches=%llu cpu=%u task_cpu=%u apic=%u current=%d next=%d\n",
-                      (unsigned long long) now_ticks,
-                      (unsigned long long) Syscall_debug_post_calls,
-                      (unsigned long long) Syscall_debug_post_pick_next,
-                      (unsigned long long) Syscall_debug_post_switch,
-                      cpu_index,
-                      debug_task_cpu,
-                      debug_apic_cpu,
-                      current_slot,
-                      next_slot);
-        kdebug_printf("[AGENTDBG H12 SYSCALL_MIX] irq_cpu=[%llu,%llu,%llu,%llu] post_cpu=[%llu,%llu,%llu,%llu] sw_cpu=[%llu,%llu,%llu,%llu] read=%llu write=%llu sleep=%llu other=%llu\n",
-                      (unsigned long long) Syscall_debug_irq_calls_cpu[0],
-                      (unsigned long long) Syscall_debug_irq_calls_cpu[1],
-                      (unsigned long long) Syscall_debug_irq_calls_cpu[2],
-                      (unsigned long long) Syscall_debug_irq_calls_cpu[3],
-                      (unsigned long long) Syscall_debug_post_calls_cpu[0],
-                      (unsigned long long) Syscall_debug_post_calls_cpu[1],
-                      (unsigned long long) Syscall_debug_post_calls_cpu[2],
-                      (unsigned long long) Syscall_debug_post_calls_cpu[3],
-                      (unsigned long long) Syscall_debug_post_switch_cpu[0],
-                      (unsigned long long) Syscall_debug_post_switch_cpu[1],
-                      (unsigned long long) Syscall_debug_post_switch_cpu[2],
-                      (unsigned long long) Syscall_debug_post_switch_cpu[3],
-                      (unsigned long long) Syscall_debug_nr_read,
-                      (unsigned long long) Syscall_debug_nr_write,
-                      (unsigned long long) Syscall_debug_nr_sleep,
-                      (unsigned long long) Syscall_debug_nr_other);
-        // #endregion
-    }
 
     return ret_for_next;
 }

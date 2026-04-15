@@ -1,0 +1,11 @@
+CompileFlags:
+  CompilationDatabase: Build
+  Compiler: /home/codemajorgeek/TheOS-Reborn/Toolchain/Local/x86_64/bin/x86_64-pc-theos-gcc
+  Add:
+    - -std=gnu11
+    - -I/home/codemajorgeek/TheOS-Reborn
+    - -I/home/codemajorgeek/TheOS-Reborn/Build
+    - -I/home/codemajorgeek/TheOS-Reborn/Includes
+    - -I/home/codemajorgeek/TheOS-Reborn/Userland/Libraries/LibC/Includes
+Diagnostics:
+  UnusedIncludes: None

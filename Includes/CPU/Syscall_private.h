@@ -39,5 +39,14 @@ static uint64_t Syscall_handle_read(uint32_t cpu_index, const syscall_frame_t* f
 static uint64_t Syscall_handle_write(uint32_t cpu_index, const syscall_frame_t* frame);
 static uint64_t Syscall_handle_lseek(uint32_t cpu_index, const syscall_frame_t* frame);
 static uint64_t Syscall_handle_ioctl(uint32_t cpu_index, const syscall_frame_t* frame);
+static uint64_t Syscall_handle_pipe(uint32_t cpu_index, const syscall_frame_t* frame);
+static uint64_t Syscall_handle_futex(uint32_t cpu_index, const syscall_frame_t* frame);
+static uint64_t Syscall_handle_shmget(uint32_t cpu_index, const syscall_frame_t* frame);
+static uint64_t Syscall_handle_shmat(uint32_t cpu_index, const syscall_frame_t* frame);
+static uint64_t Syscall_handle_shmdt(uint32_t cpu_index, const syscall_frame_t* frame);
+static uint64_t Syscall_handle_shmctl(uint32_t cpu_index, const syscall_frame_t* frame);
+static uint64_t Syscall_handle_msgget(uint32_t cpu_index, const syscall_frame_t* frame);
+static uint64_t Syscall_handle_msgsnd(uint32_t cpu_index, const syscall_frame_t* frame);
+static uint64_t Syscall_handle_msgrcv(uint32_t cpu_index, const syscall_frame_t* frame);
 
 #endif

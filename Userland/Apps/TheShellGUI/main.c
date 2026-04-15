@@ -1,28 +1,28 @@
 #include <errno.h>
+#include <sched.h>
 #include <stdbool.h>
 #include <stddef.h>
 #include <stdint.h>
 #include <signal.h>
 #include <stdio.h>
 #include <string.h>
-#include <pthread.h>
 #include <sys/wait.h>
 #include <syscall.h>
 #include <unistd.h>
 #include <window.h>
 
-#define SHELLGUI_FRAME_TIME_US 8000U
-#define SHELLGUI_IDLE_SLEEP_US 2000U
 #define SHELLGUI_LINES_MAX     64U
 #define SHELLGUI_LINE_LEN      160U
-#define SHELLGUI_REFRESH_MIN_TICKS 2ULL
-#define SHELLGUI_EVENT_POLL_BACKOFF_TICKS 1ULL
+#define SHELLGUI_VISIBLE_LINES 24U
+#define SHELLGUI_REFRESH_MIN_TICKS 0ULL
+#define SHELLGUI_EVENT_POLL_BACKOFF_TICKS 0ULL
 
 #define SHELLGUI_LOG(fmt, ...)                                                                                              \
     do                                                                                                                      \
     {                                                                                                                       \
         unsigned long long __tick = (unsigned long long) sys_tick_get();                                                   \
         printf("[TheShellGUI t=%llu] " fmt, __tick, ##__VA_ARGS__);                                                       \
+        (void) fflush(stdout);                                                                                              \
     }                                                                                                                       \
     while (0)
 
@@ -46,49 +46,9 @@ typedef struct shellgui_state
     uint64_t next_refresh_tick;
     uint64_t next_event_poll_tick;
     char last_sent_text[WS_WINDOW_BODY_TEXT_MAX + 1U];
+    bool key_extended_prefix;
+    bool key_down[256U];
 } shellgui_state_t;
-
-static uint64_t shellgui_dbg_capture_calls = 0ULL;
-static uint64_t shellgui_dbg_capture_bytes = 0ULL;
-static uint64_t shellgui_dbg_capture_empty = 0ULL;
-static uint64_t shellgui_dbg_capture_err = 0ULL;
-static uint64_t shellgui_dbg_capture_max_ticks = 0ULL;
-static uint64_t shellgui_dbg_refresh_max_ticks = 0ULL;
-static uint64_t shellgui_dbg_refresh_slow = 0ULL;
-static uint64_t shellgui_dbg_capture_slow = 0ULL;
-static volatile uint64_t shellgui_dbg_mainloop_tick = 0ULL;
-static volatile uint64_t shellgui_dbg_watchdog_log_tick = 0ULL;
-static volatile bool shellgui_dbg_watchdog_run = false;
-static uint64_t shellgui_dbg_capture_neg_rc = 0ULL;
-static uint64_t shellgui_dbg_snapshot_epoch = 0ULL;
-
-static void shellgui_debug_emit(const char* run_id,
-                                const char* hypothesis_id,
-                                const char* location,
-                                const char* message,
-                                unsigned long long v1,
-                                unsigned long long v2,
-                                unsigned long long v3)
-{
-    FILE* file = fopen("/home/alternant/TheOS-Reborn/.cursor/debug-f2d0c7.log", "a");
-    if (!file)
-        return;
-
-    unsigned long long timestamp = (unsigned long long) sys_tick_get();
-    // #region agent log
-    fprintf(file,
-            "{\"sessionId\":\"f2d0c7\",\"runId\":\"%s\",\"hypothesisId\":\"%s\",\"location\":\"%s\",\"message\":\"%s\",\"data\":{\"v1\":%llu,\"v2\":%llu,\"v3\":%llu},\"timestamp\":%llu}\n",
-            run_id,
-            hypothesis_id,
-            location,
-            message,
-            v1,
-            v2,
-            v3,
-            timestamp);
-    // #endregion
-    fclose(file);
-}
 
 static void shellgui_copy_string_limit(char* out, size_t out_size, const char* in)
 {
@@ -238,6 +198,9 @@ static void shellgui_stream_push_char(shellgui_state_t* state, char c)
                 state->ansi_param_seen = true;
                 return;
             }
+            /* Préfixe CSI privé ex. \x1b[?25h — ne pas réinitialiser ni laisser fuiter "?..." en clair. */
+            if (c == '?')
+                return;
 
             if ((c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z'))
                 shellgui_ansi_handle_csi(state, c);
@@ -309,9 +272,18 @@ static void shellgui_compose_text(const shellgui_state_t* state, char* out_text,
         return;
 
     out_text[0] = '\0';
-    for (uint32_t i = 0U; i < state->line_count; i++)
+    uint32_t history_budget = SHELLGUI_VISIBLE_LINES;
+    if (state->stream_line_len > 0U && history_budget > 0U)
+        history_budget--;
+
+    uint32_t shown_history = state->line_count;
+    if (shown_history > history_budget)
+        shown_history = history_budget;
+
+    uint32_t skip_history = state->line_count - shown_history;
+    for (uint32_t i = 0U; i < shown_history; i++)
     {
-        uint32_t idx = (state->line_head + i) % SHELLGUI_LINES_MAX;
+        uint32_t idx = (state->line_head + skip_history + i) % SHELLGUI_LINES_MAX;
         shellgui_buf_append(out_text, out_size, state->lines[idx]);
         shellgui_buf_append(out_text, out_size, "\n");
     }
@@ -330,41 +302,8 @@ static bool shellgui_refresh_window(shellgui_state_t* state)
     if (strcmp(text, state->last_sent_text) == 0)
         return true;
 
-    // #region agent log
-    shellgui_debug_emit("run-4",
-                        "HYP2",
-                        "TheShellGUI/main.c:shellgui_refresh_window",
-                        "refresh_pre_exchange",
-                        (unsigned long long) state->window_id,
-                        (unsigned long long) strlen(text),
-                        (unsigned long long) state->client.sock_fd);
-    // #endregion
-    uint64_t refresh_start_tick = sys_tick_get();
     if (ws_client_set_window_text(&state->client, state->window_id, text) != 0)
-    {
-        // #region agent log
-        shellgui_debug_emit("run-4",
-                            "HYP2",
-                            "TheShellGUI/main.c:shellgui_refresh_window",
-                            "refresh_exchange_fail",
-                            (unsigned long long) errno,
-                            (unsigned long long) state->client.poll_event_inflight,
-                            (unsigned long long) state->client.poll_event_cached);
-        // #endregion
         return false;
-    }
-    uint64_t refresh_ticks = sys_tick_get() - refresh_start_tick;
-    if (refresh_ticks > shellgui_dbg_refresh_max_ticks)
-        shellgui_dbg_refresh_max_ticks = refresh_ticks;
-    if (refresh_ticks > 20ULL)
-    {
-        shellgui_dbg_refresh_slow++;
-        // #region agent log
-        SHELLGUI_LOG("[AGENTDBG H27 REFRESH_STALL] ticks=%llu text_len=%u\n",
-                     (unsigned long long) refresh_ticks,
-                     (unsigned int) strlen(text));
-        // #endregion
-    }
 
     shellgui_copy_string_limit(state->last_sent_text, sizeof(state->last_sent_text), text);
     return true;
@@ -392,16 +331,58 @@ static bool shellgui_launch_shell(shellgui_state_t* state)
         _exit(127);
     }
 
-    if (sys_console_route_set_sid((uint32_t) pid, SYS_CONSOLE_ROUTE_FLAG_CAPTURE) < 0)
+    if (sys_console_route_set_sid((uint32_t) pid,
+                                 SYS_CONSOLE_ROUTE_FLAG_CAPTURE | SYS_CONSOLE_ROUTE_FLAG_PTY_INPUT) < 0)
     {
         SHELLGUI_LOG("console route set failed pid=%d errno=%d\n", (int) pid, errno);
         (void) kill(pid, SIGTERM);
         return false;
     }
 
-    SHELLGUI_LOG("TheShell launched pid=%d\n", (int) pid);
+    SHELLGUI_LOG("TheShell launched pid=%d (PTY)\n", (int) pid);
     state->shell_pid = pid;
     state->shell_running = true;
+    return true;
+}
+
+static bool shellgui_pty_feed_key(shellgui_state_t* state, int key)
+{
+    if (!state || !state->shell_running || state->shell_pid <= 0 || key <= 0)
+        return false;
+
+    unsigned char b = (unsigned char) (key & 0xFF);
+    return sys_console_route_input_write_sid((uint32_t) state->shell_pid, &b, 1U) >= 0;
+}
+
+static bool shellgui_scancode_is_fresh_press(shellgui_state_t* state, uint8_t raw_scancode)
+{
+    if (!state)
+        return false;
+
+    if (raw_scancode == 0xE0U)
+    {
+        state->key_extended_prefix = true;
+        return false;
+    }
+
+    bool is_extended = state->key_extended_prefix;
+    state->key_extended_prefix = false;
+
+    bool is_break = (raw_scancode & 0x80U) != 0U;
+    uint16_t slot = (uint16_t) (raw_scancode & 0x7FU);
+    if (is_extended)
+        slot |= 0x80U;
+
+    if (is_break)
+    {
+        state->key_down[slot] = false;
+        return false;
+    }
+
+    if (state->key_down[slot])
+        return false;
+
+    state->key_down[slot] = true;
     return true;
 }
 
@@ -412,53 +393,16 @@ static bool shellgui_poll_capture(shellgui_state_t* state)
 
     bool changed = false;
     char capture[512];
-    shellgui_dbg_capture_calls++;
-    uint64_t capture_start_tick = sys_tick_get();
     for (;;)
     {
         int rc = sys_console_route_read_sid((uint32_t) state->shell_pid, capture, sizeof(capture));
         if (rc <= 0)
-        {
-            if (rc == 0)
-                shellgui_dbg_capture_empty++;
-            else
-            {
-                shellgui_dbg_capture_err++;
-                shellgui_dbg_capture_neg_rc++;
-            }
             break;
-        }
 
-        shellgui_dbg_capture_bytes += (uint64_t) rc;
         for (int i = 0; i < rc; i++)
             shellgui_stream_push_char(state, capture[i]);
         changed = true;
     }
-    uint64_t capture_ticks = sys_tick_get() - capture_start_tick;
-    if (capture_ticks > shellgui_dbg_capture_max_ticks)
-        shellgui_dbg_capture_max_ticks = capture_ticks;
-    if (capture_ticks > 20ULL)
-    {
-        shellgui_dbg_capture_slow++;
-        // #region agent log
-        SHELLGUI_LOG("[AGENTDBG H28 CAPTURE_STALL] ticks=%llu changed=%u\n",
-                     (unsigned long long) capture_ticks,
-                     changed ? 1U : 0U);
-        // #endregion
-    }
-    if ((changed && (shellgui_dbg_capture_calls % 64ULL == 0ULL)) || shellgui_dbg_capture_neg_rc != 0ULL)
-    {
-        // #region agent log
-        shellgui_debug_emit("run-4",
-                            "HYP1",
-                            "TheShellGUI/main.c:shellgui_poll_capture",
-                            "capture_state",
-                            (unsigned long long) state->stream_line_len,
-                            (unsigned long long) state->line_count,
-                            (unsigned long long) shellgui_dbg_capture_neg_rc);
-        // #endregion
-    }
-
     return changed;
 }
 
@@ -501,37 +445,19 @@ static void shellgui_cleanup(shellgui_state_t* state)
     ws_client_disconnect(&state->client);
 }
 
-static void* shellgui_watchdog_main(void* opaque)
-{
-    (void) opaque;
-    while (shellgui_dbg_watchdog_run)
-    {
-        uint64_t now_tick = sys_tick_get();
-        uint64_t last_tick = shellgui_dbg_mainloop_tick;
-        uint64_t gap = (now_tick > last_tick) ? (now_tick - last_tick) : 0ULL;
-        uint64_t last_log = shellgui_dbg_watchdog_log_tick;
-        if (gap > 40ULL && (now_tick > last_log) && (now_tick - last_log > 40ULL))
-        {
-            shellgui_dbg_watchdog_log_tick = now_tick;
-            SHELLGUI_LOG("[AGENTDBG H25 LOOP_STALL] now=%llu last=%llu gap=%llu\n",
-                         (unsigned long long) now_tick,
-                         (unsigned long long) last_tick,
-                         (unsigned long long) gap);
-        }
-        (void) usleep(4000U);
-    }
-    return NULL;
-}
-
 int main(void)
 {
     shellgui_state_t state;
     memset(&state, 0, sizeof(state));
     state.shell_pid = -1;
 
+    if (keyboard_load_config("/system/keyboard.conf") != 0)
+        SHELLGUI_LOG("keyboard config unavailable, using defaults for PTY decode\n");
+
     if (ws_client_connect(&state.client, WS_CLIENT_ROLE_SHELL_GUI) < 0)
     {
-        SHELLGUI_LOG("ws_client_connect failed errno=%d\n", errno);
+        int e = errno;
+        SHELLGUI_LOG("ws_client_connect failed errno=%d\n", e);
         return 1;
     }
 
@@ -550,7 +476,8 @@ int main(void)
 
     if (ws_client_create_window(&state.client, &window_desc, &state.window_id) < 0)
     {
-        SHELLGUI_LOG("create_window failed errno=%d\n", errno);
+        int e = errno;
+        SHELLGUI_LOG("create_window failed errno=%d\n", e);
         ws_client_disconnect(&state.client);
         return 1;
     }
@@ -559,49 +486,20 @@ int main(void)
     if (!shellgui_launch_shell(&state))
         shellgui_push_line(&state, "[failed to start TheShell]");
     else
-        shellgui_push_line(&state, "[TheShell started - keyboard is shared with other tty clients]");
+        shellgui_push_line(&state, "[TheShell started - PTY session]");
     state.last_sent_text[0] = '\0';
     (void) shellgui_refresh_window(&state);
     state.text_dirty = false;
     state.next_refresh_tick = sys_tick_get() + SHELLGUI_REFRESH_MIN_TICKS;
     state.next_event_poll_tick = 0ULL;
-    uint64_t debug_loop_max_ticks = 0ULL;
-    uint64_t debug_poll_backoff_hits = 0ULL;
-    uint64_t debug_refresh_ok = 0ULL;
-    uint64_t debug_log_epoch = 0ULL;
-    uint64_t debug_poll_call_max_ticks = 0ULL;
-    uint64_t debug_poll_call_slow = 0ULL;
-    uint64_t debug_capture_changes = 0ULL;
-    uint64_t debug_key_events = 0ULL;
-    uint64_t debug_close_events = 0ULL;
-    uint64_t debug_key_gap_max_ticks = 0ULL;
-    uint64_t debug_key_gap_over_20_ticks = 0ULL;
-    uint64_t debug_last_key_tick = 0ULL;
-    uint64_t debug_gui_last_key = 0ULL;
-    uint64_t debug_gui_key_enter = 0ULL;
-    uint64_t debug_gui_key_unhandled = 0ULL;
-    uint64_t debug_gui_key_inject_ok = 0ULL;
-    uint64_t debug_gui_key_inject_fail = 0ULL;
-    uint64_t debug_gui_key_inject_skip = 0ULL;
-    pthread_t watchdog_thread;
-    bool watchdog_started = false;
-    shellgui_dbg_watchdog_run = true;
-    shellgui_dbg_mainloop_tick = sys_tick_get();
-    if (pthread_create(&watchdog_thread, NULL, shellgui_watchdog_main, NULL) == 0)
-        watchdog_started = true;
 
     bool should_exit = false;
     while (!should_exit)
     {
-        uint64_t loop_start_tick = sys_tick_get();
-        shellgui_dbg_mainloop_tick = loop_start_tick;
         bool changed = false;
 
         if (shellgui_poll_capture(&state))
-        {
             changed = true;
-            debug_capture_changes++;
-        }
         if (shellgui_poll_child_status(&state))
         {
             changed = true;
@@ -614,123 +512,47 @@ int main(void)
             for (;;)
             {
                 ws_event_t event;
-                uint64_t poll_call_start = sys_tick_get();
                 if (ws_client_poll_event(&state.client, &event) < 0)
                 {
                     int poll_errno = errno;
-                    shellgui_dbg_mainloop_tick = sys_tick_get();
-                    uint64_t poll_call_ticks = sys_tick_get() - poll_call_start;
-                    if (poll_call_ticks > debug_poll_call_max_ticks)
-                        debug_poll_call_max_ticks = poll_call_ticks;
-                    if (poll_call_ticks > 2ULL)
-                        debug_poll_call_slow++;
-                    if (poll_call_ticks > 20ULL)
-                    {
-                        SHELLGUI_LOG("[AGENTDBG H26 POLL_STALL] rc=-1 ticks=%llu errno=%d\n",
-                                     (unsigned long long) poll_call_ticks,
-                                     errno);
-                    }
-                    // #region agent log
-                    shellgui_debug_emit("run-4",
-                                        "HYP3",
-                                        "TheShellGUI/main.c:main_loop_poll",
-                                        "poll_event_fail",
-                                        (unsigned long long) poll_errno,
-                                        (unsigned long long) state.client.poll_event_inflight,
-                                        (unsigned long long) state.client.poll_event_cached);
-                    // #endregion
                     errno = poll_errno;
                     if (poll_errno == EAGAIN)
                     {
-                        debug_poll_backoff_hits++;
                         state.next_event_poll_tick = now_tick + SHELLGUI_EVENT_POLL_BACKOFF_TICKS;
                         break;
                     }
 
-                    SHELLGUI_LOG("[AGENTDBG H33 POLL_FATAL] errno=%d inflight=%u cached=%u connected=%u win=%u\n",
+                    SHELLGUI_LOG("poll_event failed errno=%d cached=%u connected=%u win=%u\n",
                                  poll_errno,
-                                 state.client.poll_event_inflight ? 1U : 0U,
                                  state.client.poll_event_cached ? 1U : 0U,
                                  state.client.connected ? 1U : 0U,
                                  (unsigned int) state.window_id);
                     should_exit = true;
                     break;
                 }
-                shellgui_dbg_mainloop_tick = sys_tick_get();
-                uint64_t poll_call_ticks = sys_tick_get() - poll_call_start;
-                if (poll_call_ticks > debug_poll_call_max_ticks)
-                    debug_poll_call_max_ticks = poll_call_ticks;
-                if (poll_call_ticks > 2ULL)
-                    debug_poll_call_slow++;
-                if (poll_call_ticks > 20ULL)
-                {
-                    SHELLGUI_LOG("[AGENTDBG H26 POLL_STALL] rc=0 ticks=%llu event=%u win=%u\n",
-                                 (unsigned long long) poll_call_ticks,
-                                 (unsigned int) event.type,
-                                 (unsigned int) event.window_id);
-                }
 
                 if (event.type == WS_EVENT_CLOSE && event.window_id == state.window_id)
                 {
-                    debug_close_events++;
-                    SHELLGUI_LOG("[AGENTDBG H33 CLOSE_EVENT] win=%u shell_pid=%d running=%u\n",
+                    SHELLGUI_LOG("window close event win=%u shell_pid=%d running=%u\n",
                                  (unsigned int) event.window_id,
                                  (int) state.shell_pid,
                                  state.shell_running ? 1U : 0U);
                     should_exit = true;
                     break;
                 }
-                if (event.type == WS_EVENT_KEY && event.window_id == state.window_id)
+                /* La file d'événements est par client : seul le client focalisé reçoit des KEY.
+                 * Ne pas filtrer par window_id : une divergence d'ID bloquait tout envoi au PTY. */
+                if (event.type == WS_EVENT_KEY)
                 {
-                    debug_key_events++;
-                    debug_gui_last_key = (uint64_t) event.key;
-                    if (event.key == '\r' || event.key == '\n')
-                        debug_gui_key_enter++;
-                    uint8_t raw = (uint8_t) (event.key & 0xFFU);
-                    /* Inject only make scancodes; break/extended noise desynchronizes stdio decoder state. */
-                    if (raw == 0xE0U || (raw & 0x80U) != 0U)
-                    {
-                        debug_gui_key_inject_skip++;
-                    }
-                    else
-                    {
-                        if (state.shell_pid > 0 &&
-                            sys_kbd_inject_scancode((uint32_t) state.shell_pid, raw) == 0)
-                        {
-                            debug_gui_key_inject_ok++;
-                        }
-                        else
-                        {
-                            debug_gui_key_inject_fail++;
-                            debug_gui_key_unhandled++;
-                        }
-                    }
-                    uint64_t key_tick = sys_tick_get();
-                    if (debug_last_key_tick != 0ULL && key_tick > debug_last_key_tick)
-                    {
-                        uint64_t key_gap = key_tick - debug_last_key_tick;
-                        if (key_gap > debug_key_gap_max_ticks)
-                            debug_key_gap_max_ticks = key_gap;
-                        if (key_gap > 20ULL)
-                            debug_key_gap_over_20_ticks++;
-                    }
-                    debug_last_key_tick = key_tick;
+                    uint8_t raw_scancode = (uint8_t) ((unsigned int) event.key & 0xFFU);
+                    bool fresh_press = shellgui_scancode_is_fresh_press(&state, raw_scancode);
+
+                    int decoded = 0;
+                    int dec_rc = keyboard_decode_scancode(raw_scancode, &decoded);
+                    if (fresh_press && dec_rc > 0 && decoded > 0)
+                        (void) shellgui_pty_feed_key(&state, decoded);
                 }
             }
-        }
-        uint64_t snapshot_epoch = now_tick / 250ULL;
-        if (snapshot_epoch != 0ULL && snapshot_epoch > shellgui_dbg_snapshot_epoch)
-        {
-            shellgui_dbg_snapshot_epoch = snapshot_epoch;
-            // #region agent log
-            shellgui_debug_emit("run-4",
-                                "HYP4",
-                                "TheShellGUI/main.c:main_loop",
-                                "state_snapshot",
-                                (unsigned long long) state.stream_line_len,
-                                (unsigned long long) state.line_count,
-                                (unsigned long long) state.client.sock_fd);
-            // #endregion
         }
 
         if (changed)
@@ -742,90 +564,22 @@ int main(void)
         {
             if (shellgui_refresh_window(&state))
             {
-                debug_refresh_ok++;
                 state.text_dirty = false;
                 state.next_refresh_tick = now_tick + SHELLGUI_REFRESH_MIN_TICKS;
             }
             else
             {
-                SHELLGUI_LOG("[AGENTDBG H33 REFRESH_FAIL] errno=%d inflight=%u cached=%u dirty=%u\n",
+                SHELLGUI_LOG("refresh window failed errno=%d cached=%u dirty=%u\n",
                              errno,
-                             state.client.poll_event_inflight ? 1U : 0U,
                              state.client.poll_event_cached ? 1U : 0U,
                              state.text_dirty ? 1U : 0U);
             }
         }
 
-        if (state.text_dirty)
-            (void) usleep(SHELLGUI_FRAME_TIME_US);
-        else
-            (void) usleep(SHELLGUI_IDLE_SLEEP_US);
-
-        uint64_t loop_ticks = sys_tick_get() - loop_start_tick;
-        if (loop_ticks > debug_loop_max_ticks)
-            debug_loop_max_ticks = loop_ticks;
-        uint64_t epoch = sys_tick_get() / 500ULL;
-        if (epoch != 0ULL && epoch > debug_log_epoch)
-        {
-            debug_log_epoch = epoch;
-            // #region agent log
-            shellgui_debug_emit("run-2",
-                                "H16",
-                                "TheShellGUI/main.c:main_loop",
-                                "loop_latency",
-                                (unsigned long long) debug_loop_max_ticks,
-                                (unsigned long long) debug_poll_backoff_hits,
-                                (unsigned long long) debug_refresh_ok);
-            SHELLGUI_LOG("[AGENTDBG H16 GUI_LOOP] loop_max=%llu poll_backoff=%llu refresh_ok=%llu dirty=%u\n",
-                         (unsigned long long) debug_loop_max_ticks,
-                         (unsigned long long) debug_poll_backoff_hits,
-                         (unsigned long long) debug_refresh_ok,
-                         state.text_dirty ? 1U : 0U);
-            SHELLGUI_LOG("[AGENTDBG H18 GUI_POLL] poll_max=%llu poll_slow=%llu cap_changes=%llu\n",
-                         (unsigned long long) debug_poll_call_max_ticks,
-                         (unsigned long long) debug_poll_call_slow,
-                         (unsigned long long) debug_capture_changes);
-            SHELLGUI_LOG("[AGENTDBG H19 CAPTURE] calls=%llu bytes=%llu empty=%llu err=%llu\n",
-                         (unsigned long long) shellgui_dbg_capture_calls,
-                         (unsigned long long) shellgui_dbg_capture_bytes,
-                         (unsigned long long) shellgui_dbg_capture_empty,
-                         (unsigned long long) shellgui_dbg_capture_err);
-            SHELLGUI_LOG("[AGENTDBG H27H28 STALL_MAX] refresh_max=%llu refresh_slow=%llu capture_max=%llu capture_slow=%llu\n",
-                         (unsigned long long) shellgui_dbg_refresh_max_ticks,
-                         (unsigned long long) shellgui_dbg_refresh_slow,
-                         (unsigned long long) shellgui_dbg_capture_max_ticks,
-                         (unsigned long long) shellgui_dbg_capture_slow);
-            SHELLGUI_LOG("[AGENTDBG H20 KEYPATH] key_events=%llu close_events=%llu\n",
-                         (unsigned long long) debug_key_events,
-                         (unsigned long long) debug_close_events);
-            SHELLGUI_LOG("[AGENTDBG H39 GUI_KEY_VALUES] last_key=%llu enter=%llu\n",
-                         (unsigned long long) debug_gui_last_key,
-                         (unsigned long long) debug_gui_key_enter);
-            SHELLGUI_LOG("[AGENTDBG H43 GUI_KEY_UNHANDLED] total=%llu\n",
-                         (unsigned long long) debug_gui_key_unhandled);
-            SHELLGUI_LOG("[AGENTDBG H44 GUI_KEY_INJECT] ok=%llu fail=%llu\n",
-                         (unsigned long long) debug_gui_key_inject_ok,
-                         (unsigned long long) debug_gui_key_inject_fail);
-            SHELLGUI_LOG("[AGENTDBG H45 GUI_KEY_INJECT_SKIP] skip=%llu\n",
-                         (unsigned long long) debug_gui_key_inject_skip);
-            shellgui_debug_emit("run-3",
-                                "H23",
-                                "TheShellGUI/main.c:main_loop",
-                                "key_event_gap",
-                                (unsigned long long) debug_key_gap_max_ticks,
-                                (unsigned long long) debug_key_gap_over_20_ticks,
-                                (unsigned long long) debug_key_events);
-            SHELLGUI_LOG("[AGENTDBG H23 KEY_GAP] max_ticks=%llu over20=%llu key_events=%llu\n",
-                         (unsigned long long) debug_key_gap_max_ticks,
-                         (unsigned long long) debug_key_gap_over_20_ticks,
-                         (unsigned long long) debug_key_events);
-            // #endregion
-        }
+        /* usleep() LibC arrondit à ≥1 ms (unistd.c) : chaque tour de boucle était bridé ~1000 Hz. */
+        (void) sched_yield();
     }
 
-    shellgui_dbg_watchdog_run = false;
-    if (watchdog_started)
-        (void) pthread_join(watchdog_thread, NULL);
     shellgui_cleanup(&state);
     SHELLGUI_LOG("exit\n");
     return 0;

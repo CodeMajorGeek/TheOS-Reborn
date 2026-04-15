@@ -43,6 +43,10 @@
 #define AF_UNSPEC 0U
 #endif
 
+#ifndef AF_UNIX
+#define AF_UNIX 1U
+#endif
+
 #ifndef AF_INET
 #define AF_INET 2U
 #endif
