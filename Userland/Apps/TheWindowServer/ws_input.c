@@ -92,24 +92,32 @@ static void ws_begin_drag_if_title(ws_desktop_t* desktop, uint32_t window_id,
     if (!ws_point_in_titlebar(window, x, y))
         return;
 
+    ws_ctx_lock(desktop);
     desktop->dragging = true;
     desktop->drag_window_id = window_id;
     desktop->drag_offset_x = x - window->x;
     desktop->drag_offset_y = y - window->y;
+    ws_ctx_unlock(desktop);
 }
 
 static bool ws_handle_drag_motion(ws_desktop_t* desktop, int32_t x, int32_t y)
 {
-    if (!desktop || !desktop->dragging || desktop->drag_window_id == 0U)
+    if (!desktop)
         return false;
 
     ws_ctx_lock(desktop);
+    if (!desktop->dragging || desktop->drag_window_id == 0U)
+    {
+        ws_ctx_unlock(desktop);
+        return false;
+    }
+
     ws_window_t window;
     if (!ws_window_fetch(&desktop->ws, desktop->drag_window_id, &window))
     {
-        ws_ctx_unlock(desktop);
         desktop->dragging = false;
         desktop->drag_window_id = 0U;
+        ws_ctx_unlock(desktop);
         return false;
     }
 
@@ -350,8 +358,10 @@ bool ws_process_mouse_events(ws_desktop_t* desktop,
 
         if (left_released)
         {
+            ws_ctx_lock(desktop);
             desktop->dragging = false;
             desktop->drag_window_id = 0U;
+            ws_ctx_unlock(desktop);
         }
 
         *mouse_buttons = buttons;

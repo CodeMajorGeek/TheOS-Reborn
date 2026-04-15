@@ -12,6 +12,7 @@
 #include <Device/DRM.h>
 #include <Device/E1000.h>
 #include <Device/HDA.h>
+#include <Device/RTC.h>
 #include <Debug/KDebug.h>
 #include <Debug/Spinlock.h>
 #include <Memory/KMem.h>
@@ -71,6 +72,52 @@ static uint64_t Syscall_debug_idle_dispatch_rejected_empty = 0;
 static uint64_t Syscall_debug_idle_dispatch_attempt_cpu[4] = { 0, 0, 0, 0 };
 static uint64_t Syscall_debug_idle_dispatch_success_cpu[4] = { 0, 0, 0, 0 };
 static uint8_t Syscall_idle_claimed_slots[SYSCALL_MAX_PROCS] = { 0 };
+
+static bool Syscall_is_leap_year(uint32_t year)
+{
+    if ((year % 4U) != 0U)
+        return false;
+    if ((year % 100U) != 0U)
+        return true;
+    return (year % 400U) == 0U;
+}
+
+static uint32_t Syscall_days_in_month(uint32_t year, uint32_t month_1_to_12)
+{
+    static const uint8_t days[12] = { 31, 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31 };
+    if (month_1_to_12 == 2U)
+        return days[1] + (Syscall_is_leap_year(year) ? 1U : 0U);
+    if (month_1_to_12 < 1U || month_1_to_12 > 12U)
+        return 31U;
+    return days[month_1_to_12 - 1U];
+}
+
+static uint64_t Syscall_rtc_epoch_seconds(void)
+{
+    RTC_t rtc;
+    RTC_read(&rtc);
+    uint32_t year = (uint32_t) rtc.year;
+    uint32_t month = (uint32_t) rtc.month;
+    uint32_t day = (uint32_t) rtc.month_day;
+    uint32_t hour = (uint32_t) rtc.hours;
+    uint32_t minute = (uint32_t) rtc.minutes;
+    uint32_t second = (uint32_t) rtc.seconds;
+
+    if (year < 1970U || month < 1U || month > 12U || day < 1U || day > 31U ||
+        hour > 23U || minute > 59U || second > 59U)
+        return 0ULL;
+
+    uint64_t days = 0ULL;
+    for (uint32_t y = 1970U; y < year; y++)
+        days += Syscall_is_leap_year(y) ? 366ULL : 365ULL;
+    for (uint32_t m = 1U; m < month; m++)
+        days += (uint64_t) Syscall_days_in_month(year, m);
+    if (day > Syscall_days_in_month(year, month))
+        return 0ULL;
+    days += (uint64_t) (day - 1U);
+
+    return days * 86400ULL + (uint64_t) hour * 3600ULL + (uint64_t) minute * 60ULL + (uint64_t) second;
+}
 
 __attribute__((__noreturn__)) void Syscall_resume_user_context(const syscall_user_resume_context_t* ctx);
 
@@ -6097,6 +6144,56 @@ static bool Syscall_signal_terminate_owner_locked(uint32_t owner_pid, int32_t si
     return true;
 }
 
+/*
+ * Enfants créés par fork() : ppid = owner_pid du parent au moment du fork, owner_pid propre (≠ parent).
+ * kill(SIGTERM) sur le parent ne passait que par terminate_owner_locked(parent_owner) et laissait ces
+ * processus actifs (ex. TheShell sous TheShellGUI).
+ */
+static void Syscall_signal_terminate_fork_children_of_owner_locked(uint32_t parent_owner_pid, int32_t signal)
+{
+    if (parent_owner_pid == 0U || !Syscall_signal_is_valid(signal))
+        return;
+
+    bool any = false;
+    for (uint32_t i = 0; i < SYSCALL_MAX_PROCS; i++)
+    {
+        syscall_process_t* proc = &Syscall_state.procs[i];
+        if (!proc->used || proc->exiting)
+            continue;
+        if (proc->ppid != parent_owner_pid)
+            continue;
+        if (proc->owner_pid == parent_owner_pid)
+            continue;
+        if (proc->is_thread)
+            continue;
+
+        proc->exiting = true;
+        proc->terminated_by_signal = true;
+        proc->term_signal = signal;
+        proc->exit_status = 128 + signal;
+        proc->thread_exit_value = 0;
+        any = true;
+    }
+
+    if (!any)
+        return;
+
+    for (uint32_t i = 0; i < 256U; i++)
+    {
+        uint32_t running_slot = Syscall_state.cpu_current_proc[i];
+        if (running_slot >= SYSCALL_MAX_PROCS)
+            continue;
+        if (!Syscall_state.procs[running_slot].used)
+            continue;
+        syscall_process_t* rp = &Syscall_state.procs[running_slot];
+        if (!rp->exiting)
+            continue;
+        if (rp->ppid != parent_owner_pid || rp->owner_pid == parent_owner_pid || rp->is_thread)
+            continue;
+        __atomic_store_n(&Syscall_state.cpu_need_resched[i], 1, __ATOMIC_RELEASE);
+    }
+}
+
 static void Syscall_exit_event_push_locked(uint32_t ppid, uint32_t pid, int64_t status, int32_t signal)
 {
     if (ppid == 0 || pid == 0)
@@ -7245,6 +7342,45 @@ uint64_t Syscall_interrupt_handler(uint64_t syscall_num, syscall_frame_t* frame,
 
         case SYS_TICK_GET:
             return ISR_get_timer_ticks();
+
+        case SYS_RTC_TIME_GET:
+            return Syscall_rtc_epoch_seconds();
+
+        case SYS_KDEBUG_WRITE:
+        {
+            const char* user_buf = (const char*) frame->rdi;
+            size_t len = (size_t) frame->rsi;
+            if (!user_buf || len == 0)
+                return 0;
+
+            if (len > SYSCALL_CONSOLE_MAX_WRITE)
+                len = SYSCALL_CONSOLE_MAX_WRITE;
+
+            char stack_buf[1024];
+            char* kernel_buf = stack_buf;
+            bool heap_buf = false;
+            if (len > sizeof(stack_buf))
+            {
+                kernel_buf = (char*) kmalloc(len);
+                if (!kernel_buf)
+                    return (uint64_t) -1;
+                heap_buf = true;
+            }
+
+            if (!Syscall_copy_from_user(kernel_buf, user_buf, len))
+            {
+                if (heap_buf)
+                    kfree(kernel_buf);
+                return (uint64_t) -1;
+            }
+
+            for (size_t i = 0; i < len; i++)
+                kdebug_putc(kernel_buf[i]);
+
+            if (heap_buf)
+                kfree(kernel_buf);
+            return (uint64_t) len;
+        }
 
         case SYS_CPU_INFO_GET:
         {
@@ -8769,9 +8905,13 @@ mprotect_out:
                     {
                         case 'E':
                             delivered = Syscall_signal_terminate_owner_locked(target_owner_pid, signal);
+                            if (delivered)
+                                Syscall_signal_terminate_fork_children_of_owner_locked(target_owner_pid, signal);
                             break;
                         case 'C':
                             delivered = Syscall_signal_terminate_owner_locked(target_owner_pid, signal);
+                            if (delivered)
+                                Syscall_signal_terminate_fork_children_of_owner_locked(target_owner_pid, signal);
                             core_dump_not_implemented = delivered;
                             break;
                         case 'I':
@@ -9371,6 +9511,8 @@ bool Syscall_handle_user_exception(interrupt_frame_t* frame, uintptr_t fault_add
     if (action == 'E' || action == 'C')
     {
         terminated = Syscall_signal_terminate_owner_locked(owner_pid, signal);
+        if (terminated)
+            Syscall_signal_terminate_fork_children_of_owner_locked(owner_pid, signal);
         core_dump_not_implemented = (action == 'C');
     }
 

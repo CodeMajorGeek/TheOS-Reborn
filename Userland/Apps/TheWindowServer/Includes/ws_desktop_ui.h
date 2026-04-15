@@ -5,6 +5,7 @@
 
 bool ws_init_desktop(ws_desktop_t* desktop);
 void ws_apply_desktop_colors(ws_desktop_t* desktop);
+bool ws_update_top_clock(ws_desktop_t* desktop);
 
 void ws_set_power_menu_visible(ws_desktop_t* desktop, bool visible);
 bool ws_handle_power_click(ws_desktop_t* desktop, int32_t x, int32_t y);

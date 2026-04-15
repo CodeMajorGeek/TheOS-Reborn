@@ -16,6 +16,7 @@
 #define SHELLGUI_VISIBLE_LINES 24U
 #define SHELLGUI_REFRESH_MIN_TICKS 0ULL
 #define SHELLGUI_EVENT_POLL_BACKOFF_TICKS 0ULL
+#define SHELLGUI_CURSOR_BLINK_TICKS 125ULL
 
 #define SHELLGUI_LOG(fmt, ...)                                                                                              \
     do                                                                                                                      \
@@ -48,6 +49,8 @@ typedef struct shellgui_state
     char last_sent_text[WS_WINDOW_BODY_TEXT_MAX + 1U];
     bool key_extended_prefix;
     bool key_down[256U];
+    bool cursor_visible;
+    uint64_t next_cursor_blink_tick;
 } shellgui_state_t;
 
 static void shellgui_copy_string_limit(char* out, size_t out_size, const char* in)
@@ -290,6 +293,9 @@ static void shellgui_compose_text(const shellgui_state_t* state, char* out_text,
 
     if (state->stream_line_len > 0U)
         shellgui_buf_append(out_text, out_size, state->stream_line);
+
+    if (state->cursor_visible)
+        shellgui_buf_append(out_text, out_size, "_");
 }
 
 static bool shellgui_refresh_window(shellgui_state_t* state)
@@ -486,6 +492,8 @@ int main(void)
     if (!shellgui_launch_shell(&state))
         shellgui_push_line(&state, "[failed to start TheShell]");
     state.last_sent_text[0] = '\0';
+    state.cursor_visible = true;
+    state.next_cursor_blink_tick = sys_tick_get() + SHELLGUI_CURSOR_BLINK_TICKS;
     (void) shellgui_refresh_window(&state);
     state.text_dirty = false;
     state.next_refresh_tick = sys_tick_get() + SHELLGUI_REFRESH_MIN_TICKS;
@@ -555,6 +563,14 @@ int main(void)
 
         if (changed)
             state.text_dirty = true;
+
+        now_tick = sys_tick_get();
+        if (now_tick >= state.next_cursor_blink_tick)
+        {
+            state.cursor_visible = !state.cursor_visible;
+            state.text_dirty = true;
+            state.next_cursor_blink_tick = now_tick + SHELLGUI_CURSOR_BLINK_TICKS;
+        }
 
         now_tick = sys_tick_get();
         if (state.text_dirty &&

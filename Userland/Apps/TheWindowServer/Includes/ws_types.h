@@ -48,6 +48,7 @@ typedef struct ws_desktop
     uint32_t frame_index;
 
     uint32_t top_bar_id;
+    uint64_t top_clock_last_sec;
     uint32_t dock_bar_id;
     uint32_t dock_icon_ids[WS_DOCK_ICON_COUNT];
 

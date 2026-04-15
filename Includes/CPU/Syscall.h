@@ -35,7 +35,8 @@
 #define SYSCALL_ELF_MAX_SIZE           (16ULL * 1024ULL * 1024ULL)
 #define SYSCALL_ELF_MAX_PHDRS          64U
 #define SYSCALL_ELF_STACK_TOP          0x0000000070000000ULL
-#define SYSCALL_ELF_STACK_SIZE         (512ULL * 1024ULL)
+/* Pile user exec (TheMicroPython, WM, tests) : 512 KiB provoquait des #PF à l’adresse STACK_TOP. */
+#define SYSCALL_ELF_STACK_SIZE         (2ULL * 1024ULL * 1024ULL)
 #define SYSCALL_ELF_DYN_BASE           0x0000000040000000ULL
 #define SYSCALL_ELF_DYN_ALIGN          0x200000ULL
 #define SYSCALL_ELF_DSO_BASE           0x0000000048000000ULL

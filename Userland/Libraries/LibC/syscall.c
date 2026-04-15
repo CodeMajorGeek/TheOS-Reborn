@@ -25,6 +25,11 @@ uint64_t sys_tick_get(void)
     return (uint64_t) syscall(SYS_TICK_GET, 0, 0, 0, 0, 0, 0);
 }
 
+uint64_t sys_rtc_time_get(void)
+{
+    return (uint64_t) syscall(SYS_RTC_TIME_GET, 0, 0, 0, 0, 0, 0);
+}
+
 int sys_cpu_info_get(syscall_cpu_info_t* out_info)
 {
     return (int) syscall(SYS_CPU_INFO_GET, (long) out_info, 0, 0, 0, 0, 0);
@@ -64,6 +69,11 @@ int sys_proc_info_get(syscall_proc_info_t* out_entries, uint32_t max_entries, ui
 int sys_console_write(const void* buf, size_t len)
 {
     return (int) syscall(SYS_CONSOLE_WRITE, (long) buf, (long) len, 0, 0, 0, 0);
+}
+
+int sys_kdebug_write(const void* buf, size_t len)
+{
+    return (int) syscall(SYS_KDEBUG_WRITE, (long) buf, (long) len, 0, 0, 0, 0);
 }
 
 int sys_console_route_set(uint32_t flags)

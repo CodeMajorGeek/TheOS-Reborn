@@ -7,7 +7,10 @@
 #include <errno.h>
 #include <sched.h>
 #include <signal.h>
+#include <stdio.h>
 #include <string.h>
+#include <sys/time.h>
+#include <time.h>
 #include <sys/wait.h>
 #include <syscall.h>
 #include <unistd.h>
@@ -217,6 +220,39 @@ void ws_apply_desktop_colors(ws_desktop_t* desktop)
     }
 }
 
+bool ws_update_top_clock(ws_desktop_t* desktop)
+{
+    if (!desktop || desktop->top_bar_id == 0U)
+        return false;
+
+    struct timeval tv;
+    if (gettimeofday(&tv, NULL) != 0)
+        return false;
+
+    uint64_t now_sec = (uint64_t) tv.tv_sec;
+    if (desktop->top_clock_last_sec == now_sec)
+        return false;
+
+    char clock_text[80];
+    time_t now_time = (time_t) tv.tv_sec;
+    struct tm* tm_now = localtime(&now_time);
+    if (!tm_now)
+        return false;
+    if (strftime(clock_text, sizeof(clock_text), "%d/%m/%Y %H:%M:%S", tm_now) == 0U)
+        return false;
+
+    char title[128];
+    (void) snprintf(title, sizeof(title), "TheOS WindowServer  %s", clock_text);
+    if (ws_set_window_text(&desktop->ws, desktop->top_bar_id, title) == 0)
+    {
+        ws_desktop_invalidate_window_id(desktop, desktop->top_bar_id);
+        desktop->top_clock_last_sec = now_sec;
+        return true;
+    }
+
+    return false;
+}
+
 /* -------------------------------------------------------------------------- */
 /*  14. ws_handle_power_click                                                 */
 /* -------------------------------------------------------------------------- */
@@ -420,6 +456,7 @@ bool ws_init_desktop(ws_desktop_t* desktop)
     desktop->shell_gui_spawn_tick = UINT64_MAX;
     desktop->monitor_gui_spawn_pid = (pid_t) -1;
     desktop->monitor_gui_spawn_tick = UINT64_MAX;
+    desktop->top_clock_last_sec = UINT64_MAX;
     desktop->focused_window_id = 0U;
     desktop->focused_slot = 0U;
     for (uint32_t i = 0U; i < WS_CLIENT_MAX; i++)
@@ -472,7 +509,7 @@ bool ws_init_desktop(ws_desktop_t* desktop)
         .titlebar_color = 0x00324A62U,
         .visible = true,
         .frame_controls = false,
-        .title = "TheOS WindowServer"
+        .title = ""
     };
 
     ws_window_desc_t dock_bar = {
@@ -612,6 +649,7 @@ bool ws_init_desktop(ws_desktop_t* desktop)
 
     ws_set_power_menu_visible(desktop, false);
     ws_apply_desktop_colors(desktop);
+    ws_update_top_clock(desktop);
     ws_dirty_region_reset(desktop);
     WS_LOG("desktop init complete top=%u dock=%u\n",
            (unsigned int) desktop->top_bar_id,

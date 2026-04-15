@@ -29,6 +29,7 @@ add_custom_target(TheMicroPythonApp ALL
         ${MICROPY_PORT_DIR}/crt0.c.S
         ${MICROPY_PORT_DIR}/linker.ld
         ${MICROPY_PORT_DIR}/main.c
+        ${MICROPY_PORT_DIR}/modtheos.c
         ${MICROPY_PORT_DIR}/theos_mphal.c
     USES_TERMINAL
     VERBATIM

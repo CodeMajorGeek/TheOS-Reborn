@@ -15,6 +15,7 @@ set(LIBC_SOURCES
     stdlib_parse.c
     stdio.c
     syscall.c
+    time.c
     tls.c
     unistd.c
     theapp.c

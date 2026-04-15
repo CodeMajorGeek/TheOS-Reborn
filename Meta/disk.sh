@@ -16,6 +16,7 @@ set -euo pipefail
 [ -z "${THEOS_USERLAND_SHELLGUI:-}" ] && THEOS_USERLAND_SHELLGUI="Userland/Apps/TheShellGUI/TheShellGUI"
 [ -z "${THEOS_DRIVERLAND_DHCPD:-}" ] && THEOS_DRIVERLAND_DHCPD="Driverland/Daemons/TheDHCPd/TheDHCPd"
 [ -z "${THEOS_USERLAND_MICROPY:-}" ] && THEOS_USERLAND_MICROPY="Userland/Apps/TheMicroPython/TheMicroPython"
+[ -z "${THEOS_USERLAND_MICROPY_SCRIPTS:-}" ] && THEOS_USERLAND_MICROPY_SCRIPTS="Userland/Apps/TheMicroPython/scripts"
 [ -z "${THEOS_USERLAND_EMBEDDEDDOOM:-}" ] && THEOS_USERLAND_EMBEDDEDDOOM="Userland/Apps/TheEmbeddedDOOM/embeddedDOOM"
 [ -z "${THEOS_USERLAND_LIBC_SO:-}" ] && THEOS_USERLAND_LIBC_SO="Userland/Libraries/LibC/libc.so"
 [ -z "${THEOS_USERLAND_LIBTHETESTDYN_SO:-}" ] && THEOS_USERLAND_LIBTHETESTDYN_SO="Userland/Libraries/LibTheTestDyn/libthetestdyn.so"
@@ -58,6 +59,12 @@ fi
 if [ ! -f "$THEOS_USERLAND_MICROPY" ] && [ -f "Build/Userland/Apps/TheMicroPython/TheMicroPython" ]; then
 	THEOS_USERLAND_MICROPY="Build/Userland/Apps/TheMicroPython/TheMicroPython"
 fi
+if [ ! -d "$THEOS_USERLAND_MICROPY_SCRIPTS" ] && [ -d "../Userland/Apps/TheMicroPython/scripts" ]; then
+	THEOS_USERLAND_MICROPY_SCRIPTS="../Userland/Apps/TheMicroPython/scripts"
+fi
+if [ ! -d "$THEOS_USERLAND_MICROPY_SCRIPTS" ] && [ -d "Build/Userland/Apps/TheMicroPython/scripts" ]; then
+	THEOS_USERLAND_MICROPY_SCRIPTS="Build/Userland/Apps/TheMicroPython/scripts"
+fi
 if [ ! -f "$THEOS_USERLAND_EMBEDDEDDOOM" ] && [ -f "Build/Userland/Apps/TheEmbeddedDOOM/embeddedDOOM" ]; then
 	THEOS_USERLAND_EMBEDDEDDOOM="Build/Userland/Apps/TheEmbeddedDOOM/embeddedDOOM"
 fi
@@ -85,6 +92,7 @@ mkdir -p "$STAGE_DIR/bin"
 mkdir -p "$STAGE_DIR/drv"
 mkdir -p "$STAGE_DIR/lib"
 mkdir -p "$STAGE_DIR/system/fonts"
+mkdir -p "$STAGE_DIR/system/python"
 
 if [ -f "$THEOS_USERLAND_APP" ]; then
 	echo "[disk] install TheApp -> /bin/TheApp from '$THEOS_USERLAND_APP'"
@@ -154,6 +162,13 @@ if [ -f "$THEOS_USERLAND_MICROPY" ]; then
 	cp "$THEOS_USERLAND_MICROPY" "$STAGE_DIR/bin/TheMicroPython"
 else
 	echo "[disk] warning: TheMicroPython binary not found at '$THEOS_USERLAND_MICROPY'"
+fi
+
+if [ -d "$THEOS_USERLAND_MICROPY_SCRIPTS" ]; then
+	echo "[disk] install MicroPython scripts -> /system/python from '$THEOS_USERLAND_MICROPY_SCRIPTS'"
+	cp -a "$THEOS_USERLAND_MICROPY_SCRIPTS"/. "$STAGE_DIR/system/python/"
+else
+	echo "[disk] warning: MicroPython scripts dir not found at '$THEOS_USERLAND_MICROPY_SCRIPTS'"
 fi
 
 if [ -f "$THEOS_USERLAND_EMBEDDEDDOOM" ]; then

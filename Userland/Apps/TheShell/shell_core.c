@@ -62,6 +62,7 @@ static const shell_command_alias_t shell_command_aliases[] =
 {
     { "doom", "embeddedDOOM" },
     { "micropython", "TheMicroPython" },
+    { "mpy", "TheMicroPython" },
     { "windowserver", "TheWindowServer" }
 };
 

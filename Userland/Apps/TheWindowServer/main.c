@@ -50,11 +50,6 @@ int main(void)
         desktop.render_ctx_snapshot = NULL;
     }
 
-    if (ws_launch_gui_app("/bin/TheShellGUI") < 0)
-        WS_LOG("autostart TheShellGUI launch failed errno=%d\n", errno);
-    else
-        WS_LOG("autostart TheShellGUI launched\n");
-
     (void) pthread_mutex_lock(&desktop.render_mutex);
     ws_tiles_mark_all(&desktop);
     desktop.render_full_pending = true;
@@ -214,6 +209,12 @@ int main(void)
             ws_desktop_invalidate_chrome(&desktop);
             desktop.colors_dirty = false;
             layout_dirty = true;
+        }
+
+        if (ws_update_top_clock(&desktop))
+        {
+            layout_dirty = true;
+            had_activity = true;
         }
 
         if (layout_dirty || cursor_dirty)

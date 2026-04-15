@@ -51,25 +51,34 @@ int gettimeofday(struct timeval* tv, struct timezone* tz)
 {
     if (tv)
     {
-        syscall_cpu_info_t info;
-        uint64_t ticks = 0;
-        uint32_t tick_hz = 0;
-
-        if (sys_cpu_info_get(&info) == 0 && info.tick_hz != 0)
+        uint64_t rtc_seconds = sys_rtc_time_get();
+        if (rtc_seconds != 0ULL)
         {
-            ticks = info.ticks;
-            tick_hz = info.tick_hz;
-            LibC_time_tick_hz_cache = tick_hz;
+            tv->tv_sec = (time_t) rtc_seconds;
+            tv->tv_usec = 0;
         }
         else
         {
-            ticks = sys_tick_get();
-            tick_hz = LibC_time_tick_hz_cache;
-            if (tick_hz == 0)
-                tick_hz = 100U;
-        }
+            syscall_cpu_info_t info;
+            uint64_t ticks = 0;
+            uint32_t tick_hz = 0;
 
-        LibC_time_fill_timeval_from_ticks(tv, ticks, tick_hz);
+            if (sys_cpu_info_get(&info) == 0 && info.tick_hz != 0)
+            {
+                ticks = info.ticks;
+                tick_hz = info.tick_hz;
+                LibC_time_tick_hz_cache = tick_hz;
+            }
+            else
+            {
+                ticks = sys_tick_get();
+                tick_hz = LibC_time_tick_hz_cache;
+                if (tick_hz == 0)
+                    tick_hz = 100U;
+            }
+
+            LibC_time_fill_timeval_from_ticks(tv, ticks, tick_hz);
+        }
     }
 
     if (tz)

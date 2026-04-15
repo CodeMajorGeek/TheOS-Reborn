@@ -69,6 +69,9 @@
 #define SYS_MSGGET                        61
 #define SYS_MSGSND                        62
 #define SYS_MSGRCV                        63
+#define SYS_RTC_TIME_GET                  64
+/* Écriture directe vers KDEBUG (série / fichier tampon), indépendante du routage PTY/GUI. */
+#define SYS_KDEBUG_WRITE                  65
 
 #define SYS_CONSOLE_ROUTE_FLAG_CAPTURE   (1U << 0)
 #define SYS_CONSOLE_ROUTE_FLAG_TTY       (1U << 1)
