@@ -210,6 +210,7 @@ typedef struct syscall_process
     uint64_t rflags;
     uint64_t rsp;
     uint64_t pending_rax;
+    uint32_t last_cpu;
 } syscall_process_t;
 
 typedef struct syscall_console_route

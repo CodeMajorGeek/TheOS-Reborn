@@ -1,4 +1,9 @@
 theos_add_user_app(TheTest
     SOURCES
         main.c
+        thetest_main.c
+        thetest_args.c
+        thetest_wm.c
+    INCLUDES
+        ${CMAKE_SOURCE_DIR}/Userland/Libraries/EasyArgs/includes
 )

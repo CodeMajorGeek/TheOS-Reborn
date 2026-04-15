@@ -2851,7 +2851,7 @@ static void thetest_libdl_probe(void)
         printf("[TheTest] libdl probe: FAILED\n");
 }
 
-int main(int argc, char** argv, char** envp)
+int thetest_run_cli(int argc, char** argv, char** envp)
 {
     (void) argc;
     (void) argv;

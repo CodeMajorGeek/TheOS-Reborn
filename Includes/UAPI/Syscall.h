@@ -154,6 +154,7 @@
 #define SYS_PROC_FLAG_EXITING              (1U << 1)
 #define SYS_PROC_FLAG_TERMINATED_BY_SIGNAL (1U << 2)
 #define SYS_PROC_FLAG_DRIVERLAND           (1U << 3)
+#define SYS_PROC_FLAG_ON_CPU               (1U << 4)
 #define SYS_PROC_DOMAIN_KERNEL             0U
 #define SYS_PROC_DOMAIN_DRIVERLAND         2U
 #define SYS_PROC_DOMAIN_USERLAND           3U
@@ -212,6 +213,7 @@ typedef struct syscall_proc_info
     uint32_t domain;
     uint32_t flags;
     uint32_t current_cpu;
+    uint32_t last_cpu;
     uint32_t term_signal;
     int64_t exit_status;
 } syscall_proc_info_t;

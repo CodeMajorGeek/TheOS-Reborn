@@ -184,10 +184,18 @@ static const char* monitor_proc_domain(uint32_t domain)
     }
 }
 
-static const char* monitor_proc_state(uint32_t flags)
+static const char* monitor_proc_state(const syscall_proc_info_t* proc)
 {
+    if (!proc)
+        return "?";
+
+    uint32_t flags = proc->flags;
     if ((flags & SYS_PROC_FLAG_EXITING) == 0U)
-        return "running";
+    {
+        if ((flags & SYS_PROC_FLAG_ON_CPU) != 0U)
+            return "running";
+        return "idle";
+    }
 
     if ((flags & SYS_PROC_FLAG_TERMINATED_BY_SIGNAL) != 0U)
         return "signal";
@@ -430,7 +438,7 @@ static void monitor_render(const monitor_snapshot_t* snap,
         const syscall_proc_info_t* proc = &snap->procs[i];
         const char* kind = monitor_proc_kind(proc->flags);
         const char* domain = monitor_proc_domain(proc->domain);
-        const char* state = monitor_proc_state(proc->flags);
+        const char* state = monitor_proc_state(proc);
 
         char cpu_text[12];
         if (proc->current_cpu == SYS_PROC_CPU_NONE)

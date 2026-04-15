@@ -5407,6 +5407,7 @@ static int32_t Syscall_proc_ensure_current_locked(uint32_t cpu_index, const sysc
     proc->rflags = frame->rflags | SYSCALL_RFLAGS_IF;
     proc->rsp = frame->rsp;
     proc->pending_rax = 0;
+    proc->last_cpu = cpu_index;
 
     Syscall_state.cpu_current_proc[cpu_index] = (uint32_t) new_slot;
     return new_slot;
@@ -7029,6 +7030,7 @@ bool Syscall_try_dispatch_user_from_idle(uint32_t cpu_index)
     }
 
     Syscall_state.cpu_current_proc[cpu_index] = (uint32_t) next_slot;
+    next->last_cpu = cpu_index;
     Syscall_idle_claimed_slots[(uint32_t) next_slot] = 1U;
     Syscall_state.cpu_slice_ticks[cpu_index] = 0U;
     __atomic_store_n(&Syscall_state.cpu_need_resched[cpu_index], 0, __ATOMIC_RELEASE);
@@ -7170,6 +7172,7 @@ bool Syscall_handle_timer_preempt(interrupt_frame_t* frame, uint32_t cpu_index)
     }
 
     Syscall_state.cpu_current_proc[cpu_index] = (uint32_t) next_slot;
+    next->last_cpu = cpu_index;
     Syscall_state.cpu_slice_ticks[cpu_index] = 0;
     Syscall_proc_load_to_interrupt(next, frame);
     uintptr_t next_cr3 = next->cr3_phys;
@@ -7305,10 +7308,12 @@ uint64_t Syscall_interrupt_handler(uint64_t syscall_num, syscall_frame_t* frame,
 
             syscall_proc_info_t snapshot[SYSCALL_MAX_PROCS];
             uint32_t running_cpu[SYSCALL_MAX_PROCS];
+            uint32_t last_cpu[SYSCALL_MAX_PROCS];
             for (uint32_t i = 0; i < SYSCALL_MAX_PROCS; i++)
             {
                 memset(&snapshot[i], 0, sizeof(snapshot[i]));
                 running_cpu[i] = SYS_PROC_CPU_NONE;
+                last_cpu[i] = SYS_PROC_CPU_NONE;
             }
 
             uint32_t snapshot_count = 0;
@@ -7331,6 +7336,8 @@ uint64_t Syscall_interrupt_handler(uint64_t syscall_num, syscall_frame_t* frame,
                     continue;
                 if (snapshot_count >= SYSCALL_MAX_PROCS)
                     break;
+                if (proc->last_cpu < 256U)
+                    last_cpu[i] = proc->last_cpu;
 
                 syscall_proc_info_t* out = &snapshot[snapshot_count++];
                 out->pid = proc->pid;
@@ -7346,7 +7353,17 @@ uint64_t Syscall_interrupt_handler(uint64_t syscall_num, syscall_frame_t* frame,
                     out->flags |= SYS_PROC_FLAG_TERMINATED_BY_SIGNAL;
                 if (proc->domain == SYS_PROC_DOMAIN_DRIVERLAND)
                     out->flags |= SYS_PROC_FLAG_DRIVERLAND;
-                out->current_cpu = running_cpu[i];
+                if (running_cpu[i] != SYS_PROC_CPU_NONE)
+                {
+                    out->flags |= SYS_PROC_FLAG_ON_CPU;
+                    out->current_cpu = running_cpu[i];
+                    out->last_cpu = running_cpu[i];
+                }
+                else
+                {
+                    out->current_cpu = last_cpu[i];
+                    out->last_cpu = last_cpu[i];
+                }
                 out->term_signal = proc->terminated_by_signal ? (uint32_t) proc->term_signal : 0U;
                 out->exit_status = proc->exit_status;
             }
@@ -7870,6 +7887,7 @@ uint64_t Syscall_interrupt_handler(uint64_t syscall_num, syscall_frame_t* frame,
             child->rflags = frame->rflags | SYSCALL_RFLAGS_IF;
             child->rsp = frame->rsp;
             child->pending_rax = 0;
+            child->last_cpu = cpu_index;
             if (cpu_index < 256)
                 Syscall_state.cpu_need_resched[cpu_index] = 1;
             spin_unlock_irqrestore(&Syscall_state.proc_lock, lock_flags);
@@ -8893,6 +8911,7 @@ mprotect_out:
             thread->rflags = parent->rflags | SYSCALL_RFLAGS_IF;
             thread->rsp = thread_rsp;
             thread->pending_rax = 0;
+            thread->last_cpu = cpu_index;
 
             if (cpu_index < 256)
                 __atomic_store_n(&Syscall_state.cpu_need_resched[cpu_index], 1, __ATOMIC_RELEASE);
@@ -9248,6 +9267,7 @@ uint64_t Syscall_post_handler(uint64_t syscall_ret, syscall_frame_t* frame, uint
     }
     Syscall_state.cpu_slice_ticks[cpu_index] = 0;
     syscall_process_t* next = &Syscall_state.procs[next_slot];
+    next->last_cpu = cpu_index;
     frame->rdi = next->rdi;
     frame->rsi = next->rsi;
     frame->rdx = next->rdx;
