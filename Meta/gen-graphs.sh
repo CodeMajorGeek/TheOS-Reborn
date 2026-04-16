@@ -21,8 +21,8 @@ count_lines() {
 kernel_lines=$(count_lines "Kernel")
 userland_all_lines=$(count_lines "Userland")
 driverland_lines=$(count_lines "Driverland")
-micropython_lines=$(count_lines "Userland/Apps/MicroPython")
-embeddeddoom_lines=$(count_lines "Userland/Apps/embeddedDOOM")
+micropython_lines=$(count_lines "Userland/Apps/TheMicroPython")
+embeddeddoom_lines=$(count_lines "Userland/Apps/TheEmbeddedDOOM")
 
 userland_native_lines=$((userland_all_lines - micropython_lines - embeddeddoom_lines))
 if [ "${userland_native_lines}" -lt 0 ]; then

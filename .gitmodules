@@ -1,15 +1,16 @@
-[submodule "Userland/Apps/MicroPython"]
-	path = Userland/Apps/MicroPython
-	url = git@github.com:CodeMajorGeek/TheOS-Reborn.git
-	branch = submodules/micropython-theos
-[submodule "Userland/Libraries/EasyArgs"]
-	path = Userland/Libraries/EasyArgs
-	url = https://github.com/gouwsxander/easy-args.git
-[submodule "Userland/Apps/embeddedDOOM"]
-	path = Userland/Apps/embeddedDOOM
-	url = git@github.com:CodeMajorGeek/TheOS-Reborn.git
-	branch = submodules/embeddeddoom-theos
+[submodule "Userland/Apps/TheMicroPython"]
+	path = Userland/Apps/TheMicroPython
+	url = git@github.com:CodeMajorGeek/TheMicroPython.git
+	shallow = true
+[submodule "Userland/Libraries/TheEasyArgs"]
+	path = Userland/Libraries/TheEasyArgs
+	url = git@github.com:CodeMajorGeek/TheEasyArgs.git
+	shallow = true
+[submodule "Userland/Apps/TheEmbeddedDOOM"]
+	path = Userland/Apps/TheEmbeddedDOOM
+	url = git@github.com:CodeMajorGeek/TheEmbeddedDOOM.git
+	shallow = true
 [submodule "Userland/Apps/TheVim"]
 	path = Userland/Apps/TheVim
-	url = https://github.com/vim/vim.git
+	url = https://github.com/CodeMajorGeek/TheVim.git
 	shallow = true

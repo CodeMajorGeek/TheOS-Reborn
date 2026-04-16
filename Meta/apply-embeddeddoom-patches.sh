@@ -2,7 +2,13 @@
 set -euo pipefail
 
 [ -z "${THEOS_SOURCE_ROOT:-}" ] && THEOS_SOURCE_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
-[ -z "${THEOS_EMBEDDEDDOOM_SUBMODULE:-}" ] && THEOS_EMBEDDEDDOOM_SUBMODULE="${THEOS_SOURCE_ROOT}/Userland/Apps/embeddedDOOM"
+if [ -z "${THEOS_EMBEDDEDDOOM_SUBMODULE:-}" ]; then
+	if git -C "${THEOS_SOURCE_ROOT}/Userland/Apps/TheEmbeddedDOOM" rev-parse --is-inside-work-tree >/dev/null 2>&1; then
+		THEOS_EMBEDDEDDOOM_SUBMODULE="${THEOS_SOURCE_ROOT}/Userland/Apps/TheEmbeddedDOOM"
+	else
+		THEOS_EMBEDDEDDOOM_SUBMODULE="${THEOS_SOURCE_ROOT}/Userland/Apps/embeddedDOOM"
+	fi
+fi
 [ -z "${THEOS_EMBEDDEDDOOM_PATCH_DIR:-}" ] && THEOS_EMBEDDEDDOOM_PATCH_DIR="${THEOS_SOURCE_ROOT}/Meta/patches/embeddedDOOM"
 
 if [ ! -d "${THEOS_EMBEDDEDDOOM_PATCH_DIR}" ]; then

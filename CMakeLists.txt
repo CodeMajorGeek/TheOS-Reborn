@@ -44,8 +44,9 @@ if(THEOS_AUTO_PULL_SUBMODULES)
 	find_package(Git QUIET)
 	if(GIT_FOUND AND EXISTS "${CMAKE_SOURCE_DIR}/.git")
 		set(THEOS_REQUIRED_SUBMODULES
-			Userland/Libraries/EasyArgs
-			Userland/Apps/embeddedDOOM
+			Userland/Libraries/TheEasyArgs
+			Userland/Apps/TheMicroPython
+			Userland/Apps/TheEmbeddedDOOM
 			Userland/Apps/TheVim
 		)
 		message(STATUS "Initializing submodules: ${THEOS_REQUIRED_SUBMODULES}")
@@ -55,12 +56,20 @@ if(THEOS_AUTO_PULL_SUBMODULES)
 			RESULT_VARIABLE THEOS_SUBMODULE_INIT_RC
 		)
 		if(NOT THEOS_SUBMODULE_INIT_RC EQUAL 0)
-			message(FATAL_ERROR "Failed to initialize required submodules: ${THEOS_REQUIRED_SUBMODULES}")
+			message(STATUS "Retrying submodule init with legacy paths MicroPython / embeddedDOOM (pre-rename checkout)")
+			execute_process(
+				COMMAND ${GIT_EXECUTABLE} submodule update --init Userland/Apps/MicroPython Userland/Apps/embeddedDOOM
+				WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}
+				RESULT_VARIABLE THEOS_SUBMODULE_INIT_LEGACY_RC
+			)
+			if(NOT THEOS_SUBMODULE_INIT_LEGACY_RC EQUAL 0)
+				message(FATAL_ERROR "Failed to initialize required submodules: ${THEOS_REQUIRED_SUBMODULES} (and legacy paths failed too)")
+			endif()
 		endif()
 
 		if(THEOS_AUTO_PULL_SUBMODULES_REMOTE)
 			set(THEOS_TRACKED_REMOTE_SUBMODULES
-				Userland/Libraries/EasyArgs
+				Userland/Libraries/TheEasyArgs
 			)
 			message(STATUS "Updating tracked submodules to remote heads: ${THEOS_TRACKED_REMOTE_SUBMODULES}")
 			execute_process(

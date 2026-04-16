@@ -68,9 +68,6 @@ fi
 if [ ! -f "$THEOS_USERLAND_EMBEDDEDDOOM" ] && [ -f "Build/Userland/Apps/TheEmbeddedDOOM/embeddedDOOM" ]; then
 	THEOS_USERLAND_EMBEDDEDDOOM="Build/Userland/Apps/TheEmbeddedDOOM/embeddedDOOM"
 fi
-if [ ! -f "$THEOS_USERLAND_EMBEDDEDDOOM" ] && [ -f "Build/Userland/Apps/embeddedDOOM/embeddedDOOM" ]; then
-	THEOS_USERLAND_EMBEDDEDDOOM="Build/Userland/Apps/embeddedDOOM/embeddedDOOM"
-fi
 if [ ! -f "$THEOS_USERLAND_LIBC_SO" ] && [ -f "Build/Userland/Libraries/LibC/libc.so" ]; then
 	THEOS_USERLAND_LIBC_SO="Build/Userland/Libraries/LibC/libc.so"
 fi

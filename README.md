@@ -172,8 +172,8 @@ Core features currently implemented:
   - **`SYS_RTC_TIME_GET`** for wall-clock style reads where supported.
 - **MicroPython on TheOS**:
   - **`TheMicroPython`** installed as `/bin/TheMicroPython` and **`/bin/MicroPython`**; scripts staged under **`/system/python`** (see `Meta/disk.sh`).
-  - In-tree **port** under `Userland/Apps/MicroPython/ports/theos` with native module **`theos`** (CPU/sched/RCU/AHCI/proc snapshots, tick/sleep/yield, console routing by sid, window client calls, raw net stats, optional scheduler stress hook).
-  - **`PerfKit`**: MicroPython tooling under `Userland/Apps/TheMicroPython/scripts/perfkit` and entry **`/system/python/perfwm.py`** (live monitoring, stress mode, snapshot); details in `Userland/Apps/TheMicroPython/scripts/perfkit/README.md`.
+  - In-tree **port** under `Userland/Apps/TheMicroPython/ports/theos` with native module **`theos`** (CPU/sched/RCU/AHCI/proc snapshots, tick/sleep/yield, console routing by sid, window client calls, raw net stats, optional scheduler stress hook).
+  - **`PerfKit`**: scripts under `Userland/Apps/TheMicroPython/scripts/perfkit` and entry **`/system/python/perfwm.py`** (live monitoring, stress mode, snapshot); details in `Userland/Apps/TheMicroPython/scripts/perfkit/README.md`.
 - **Process / signal behavior**:
   - **`kill`** with terminating default actions (for example **`SIGTERM`**) ends the target **owner domain** and, in addition, **fork children** whose parent link matches that domain (see kernel `Syscall_signal_terminate_fork_children_of_owner_locked`), so closing a GUI that `fork()`’s a helper shell or monitor does not leave a stray child when the parent is signalled.
 
@@ -357,7 +357,7 @@ This section ties together the **windowing session**, **local IPC**, and **sysca
 | Shell / monitor GUIs | `Userland/Apps/TheShellGUI/`, `Userland/Apps/TheSystemMonitorGUI/` |
 | TheApp + spawn IPC | `Userland/Apps/TheApp/main.c`, `Userland/Libraries/LibC/theapp.c`, `theapp.h` |
 | AF_UNIX in kernel | `Kernel/Network/Unix.c`, `Includes/Network/Unix.h`, `Includes/UAPI/Net.h` |
-| MicroPython port + `theos` | `Userland/Apps/MicroPython/ports/theos/`, `Userland/Apps/TheMicroPython/` |
+| MicroPython port + `theos` | `Userland/Apps/TheMicroPython/ports/theos/` (sous-module) |
 | PerfKit (scripts) | `Userland/Apps/TheMicroPython/scripts/perfkit/`, `perfwm.py` |
 
 **Syscall IDs `45..65`** add mouse, console routing (including PTY-oriented sid routing), keyboard capture/inject, `pipe`, `futex`, SysV shm/msg, RTC read, and `kdebug` write—see the [Syscalls](#syscalls) table below.
@@ -378,6 +378,49 @@ If the repository is already cloned:
 ```bash
 git submodule sync --recursive
 git submodule update --init --recursive
+```
+
+### Updating upstream in dedicated forks (optional)
+
+The pinned third-party trees live under **`Userland/Apps/TheMicroPython`**, **`Userland/Apps/TheEmbeddedDOOM`**, and **`Userland/Libraries/TheEasyArgs`** (URLs point at `CodeMajorGeek` forks). Add `upstream` on each checkout to pull from the original projects:
+
+```bash
+# MicroPython
+git -C Userland/Apps/TheMicroPython remote add upstream https://github.com/micropython/micropython.git 2>/dev/null || true
+git -C Userland/Apps/TheMicroPython fetch upstream
+# embeddedDOOM (cnlohr lineage)
+git -C Userland/Apps/TheEmbeddedDOOM remote add upstream https://github.com/cnlohr/embeddedDOOM.git 2>/dev/null || true
+git -C Userland/Apps/TheEmbeddedDOOM fetch upstream
+# EasyArgs (single-header parser, forked as TheEasyArgs)
+git -C Userland/Libraries/TheEasyArgs remote add upstream https://github.com/gouwsxander/easy-args.git 2>/dev/null || true
+git -C Userland/Libraries/TheEasyArgs fetch upstream
+```
+
+Then merge or cherry-pick as needed, resolve conflicts, and push to `origin` on each fork before bumping the gitlink in TheOS-Reborn.
+
+If you still have the old library path `Userland/Libraries/EasyArgs` after a pull, rename the submodule once (same commit as before, no loss of history):
+
+```bash
+gh repo fork gouwsxander/easy-args --fork-name TheEasyArgs --clone=false
+git submodule deinit -f Userland/Libraries/EasyArgs
+git rm -f Userland/Libraries/EasyArgs
+rm -rf .git/modules/Userland/Libraries/EasyArgs
+git submodule add git@github.com:CodeMajorGeek/TheEasyArgs.git Userland/Libraries/TheEasyArgs
+git -C Userland/Libraries/TheEasyArgs checkout f259c28cd49fd90f922dad7d780fa6579a2fdf01
+git add .gitmodules Userland/Libraries/TheEasyArgs
+```
+
+Si ton arbre date d’avant ce regroupement : le sous-module MicroPython doit vivre sous **`Userland/Apps/TheMicroPython`**, et embeddedDOOM sous **`Userland/Apps/TheEmbeddedDOOM`**, avec `theos_port/i_video_theos.c` **dans** le sous-module DOOM et les scripts PerfKit **dans** le sous-module MicroPython. Commite ces fichiers dans tes forks, retire du superprojet tout ancien wrapper (fichiers suivis hors sous-module), puis :
+
+```bash
+git submodule deinit -f Userland/Apps/MicroPython 2>/dev/null || true
+git mv Userland/Apps/MicroPython Userland/Apps/TheMicroPython
+
+git submodule deinit -f Userland/Apps/embeddedDOOM 2>/dev/null || true
+git mv Userland/Apps/embeddedDOOM Userland/Apps/TheEmbeddedDOOM
+
+git submodule sync --recursive
+git submodule update --init Userland/Apps/TheMicroPython Userland/Apps/TheEmbeddedDOOM
 ```
 
 ### Prerequisites (Ubuntu/Debian)
@@ -440,17 +483,17 @@ ninja graphs        # regenerate project graphs
 - `THEOS_AUTO_PULL_SUBMODULES` (default `ON`)
   - initializes required submodules to pinned revisions during configure.
 - `THEOS_AUTO_PULL_SUBMODULES_REMOTE` (default `OFF`)
-  - optional remote-head update for selected tracked submodules (currently `EasyArgs` only).
+  - optional remote-head update for selected tracked submodules (currently `TheEasyArgs` only).
 - `THEOS_APPLY_EMBEDDEDDOOM_PATCHSET` (default `ON`)
-  - auto-applies `Meta/patches/embeddedDOOM/*.patch` on top of the pinned `embeddedDOOM` submodule.
+  - auto-applies `Meta/patches/embeddedDOOM/*.patch` on top of the pinned **`TheEmbeddedDOOM`** submodule.
 
 ### embeddedDOOM patch persistence
 
-The repository keeps `Userland/Apps/embeddedDOOM` as a submodule and versions TheOS-specific changes as patches in:
+The repository keeps `Userland/Apps/TheEmbeddedDOOM` as a submodule and versions TheOS-specific changes as patches in:
 
 - `Meta/patches/embeddedDOOM/`
 
-At configure time (`cmake ..`), `Meta/apply-embeddeddoom-patches.sh` applies that patchset. This keeps TheOS DOOM changes reproducible after a fresh `clone/pull`, without requiring a private fork.
+At configure time (`cmake ..`), `Meta/apply-embeddeddoom-patches.sh` applies that patchset. This keeps TheOS DOOM changes reproducible after a fresh `clone/pull`, on top of the pinned **`TheEmbeddedDOOM`** checkout (fork `CodeMajorGeek/TheEmbeddedDOOM`). The video port TheOS lives in `theos_port/i_video_theos.c` inside that submodule.
 
 ### Kernel CMake options
 
