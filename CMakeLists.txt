@@ -46,6 +46,7 @@ if(THEOS_AUTO_PULL_SUBMODULES)
 		set(THEOS_REQUIRED_SUBMODULES
 			Userland/Libraries/EasyArgs
 			Userland/Apps/embeddedDOOM
+			Userland/Apps/TheVim
 		)
 		message(STATUS "Initializing submodules: ${THEOS_REQUIRED_SUBMODULES}")
 		execute_process(

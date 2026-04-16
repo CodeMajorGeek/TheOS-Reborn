@@ -9,3 +9,7 @@
 	path = Userland/Apps/embeddedDOOM
 	url = git@github.com:CodeMajorGeek/TheOS-Reborn.git
 	branch = submodules/embeddeddoom-theos
+[submodule "Userland/Apps/TheVim"]
+	path = Userland/Apps/TheVim
+	url = https://github.com/vim/vim.git
+	shallow = true
